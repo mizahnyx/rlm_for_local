@@ -8,6 +8,7 @@ Commands:
   rlm-kernel demote PATH [--by PATH]    Demote an active page
   rlm-kernel search QUERY [--kind ...]  Search the vault
   rlm-kernel optimize --target ...      Run GEPA offline optimization
+  rlm-kernel compact [--confirm]        Compact memory notes (dry-run default)
 """
 
 from __future__ import annotations
@@ -65,6 +66,12 @@ def main(argv: list[str] | None = None) -> int:
                        default="how-to-work")
     p_opt.add_argument("--vault", type=Path, default=_default_vault())
 
+    # compact
+    p_compact = sub.add_parser("compact", help="Compact memory notes")
+    p_compact.add_argument("--confirm", action="store_true",
+                           help="Actually perform merges (default: dry-run)")
+    p_compact.add_argument("--vault", type=Path, default=_default_vault())
+
     args = parser.parse_args(argv)
 
     if args.command == "init":
@@ -81,6 +88,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_search(args)
     elif args.command == "optimize":
         return _cmd_optimize(args)
+    elif args.command == "compact":
+        return _cmd_compact(args)
     else:
         parser.print_help()
         return 0
@@ -111,6 +120,7 @@ def _cmd_index(args: argparse.Namespace) -> int:
 
 
 def _cmd_review(args: argparse.Namespace) -> int:
+    from rlm_kernel.gate import validate
     from rlm_kernel.vault import LocalVault
 
     vault = LocalVault(args.vault, init_git=False)
@@ -119,9 +129,17 @@ def _cmd_review(args: argparse.Namespace) -> int:
         print("No pending proposals.")
         return 0
     for p in pending:
-        print(f"  {p.path} — {p.frontmatter.title}")
+        report = validate(p, vault=vault)
+        status = "PASS" if report.passed else "FAIL"
+        print(f"  {p.path} — {p.frontmatter.title} [{status}]")
         print(f"    kind={p.frontmatter.kind.value} name={p.name}")
         print(f"    summary={p.frontmatter.summary[:100]}")
+        if report.errors:
+            for e in report.errors:
+                print(f"    ERROR: {e}")
+        if report.warnings:
+            for w in report.warnings:
+                print(f"    WARNING: {w}")
         print()
     return 0
 
@@ -179,6 +197,34 @@ def _cmd_optimize(args: argparse.Namespace) -> int:
     run_optimization(vault, target=args.target)
     return 0
 
+
+
+def _cmd_compact(args: argparse.Namespace) -> int:
+    from rlm_kernel.memory import MemoryManager
+    from rlm_kernel.vault import LocalVault
+
+    vault = LocalVault(args.vault, init_git=False)
+    idx_path = args.vault / ".index" / "meta.sqlite"
+    mm = MemoryManager(vault=vault, index_path=idx_path)
+
+    dry_run = not args.confirm
+    result = mm.compact(vault=vault, index_path=idx_path, dry_run=dry_run)
+
+    if dry_run:
+        candidates: list = result if isinstance(result, list) else []
+        if not candidates:
+            print("No merge candidates found.")
+            return 0
+        print(f"Dry run: {len(candidates)} merge candidate(s):")
+        for c in candidates:
+            print(f"  {c['title_a']} ~ {c['title_b']} "
+                  f"(similarity={c['similarity']:.2f})")
+        print("\nRun with --confirm to perform merges.")
+    else:
+        merged: int = result if isinstance(result, int) else 0
+        print(f"Compacted: {merged} note(s) merged.")
+
+    return 0
 
 if __name__ == "__main__":
     sys.exit(main())

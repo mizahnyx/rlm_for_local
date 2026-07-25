@@ -1,14 +1,18 @@
-"""Offline optimization — GEPA-style text evolution for harness prompts (§8, K4).
+"""Offline optimization — scaffold only, not yet implemented (§8, K4).
 
-Wraps rlm_local.completion as the evaluator, runs mutation passes on
-target text artifacts (prologue, how-to-work, nudge templates, few-shots),
-and gates promotion on held-out split improvement.
+STATUS: This module is a placeholder. The real K4 implementation (pending
+R1–R5 green gate) will:
+- Wrap rlm_local.completion as the evaluator via gepa.optimize_anything
+- Use the sub-tier 4B model as student and root-tier 8B as reflection LM
+- Feed templated harness warnings back as GEPA-style actionable feedback
+- Route candidates through the gate (propose → validate → held-out eval → promote)
+- Record optimized_by: gepa-run-<id> lineage in frontmatter
+- Run few-shot bootstrap (replay trainset, select canonical transcripts)
+- Enforce max_metric_calls 150–300 budget with tiny-profile caps
 
-The optimizer:
-1. Loads eval suites (verifiable tasks with needle-regex / numeric-tolerance metrics)
-2. Runs baseline scores against current prompt text
-3. Applies mutation passes with reflection
-4. Promotes winners that beat baseline on held-out split
+The current code is a hand-rolled mutation skeleton for development use only.
+It MUST NOT write to live contract pages or bypass the gate. See the K4-real
+section of docs/20260725-0838-rlm-kernel-conformity-review-addendum.md §3.
 """
 
 from __future__ import annotations
@@ -232,22 +236,16 @@ def _get_target_text(vault: Any, target: str) -> str | None:
 
 
 def _set_target_text(vault: Any, target: str, text: str) -> None:
-    """Set the text for a target artifact in the vault."""
-    page_map = {
-        "prologue": "contract/templates/prologue.md",
-        "how-to-work": "contract/how-to-work.md",
-        "nudges": "contract/templates/nudge-no-block.md",
-    }
-    path = page_map.get(target)
-    if path is None:
-        return
-    try:
-        page = vault.get(path)
-        if page:
-            page.body = text
-            vault.put(page, path)
-    except Exception:
-        pass
+    """No-op: scaffold does not write to live pages (D13).
+
+    Real K4 will route candidates through the gate: propose → validate →
+    held-out eval → promote with lineage.
+    """
+    import warnings
+    warnings.warn(
+        f"optimize._set_target_text is a no-op in scaffold mode. "
+        f"Target '{target}' would be written through the gate in K4-real."
+    )
 
 
 def _generate_mutations(text: str, target: str) -> list[str]:

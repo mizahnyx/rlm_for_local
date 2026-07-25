@@ -102,7 +102,7 @@ class LocalVault:
 
         pages: list[Page] = []
         for md_file in sorted(search_root.rglob("*.md")):
-            if ".index" in md_file.parts:
+            if ".index" in md_file.parts or ".git" in md_file.parts:
                 continue
             if "quarantine" in md_file.parts and prefix != "quarantine":
                 continue
@@ -126,7 +126,7 @@ class LocalVault:
         name_lower = name.lower()
         # Walk all .md files and match by basename without extension
         for md_file in self.root.rglob("*.md"):
-            if ".index" in md_file.parts or "quarantine" in md_file.parts:
+            if ".index" in md_file.parts or ".git" in md_file.parts or "quarantine" in md_file.parts:
                 continue
             file_stem = md_file.stem.lower()
             if file_stem == name_lower:

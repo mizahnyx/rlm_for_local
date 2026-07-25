@@ -97,6 +97,14 @@ class RootLoop:
             context_total_chars=context_len,
             shortcut_warn_fraction=profile.shortcut_warn_fraction,
         )
+
+        # Parser (D1: restored — was accidentally deleted in kernel edit)
+        self._parser = Parser(
+            max_consecutive_nudges=profile.max_consecutive_nudges,
+            max_consecutive_errors=profile.max_consecutive_errors,
+        )
+
+        # REPL
         self._repl = REPLSandbox(
             cell_timeout=profile.cell_timeout,
         )
@@ -114,15 +122,18 @@ class RootLoop:
             _context_type = f"{context_type}\n\nCore memory: {core_memory_summary}"
 
         # Build initial messages (byte-stable prefix)
-        # Use vault-first prompt loading if kernel is available
+        # D4: thread vault-assembled system prompt through build_messages
+        _system_prompt: str | None = None
+        _fewshots: list | None = None
         if self._kernel_bridge:
-            from rlm_local.prompts import load_system_prompt_from_vault
-            _system = load_system_prompt_from_vault(prompt_vars, self._kernel_bridge.vault)
-            _fewshots = load_system_prompt_from_vault.__self__  # not used, fallback
-        else:
-            _system = build_system_prompt(prompt_vars)
+            from rlm_local.prompts import load_system_prompt_from_vault, load_fewshots_from_vault
+            _system_prompt = load_system_prompt_from_vault(prompt_vars, self._kernel_bridge.vault)
+            _fewshots = load_fewshots_from_vault(self._kernel_bridge.vault)
 
-        messages = build_messages(query, context_len, _context_type, prompt_vars)
+        messages = build_messages(
+            query, context_len, _context_type, prompt_vars,
+            system_prompt=_system_prompt, fewshots=_fewshots,
+        )
 
         # ── Start REPL with context and helpers ───────────────────────────
         self._repl._kernel_bridge = self._kernel_bridge

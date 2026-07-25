@@ -100,7 +100,6 @@ class KernelBridge:
 
         Writes the proposed page to quarantine/ and returns the path.
         """
-        import ulid
 
         from rlm_kernel.schema import Frontmatter, Page, PageKind, PageStatus
 

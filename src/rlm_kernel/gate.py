@@ -470,6 +470,13 @@ def promote(
             f"Page status is '{page.frontmatter.status.value}', expected 'pending'"
         )
 
+    # Validate before promoting
+    report = validate(page, vault=vault)
+    if report.errors:
+        raise ValueError(
+            f"Cannot promote: validation failed: {'; '.join(report.errors)}"
+        )
+
     target_path = f"{page.kind.value}/{page.name}.md"
 
     # Name-conflict guard
@@ -598,8 +605,9 @@ def verify_quarantine_isolation(
 ) -> bool:
     """Assert that no quarantined pages leak into normal search results.
 
-    Performs a broad FTS search and confirms that every returned path lies
-    outside ``quarantine/``.
+    Performs a path-prefix scan on the index pages table and verifies:
+    1. No quarantined paths appear in the indexed pages table.
+    2. The count from search_quarantine matches (no orphaned quarantine files).
 
     Args:
         vault: The vault store.
@@ -608,14 +616,32 @@ def verify_quarantine_isolation(
     Returns:
         True if the isolation invariant holds; False otherwise.
     """
-    from rlm_kernel.search import search_vault
+    from rlm_kernel.index import Index
 
-    results = search_vault(
-        vault, index_path, query="*", k=200, detail="card"
-    )
-    for r in results:
-        if r["path"].startswith(QUANTINE_PREFIX):
-            return False
+    idx = Index(index_path)
+    try:
+        # Check indexed pages for quarantine paths
+        rows = idx.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM pages WHERE path LIKE ?",
+            ("quarantine/%",),
+        ).fetchone()
+        indexed_quarantine_count = rows["cnt"]
+    finally:
+        idx.close()
+
+    # Quarantine pages must NOT be indexed
+    if indexed_quarantine_count > 0:
+        return False
+
+    # Verify quarantine file count matches what search_quarantine returns
+    q_pages = search_quarantine(vault)
+    vault_q_count = len(q_pages)
+
+    # Filesystem-level count of quarantine files
+    all_q_paths = vault.list(prefix=QUARANTINE_PREFIX)
+    if len(all_q_paths) != vault_q_count:
+        return False
+
     return True
 
 

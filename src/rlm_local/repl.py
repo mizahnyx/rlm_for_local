@@ -112,16 +112,30 @@ def _harness_llm_query_batched(prompts, schema=None):
     resp = _recv()
     return resp.get("responses", ["Error: no response from harness"] * len(prompts))
 
+def _harness_search(query, k=5, kinds=None):
+    _send({"cmd": "search", "query": query, "k": k, "kinds": kinds})
+    resp = _recv()
+    return resp.get("result", "(no results)")
+
+def _harness_propose(kind, name, body, rationale=""):
+    _send({"cmd": "propose", "kind": kind, "name": name, "body": body, "rationale": rationale})
+    resp = _recv()
+    return resp.get("result", "Error: propose failed")
+
 # Inject into globals so exec'd code can use them
 llm_query = _harness_llm_query
 llm_query_batched = _harness_llm_query_batched
+search = _harness_search
+propose = _harness_propose
 
 # ── Scaffold namespace ────────────────────────────────────────────────────
 
 answer = {"content": "", "ready": False}
 context = None
 _SHOW_VARS_IGNORE = frozenset({"answer", "context", "__builtins__", "llm_query", "llm_query_batched",
+                                "search", "propose",
                                 "_harness_llm_query", "_harness_llm_query_batched",
+                                "_harness_search", "_harness_propose",
                                 "_SHOW_VARS_IGNORE", "_sock", "_send", "_recv",
                                 "json", "os", "re", "socket", "struct", "sys", "traceback",
                                 "StringIO", "_HOST", "_PORT"})
@@ -225,21 +239,17 @@ def main():
             })
 
         elif cmd == "init":
-            # Receive context as a raw string (worker treats it as str)
             raw_ctx = msg.get("context", "")
             context = raw_ctx
-            # Inject helpers if provided (K1: definitions from vault)
             helpers = msg.get("helpers", [])
             for h in helpers:
                 try:
                     exec(h["code"], globals())
-                    exec(f"{h['name']} = _harness_search", globals()) if h["name"] == "search" else None
                 except Exception:
                     pass
             _send({"type": "result", "status": "ok"})
 
         elif cmd == "search":
-            # Proxy search to harness (K1)
             query = msg.get("query", "")
             k = msg.get("k", 5)
             kinds = msg.get("kinds")
@@ -254,7 +264,6 @@ def main():
             })
 
         elif cmd == "propose":
-            # Proxy propose to harness (K1)
             _send({"cmd": "propose", "kind": msg.get("kind", ""),
                     "name": msg.get("name", ""), "body": msg.get("body", ""),
                     "rationale": msg.get("rationale", "")})
@@ -265,6 +274,7 @@ def main():
                 "stderr": "",
                 "final_answer": None,
             })
+
         elif cmd == "shutdown":
             _sock.close()
             break
@@ -308,7 +318,7 @@ class REPLSandbox:
         # Write worker script
         tmpdir = Path(tempfile.mkdtemp(prefix="rlm_repl_"))
         worker_path = tmpdir / "_worker.py"
-        worker_path.write_text(_WORKER_SCRIPT)
+        worker_path.write_text(_WORKER_SCRIPT, encoding="utf-8")
         self._worker_path = worker_path
 
         # Bind server socket

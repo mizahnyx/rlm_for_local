@@ -10,12 +10,16 @@ Tables:
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
 
 from rlm_kernel.schema import Page, PageKind
 from rlm_kernel.vault import VaultStore
+
+
+WIKILINK_PATTERN = re.compile(r"\[\[([^\]]+)\]\]")
 
 
 _SCHEMA_SQL = """
@@ -27,6 +31,7 @@ CREATE TABLE IF NOT EXISTS pages (
     title TEXT NOT NULL,
     summary TEXT NOT NULL,
     hash TEXT,
+    idx_hash TEXT,
     version INTEGER DEFAULT 1,
     status TEXT DEFAULT 'active',
     updated TEXT
@@ -104,16 +109,21 @@ class Index:
         for page in pages:
             self._index_page(page)
         self.conn.commit()
-
     def _index_page(self, page: Page) -> None:
         """Insert or replace a single page in the index."""
         fm = page.frontmatter
+        # Clean up any existing data for this path (handles id changes)
+        old = self.conn.execute(
+            "SELECT id FROM pages WHERE path = ?", (page.path,)
+        ).fetchone()
+        if old and old["id"] != fm.id:
+            self.conn.execute("DELETE FROM tags WHERE page_id = ?", (old["id"],))
         self.conn.execute(
-            """INSERT OR REPLACE INTO pages (id, path, kind, name, title, summary, hash, version, status, updated)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT OR REPLACE INTO pages (id, path, kind, name, title, summary, hash, idx_hash, version, status, updated)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 fm.id, page.path, fm.kind.value, fm.name, fm.title,
-                fm.summary, fm.hash, fm.version, fm.status.value,
+                fm.summary, fm.hash, page.content_hash, fm.version, fm.status.value,
                 fm.updated.isoformat() if fm.updated else None,
             ),
         )
@@ -124,7 +134,19 @@ class Index:
                 "INSERT OR IGNORE INTO tags (page_id, tag) VALUES (?, ?)",
                 (fm.id, tag),
             )
+        # Links — extract wikilinks from body
+        self.conn.execute("DELETE FROM links WHERE src = ?", (page.path,))
+        for link_text in WIKILINK_PATTERN.findall(page.body):
+            target = link_text.split("|")[0].split("#")[0].strip()
+            if target:
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO links (src, dst) VALUES (?, ?)",
+                    (page.path, target),
+                )
         # FTS — standalone table, direct insert
+        self.conn.execute(
+            "DELETE FROM fts_pages WHERE path = ?", (page.path,),
+        )
         self.conn.execute(
             """INSERT INTO fts_pages (path, kind, name, title, summary, body)
                VALUES (?, ?, ?, ?, ?, ?)""",
@@ -142,6 +164,13 @@ class Index:
             "SELECT * FROM pages WHERE path = ?", (path,)
         ).fetchone()
         return dict(row) if row else None
+
+    def get_backlinks(self, path: str) -> list[str]:
+        """Return paths of pages that link to this page via wikilinks."""
+        rows = self.conn.execute(
+            "SELECT src FROM links WHERE dst = ? ORDER BY src", (path,)
+        ).fetchall()
+        return [r["src"] for r in rows]
 
     def fts_search(self, query: str, limit: int = 40,
                    kinds: list[str] | None = None) -> list[dict[str, Any]]:
@@ -193,13 +222,14 @@ class Index:
             row = indexed[path]
             self.conn.execute("DELETE FROM pages WHERE path = ?", (path,))
             self.conn.execute("DELETE FROM tags WHERE page_id = ?", (row["id"],))
+            self.conn.execute("DELETE FROM links WHERE src = ?", (path,))
             self.conn.execute("DELETE FROM fts_pages WHERE path = ?", (path,))
 
         # Add new / update changed
         for path, page in vault_pages.items():
             if path not in indexed:
                 self._index_page(page)
-            elif page.content_hash != (indexed[path].get("hash") or ""):
+            elif page.content_hash != (indexed[path].get("idx_hash") or ""):
                 # Hash changed — reindex
                 self._index_page(page)
 

@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-import ulid
+from rlm_kernel._ulid import new as _ulid_new
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -40,9 +40,7 @@ class PageStatus(str, Enum):
 # ── ULID helper ────────────────────────────────────────────────────────────
 
 def _new_ulid() -> str:
-    return str(ulid.ULID())
-
-
+    return _ulid_new()
 # ── Frontmatter ────────────────────────────────────────────────────────────
 
 SHA256_PATTERN = re.compile(r"^sha256:[a-f0-9]{64}$")

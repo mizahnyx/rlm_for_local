@@ -133,6 +133,44 @@ def _slugify(name: str) -> str:
     return slug[:64].strip("-") or "untitled"
 
 
+def _extract_via_llm(llm: Any, text: str) -> tuple[str, list[str]]:
+    """Extract summary and keywords using an LLM callable.
+
+    Args:
+        llm: A callable ``prompt → str``.
+        text: Raw text to summarize.
+
+    Returns:
+        A tuple of ``(summary: str, keywords: list[str])``.
+    """
+    prompt = (
+        "Extract a one-sentence summary (max 200 chars) and up to 5 "
+        "lowercase keyword tags from the following text.\n"
+        "Respond with exactly two lines:\n"
+        "Summary: <summary>\n"
+        "Keywords: <keyword1, keyword2, ...>\n\n"
+        f"Text:\n{text}"
+    )
+    response = llm(prompt)
+
+    # Parse the structured response
+    summary = ""
+    keywords: list[str] = []
+    for line in response.strip().split("\n"):
+        if line.lower().startswith("summary:"):
+            summary = line[len("summary:"):].strip()
+        elif line.lower().startswith("keywords:"):
+            kw_part = line[len("keywords:"):].strip()
+            keywords = [k.strip().lower() for k in kw_part.split(",") if k.strip()]
+
+    if not summary:
+        summary = _extract_summary(text)  # fallback
+    if not keywords:
+        keywords = _extract_keywords(text)  # fallback
+
+    return summary, keywords
+
+
 # ── Core memory ──────────────────────────────────────────────────────────────
 
 def _ensure_core_memory_dir(vault: VaultStore) -> None:
@@ -173,16 +211,22 @@ class MemoryManager:
         vault: VaultStore | None = None,
         text: str = "",
         tags: list[str] | None = None,
+        llm: Any | None = None,
     ) -> Page:
         """Create a memory note from raw text.
 
-        Extracts title, summary, and keywords via regex (no LLM).
+        Extracts title, summary, and keywords. When *llm* is provided
+        (a callable ``prompt → str``), it is used for summary and keyword
+        extraction via a template prompt. Otherwise regex extraction is
+        the fallback.
+
         Stores the page under memory/notes/<slug>.md.
 
         Args:
             vault: vault store (uses constructor default if omitted).
             text: raw text to memoize.
             tags: optional explicit tags (merged with extracted keywords).
+            llm: optional callable for LLM-based extraction.
 
         Returns:
             The created Page.
@@ -192,8 +236,13 @@ class MemoryManager:
             raise ValueError("No vault provided")
 
         title = _extract_title(text)
-        summary = _extract_summary(text)
-        keywords = _extract_keywords(text)
+
+        if llm is not None and callable(llm):
+            summary, keywords = _extract_via_llm(llm, text)
+        else:
+            summary = _extract_summary(text)
+            keywords = _extract_keywords(text)
+
         if tags:
             for t in tags:
                 if t.lower() not in keywords:
@@ -418,8 +467,9 @@ class MemoryManager:
         self,
         vault: VaultStore | None = None,
         index_path: Path | None = None,
-        similarity_threshold: float = 0.75,
-    ) -> int:
+        similarity_threshold: float = 0.85,
+        dry_run: bool = True,
+    ) -> int | list[dict[str, Any]]:
         """Merge near-duplicate notes by title similarity.
 
         Groups notes under memory/notes/, merges groups whose titles
@@ -431,9 +481,14 @@ class MemoryManager:
             vault: vault store.
             index_path: path to index (rebuilt after compaction).
             similarity_threshold: minimum title similarity to merge (0-1).
+                Defaults to 0.85.
+            dry_run: When True (default), returns a list of merge candidate
+                dicts without modifying files. When False, performs merges.
 
         Returns:
-            Number of notes merged (i.e., marked superseded).
+            When *dry_run* is True: list of candidate dicts with keys
+            ``title_a``, ``title_b``, ``similarity``.
+            When *dry_run* is False: number of notes merged.
         """
         v = vault if vault is not None else self._vault
         if v is None:
@@ -443,10 +498,29 @@ class MemoryManager:
         # Exclude core memory from compaction
         notes = [p for p in notes if p.path != _CORE_MEMORY_PATH]
         if len(notes) < 2:
-            return 0
+            return [] if dry_run else 0
+
+        # Build candidate pairs
+        candidates: list[dict[str, Any]] = []
+        for i, a in enumerate(notes):
+            for b in notes[i + 1:]:
+                ratio = SequenceMatcher(
+                    None,
+                    a.frontmatter.title.lower(),
+                    b.frontmatter.title.lower(),
+                ).ratio()
+                if ratio >= similarity_threshold:
+                    candidates.append({
+                        "title_a": a.frontmatter.title,
+                        "title_b": b.frontmatter.title,
+                        "similarity": round(ratio, 4),
+                    })
+
+        if dry_run:
+            return candidates
 
         # Group by title similarity
-        merged: set[str] = set()  # paths of notes that got merged into another
+        merged: set[str] = set()
         groups: list[list[Page]] = []
 
         remaining = list(notes)
@@ -503,8 +577,6 @@ class MemoryManager:
                 idx.close()
 
         return merge_count
-
-
 # ── Module-level convenience ─────────────────────────────────────────────────
 
 # Expose decay_score at module level for direct import

@@ -95,16 +95,28 @@ def build_messages(
     context_len: int,
     context_type: str,
     prompt_vars: dict,
+    *,
+    system_prompt: str | None = None,
+    fewshots: list[tuple[str, str]] | None = None,
 ) -> list[dict[str, str]]:
     """Build the initial message list for a RootLoop.
 
     Includes: system prompt, metadata user message, prologue, and one few-shot.
     The few-shot is part of the byte-stable prefix for caching (R4.1, §5.5).
+
+    Args:
+        system_prompt: Optional override for the system prompt. If None,
+            the hardcoded SYSTEM_PROMPT (config-injected) is used.
+        fewshots: Optional override for few-shot examples. If None,
+            the hardcoded FEWSHOT_EXAMPLE is used.
     """
     from rlm_local.templates import METADATA_TEMPLATE, PROLOGUE
 
+    sp = system_prompt if system_prompt is not None else build_system_prompt(prompt_vars)
+    fs = fewshots if fewshots is not None else list(FEWSHOT_EXAMPLE)
+
     messages: list[dict[str, str]] = [
-        {"role": "system", "content": build_system_prompt(prompt_vars)},
+        {"role": "system", "content": sp},
     ]
 
     # Metadata — query is here, context is not (R2.1, R2.2)
@@ -121,7 +133,7 @@ def build_messages(
     messages.append({"role": "user", "content": PROLOGUE})
 
     # Load-bearing few-shot: demonstrates the exact format (R4.1)
-    for role, content in FEWSHOT_EXAMPLE:
+    for role, content in fs:
         messages.append({"role": role, "content": content})
 
     return messages
