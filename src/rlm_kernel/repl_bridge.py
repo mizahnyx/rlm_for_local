@@ -29,23 +29,39 @@ class KernelBridge:
     def get_helper_definitions(self) -> list[dict[str, str]]:
         """Collect active helper definitions from the vault for REPL injection.
 
-        Returns list of {"name": str, "code": str} dicts suitable for the
-        `helpers` payload in the REPL init command.
+        Uses index-backed listing when the index exists (O(1) SQL query),
+        falling back to full vault walk.
         """
-        try:
-            helpers = self.vault.list(kind="helper")
-        except Exception:
-            return []
-
         defs: list[dict[str, str]] = []
-        for page in helpers:
-            if page.frontmatter.status.value != "active":
-                continue
-            try:
-                hd = HelperDef.from_page(page)
-                defs.append(hd.to_dict())
-            except Exception:
-                continue
+        try:
+            # Fast path: index-backed listing (G4)
+            if self.index_path.exists():
+                from rlm_kernel.index import Index
+                idx = Index(self.index_path)
+                try:
+                    paths = idx.list_paths(kind="helper", status="active")
+                    for path in paths:
+                        page = self.vault.get(path)
+                        if page is None:
+                            continue
+                        hd = HelperDef.from_page(page)
+                        defs.append(hd.to_dict())
+                    return defs
+                finally:
+                    idx.close()
+
+            # Slow path: full vault walk
+            helpers = self.vault.list(kind="helper")
+            for page in helpers:
+                if page.frontmatter.status.value != "active":
+                    continue
+                try:
+                    hd = HelperDef.from_page(page)
+                    defs.append(hd.to_dict())
+                except Exception:
+                    continue
+        except Exception:
+            pass
         return defs
 
     def get_helper_summaries(self) -> list[str]:

@@ -235,6 +235,24 @@ class Index:
 
         self.conn.commit()
 
+    def list_paths(self, kind: str | None = None, status: str = "active") -> list[str]:
+        """Return page paths matching kind/status from the index (avoiding full-tree parse).
+
+        This is the fast path for KernelBridge and search — O(1) SQL query
+        instead of O(n) full-vault parse per call.
+        """
+        if kind is not None:
+            rows = self.conn.execute(
+                "SELECT path FROM pages WHERE kind = ? AND status = ? ORDER BY path",
+                (kind, status),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT path FROM pages WHERE status = ? ORDER BY path",
+                (status,),
+            ).fetchall()
+        return [r["path"] for r in rows]
+
 
 def rebuild_index(vault: VaultStore, db_path: Path) -> Index:
     """Convenience: build an index from a vault and return it."""

@@ -301,9 +301,12 @@ harness's own wording becomes evolvable while maintaining per-version stability.
 
 #### `template`
 Individual template strings (nudge messages, warning texts, headers). Each
-corresponds to one constant in `rlm_local.templates`. The vault-first loader
-maps template names to `contract/templates/<name>.md`.
-
+corresponds to one constant in `rlm_local.templates`. Template pages are
+seeded into the vault under `contract/templates/` as **introspection-only
+content** (P6: the model can read its own conventions via `search()`).
+Behavior wiring — loading template text from vault pages at runtime — is
+deferred to a later phase; currently, `rlm_local` uses its hardcoded
+package-bundled template constants.
 #### `definition`
 Pure ontology: concepts, conventions, entities, "how we do X here." No code.
 Authored by human or model. Example: a definition page for "decomposition"
@@ -958,11 +961,15 @@ note accumulation ("image rot") without requiring LLM judgment.
 
 ---
 
-## 9. Offline Optimization
+## 9. Offline Optimization — Scaffold, Not Yet Implemented
 
-The optimizer (K4) applies GEPA-style text evolution to the harness's
-textual surface — prompts, templates, few-shots — using `rlm_local`
-itself as the evaluator.
+> **STATUS:** This module is a placeholder. The current `optimize.py` implements
+> hand-rolled string mutations for development use only. The real K4
+> implementation — GEPA-based text evolution with a reflection LM, held-out
+> gating, and gate-routed promotion — is specified but not built. See
+> `docs/20260725-0838-rlm-kernel-conformity-review-addendum.md` §3 for the
+> full specification. The sections below describe the **target design**. No
+> live contract pages are modified by the current scaffold.
 
 ### 9.1 Eval Suites
 
@@ -1049,21 +1056,17 @@ The vault-first assembly order:
 3. `contract/how-to-work.md` body.
 4. Fallback: if any vault page is missing, the hardcoded `SYSTEM_PROMPT` is used.
 
-### 10.2 Template Loading
+### 10.2 Template Pages (Introspection-Only)
 
-```python
-from rlm_local.templates import load_template
+Template pages are seeded under `contract/templates/` for **introspection**
+(P6 — the model can `search("nudge no block")` and read its own conventions).
+Behavior wiring — loading template text from vault pages at runtime — is
+**deferred** to a later phase. Currently, `rlm_local` always uses its
+hardcoded package-bundled template constants. The `load_template()` function
+and `_TEMPLATE_PAGE_MAP` were removed in R3-D10 to eliminate dead code.
 
-nudge = load_template("NUDGE_NO_BLOCK", vault=vault)
-# Returns the body of contract/templates/nudge-no-block.md,
-# or the hardcoded NUDGE_NO_BLOCK constant if vault is absent.
-```
-
-The template page map covers all 16 template constants. Each maps to a page
-under `contract/templates/`. This is how the harness's own wording becomes
-evolvable — edit the template page, re-seed, and the next completion uses
-the new text. The GEPA optimizer can target these pages directly.
-
+When vault-template loading is implemented (K3b+), the GEPA optimizer will
+be able to evolve templates against held-out eval suites.
 ### 10.3 Byte-Stable Prefix Discipline
 
 Even with vault-first loading, the byte-stable prefix invariant is maintained:
@@ -1188,8 +1191,9 @@ The kernel extends `rlm_local` with minimal, backward-compatible changes:
 
 #### `templates.py`
 
-- `load_template(name, vault)` — maps template constant names to
-  `contract/templates/` pages. Falls back to the hardcoded constant.
+All constants are `str` values, most are `.format()` templates. Template
+pages exist in the vault for introspection only (P6); behavior wiring is
+deferred. See §10.2.
 
 #### `__init__.py`
 

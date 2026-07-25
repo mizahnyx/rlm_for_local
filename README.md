@@ -111,6 +111,28 @@ User ──► completion(query, context)
                                     └─────────┘
 ```
 
+## rlm-kernel (Evolvable Layer)
+
+The companion `rlm-kernel` package makes the harness **evolvable** — its
+prompts, helpers, few-shots, and memory become human-readable pages in a
+git-versioned wiki that the system can grow itself. Features include:
+
+- **Vault** — page CRUD with atomic writes and git versioning
+- **Index + Search** — SQLite FTS5 with BM25 ranking over all pages
+- **REPL Bridge** — vault-defined helpers injected into the REPL namespace;
+  `search()` and `propose()` available from REPL code
+- **Gate** — quarantine → validate → promote lifecycle for model-authored content
+- **Memory** — cross-session notes with decay arithmetic, compaction, and
+  pinned core-memory
+
+**K4 offline optimization (GEPA) is a scaffold — not yet implemented.**
+The current `optimize.py` is a placeholder for development use only. Real
+GEPA-based text evolution will be implemented after the R1–R6 gate is fully
+green. See `docs/20260725-0838-rlm-kernel-conformity-review-addendum.md` §3
+for the full specification.
+
+Full documentation: [`docs/rlm-kernel-manual.md`](docs/rlm-kernel-manual.md).
+
 ## Design Principles
 
 Built on [Zhang & Khattab's RLM research](https://alexzhang13.github.io/blog/2026/harness/):
