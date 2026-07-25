@@ -29,6 +29,7 @@ def completion(
     config: Config | None = None,
     logger: TrajectoryLogger | None = None,
     log_path: str | None = None,
+    kernel_bridge: Any = None,
     **overrides: Any,
 ) -> str:
     """Run a single RLM completion.
@@ -43,6 +44,7 @@ def completion(
         config: Optional pre-built Config. Created from profile if not provided.
         logger: Optional TrajectoryLogger. Created if log_path is given.
         log_path: Path for JSONL trajectory log. Creates a logger automatically.
+        kernel_bridge: Optional KernelBridge for vault-aware operation (K1).
         **overrides: Individual config value overrides (e.g. max_turns=10).
 
     Returns:
@@ -67,22 +69,10 @@ def completion(
     if logger is None and log_path:
         logger = TrajectoryLogger(log_path)
 
-    loop = RootLoop(config, backend, logger)
+    loop = RootLoop(config, backend, logger, kernel_bridge=kernel_bridge)
     try:
         return loop.run(query, context)
     finally:
         loop.shutdown()
         if isinstance(backend, HTTPModelBackend):
             backend.close()
-
-
-# Re-export key types
-__all__ = [
-    "completion",
-    "Config",
-    "HTTPModelBackend",
-    "ModelBackend",
-    "RootLoop",
-    "TrajectoryLogger",
-    "load_config",
-]

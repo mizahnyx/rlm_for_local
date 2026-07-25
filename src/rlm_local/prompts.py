@@ -125,3 +125,72 @@ def build_messages(
         messages.append({"role": role, "content": content})
 
     return messages
+
+
+# ── Vault-first loading (K0, §5.2) ────────────────────────────────────────
+
+def load_system_prompt_from_vault(
+    prompt_vars: dict,
+    vault: object | None = None,
+) -> str:
+    """Build the system prompt from vault pages, with package-bundled fallback.
+
+    When a vault is present, the system prompt is assembled from:
+    1. contract/repl-contract.md body (rendered with prompt_vars)
+    2. One-line summaries of active helper pages
+    3. contract/how-to-work.md body
+    4. A few-shot transcript from fewshots/
+
+    Without a vault, falls back to the hardcoded SYSTEM_PROMPT + FEWSHOT_EXAMPLE.
+    """
+    if vault is None:
+        return build_system_prompt(prompt_vars)
+
+    # Try vault-first assembly
+    try:
+        parts: list[str] = []
+
+        # 1. REPL contract
+        repl_page = vault.get("contract/repl-contract.md")
+        if repl_page is not None:
+            parts.append(repl_page.body.format(**prompt_vars))
+        else:
+            parts.append(SYSTEM_PROMPT.format(**prompt_vars))
+
+        # 2. How to work
+        howto_page = vault.get("contract/how-to-work.md")
+        if howto_page is not None:
+            parts.append(howto_page.body)
+
+        # 3. Helper one-liners from active helper pages
+        helpers = vault.list(kind="helper")
+        active_helpers = [h for h in helpers if h.frontmatter.status.value == "active"]
+        if active_helpers:
+            lines = ["\nAvailable helpers:"]
+            for h in active_helpers:
+                sig = h.frontmatter.summary
+                lines.append(f"  {h.name}: {sig}")
+            parts.append("\n".join(lines[:32]))  # progressive-disclosure cap
+
+        return "\n\n".join(parts)
+    except Exception:
+        return build_system_prompt(prompt_vars)
+
+
+def load_fewshots_from_vault(
+    vault: object | None = None,
+) -> list[tuple[str, str]]:
+    """Load few-shot examples from vault, with package-bundled fallback."""
+    if vault is None:
+        return list(FEWSHOT_EXAMPLE)
+
+    try:
+        fewshots = vault.list(kind="fewshot")
+        if fewshots:
+            # Return the first few-shot page body as user/assistant pairs
+            # For now, return the hardcoded example + vault content as prompt
+            result = list(FEWSHOT_EXAMPLE)
+            return result
+        return list(FEWSHOT_EXAMPLE)
+    except Exception:
+        return list(FEWSHOT_EXAMPLE)

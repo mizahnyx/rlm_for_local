@@ -1,6 +1,8 @@
 # RLM Local: A Recursive Language Model Harness for Small Models
 
-**Version 0.1.0 | July 2026**
+**Comprehensive System Documentation**  
+**Version 0.1.0 | July 2026**  
+**Updated for rlm-kernel 0.1.0 integration**
 
 ---
 
@@ -15,6 +17,10 @@ OpenAI-compatible local inference server—llama.cpp, Ollama, LM Studio, MLX—a
 transforms a single small model into a **recursive reasoning system** capable of
 answering questions over contexts 10×, 50×, or 100× larger than the model's own
 context window.
+
+When paired with the companion `rlm-kernel` package, the harness gains
+**evolvability**: its prompts, helpers, few-shots, and memory become
+human-readable pages in a versioned wiki that the system can grow itself.
 
 This book documents every module, every configuration knob, every design decision,
 and every failure mode. It is written for the engineer who needs to understand *why*
@@ -37,27 +43,29 @@ a thing works, not just *that* it works.
 11. [Prompts and Templates](#11-prompts-and-templates)
 12. [Trajectory Logger](#12-trajectory-logger)
 13. [Hardware Profiles](#13-hardware-profiles)
-14. [Failure Modes and Mitigations](#14-failure-modes-and-mitigations)
-15. [Testing and Conformance](#15-testing-and-conformance)
-16. [API Reference](#16-api-reference)
+14. [Kernel Integration](#14-kernel-integration)
+15. [Failure Modes and Mitigations](#15-failure-modes-and-mitigations)
+16. [Testing and Conformance](#16-testing-and-conformance)
+17. [API Reference](#17-api-reference)
 
 ---
 
 ## 1. Architecture Overview
 
 The RLM harness wraps a single local model and presents it as a
-**drop-in `completion()` function**—one call, one answer. Everything else is internal.
+**drop-in `completion()` function** — one call, one answer. Everything else is internal.
 
 ### 1.1 The Big Picture
 
 ```
-User ──► completion(query, context)
+User ──► completion(query, context, kernel_bridge=...)
               │
               ▼
      ┌──────────────────────────────────────────────────┐
      │                   RootLoop                       │
      │                                                  │
      │  messages = [system + few-shot + metadata]       │
+     │            + [core-memory summary]  ← kernel     │
      │                                                  │
      │  for turn in 1..max_turns:                       │
      │     text  = ModelBackend.chat(messages)   ◄──── HTTP ──── llama-server
@@ -68,9 +76,9 @@ User ──► completion(query, context)
      │                                                  │
      │  return ForcedFinalizer(messages)                │
      └──────────────────────────────────────────────────┘
-              │
-              ▼
-     TrajectoryLogger (JSONL)
+              │                        │
+              ▼                        ▼
+     TrajectoryLogger (JSONL)    KernelBridge (vault)
 ```
 
 ### 1.2 The Core Idea
@@ -86,7 +94,7 @@ The root model **never sees the user's context data**. Instead:
 
 This is **context offloading**: the root model's conversation history stays short
 and uniform regardless of context size. Two different 10-million-character tasks
-look structurally identical to the root model—a property called
+look structurally identical to the root model — a property called
 **equivalence class induction** that is the theoretical foundation of RLMs.
 
 ### 1.3 Module Dependency Graph
@@ -103,6 +111,18 @@ __init__.py  (public API)
          ├── subcall_manager.py   (budgets, concurrency)
          ├── parser.py            (rescue parsing, nudges)
          └── logger.py            (JSONL trajectory)
+
+rlm_kernel (optional integration layer)
+    ├── schema.py         → Page/Frontmatter models
+    ├── vault.py          → Page CRUD, git versioning
+    ├── index.py          → SQLite + FTS5 search index
+    ├── search.py         → BM25 search with card formatting
+    ├── repl_bridge.py    → Helper injection, search/propose proxy
+    ├── seed.py           → First-run vault initialization
+    ├── gate.py           → Quarantine → validate → promote lifecycle
+    ├── memory.py         → Notes, decay, compaction, core memory
+    ├── optimize.py       → GEPA text evolution for prompts
+    └── cli.py            → Command-line interface
 ```
 
 ---
@@ -117,8 +137,8 @@ cd rlm-local
 uv sync
 ```
 
-Dependencies: Python ≥ 3.12, `httpx`, `setuptools`. The harness is pure Python with
-no native extensions.
+Dependencies: Python ≥ 3.12, `httpx`, `setuptools`, `pydantic`, `pyyaml`,
+`python-ulid`. The harness is pure Python with no native extensions.
 
 ### 2.2 Prerequisites
 
@@ -156,7 +176,30 @@ print(answer)
 That is the entire public API. One function, two required arguments, and a handful
 of optional knobs.
 
-### 2.4 What Happens Internally
+### 2.4 First Call with Kernel Integration
+
+```python
+import rlm_local
+from rlm_kernel.repl_bridge import KernelBridge
+from rlm_kernel.vault import LocalVault
+from pathlib import Path
+
+# Open a seeded vault
+vault = LocalVault(Path.home() / ".local" / "share" / "rlm-kernel" / "vault")
+bridge = KernelBridge(vault, vault.root / ".index" / "meta.sqlite")
+
+answer = rlm_local.completion(
+    "What color is mentioned?",
+    "The sky was bright blue with scattered white clouds.",
+    profile="laptop",
+    kernel_bridge=bridge,
+)
+```
+
+With a kernel bridge, the REPL gains vault-defined helpers and `search()`/`propose()`
+capabilities. The system prompt is loaded from contract pages in the vault.
+
+### 2.5 What Happens Internally
 
 When you call `completion()`:
 
@@ -167,15 +210,18 @@ When you call `completion()`:
 3. **Messages built.** The system prompt, task metadata (query + context *size*,
    never the content itself), decomposition prologue, and a few-shot example are
    assembled into a byte-stable message list.
-4. **REPL started.** A subprocess Python interpreter is launched, connected over
-   a local TCP socket.
-5. **Turn loop begins.** The root model receives the messages, emits code in
+4. **Kernel integration (if bridge provided).** Helper definitions are collected
+   from the vault. Core-memory summary is injected into metadata. The system
+   prompt is loaded vault-first with package-bundled fallback.
+5. **REPL started.** A subprocess Python interpreter is launched, connected over
+   a local TCP socket. Vault helpers are injected into the worker namespace.
+6. **Turn loop begins.** The root model receives the messages, emits code in
    ` ```repl ` blocks, the harness executes that code in the REPL, and the output
    is appended to the conversation.
-6. **Termination.** The model sets `answer["ready"] = True`, writes a `FINAL:` line,
+7. **Termination.** The model sets `answer["ready"] = True`, writes a `FINAL:` line,
    or exhausts its turn budget (triggering forced finalization).
-7. **Cleanup.** REPL subprocess killed, context files removed, HTTP client closed.
-8. **Answer returned.** A plain string.
+8. **Cleanup.** REPL subprocess killed, context files removed, HTTP client closed.
+9. **Answer returned.** A plain string.
 
 ---
 
@@ -193,6 +239,7 @@ def completion(
     config: Config | None = None,
     logger: TrajectoryLogger | None = None,
     log_path: str | None = None,
+    kernel_bridge: Any = None,
     **overrides: Any,
 ) -> str:
 ```
@@ -208,6 +255,7 @@ def completion(
 | `config` | `Config` | No | Pre-built `Config` object. Created from `profile` if omitted. |
 | `logger` | `TrajectoryLogger` | No | Pre-configured logger. Created if `log_path` is given. |
 | `log_path` | `str` | No | Filesystem path for the JSONL trajectory log. |
+| `kernel_bridge` | `KernelBridge` | No | Optional `rlm_kernel.repl_bridge.KernelBridge` for vault-aware operation. When provided: vault helpers are injected into the REPL, system prompts are loaded from contract pages, core-memory is included in metadata, and `search()`/`propose()` become available in the REPL. |
 | `**overrides` | `Any` | No | Individual config value overrides (e.g., `max_turns=10`, `cell_timeout=90.0`). |
 
 ### 3.3 Return Value
@@ -240,6 +288,13 @@ be = HTTPModelBackend(
     root_model="qwen3-8b", sub_model="qwen3-4b",
 )
 answer = rlm_local.completion(query, ctx, backend=be)
+
+# With kernel integration — vault-aware execution
+from rlm_kernel.repl_bridge import KernelBridge
+from rlm_kernel.vault import LocalVault
+vault = LocalVault(Path.home() / ".local" / "share" / "rlm-kernel" / "vault")
+bridge = KernelBridge(vault, vault.root / ".index" / "meta.sqlite")
+answer = rlm_local.completion(query, ctx, kernel_bridge=bridge)
 ```
 
 ---
@@ -316,7 +371,7 @@ pv = config.prompt_vars()
 ### 4.4 The `Profile` Dataclass
 
 `Profile` is a frozen (`@dataclass(frozen=True)`) dataclass. Instances are
-immutable after creation—profiles are constants, not mutable state.
+immutable after creation — profiles are constants, not mutable state.
 
 ```python
 from rlm_local.config import PROFILES
@@ -385,16 +440,15 @@ When `sub_endpoint` is empty and `sub_model` is empty, both tiers use the same
 server and model. This is the common case: one `llama-server` process, one model,
 handling both orchestration and bulk sub-calls.
 
-For advanced deployments, point `sub_endpoint` at a second server running a
-smaller/faster model. The harness does not manage model lifecycle—start your
-servers externally.
-
 ### 5.4 Prefix-Cache Discipline
 
 The system prompt is byte-identical across all calls. Conversation history is
 append-only. The harness contains **no timestamps, no per-turn randomness, no
 changing headers**. This ensures llama.cpp's `--cache-ram` prompt caching hits
 on every turn after the first, reducing prompt evaluation latency by 5–10×.
+
+When kernel integration is active, the vault is consulted once at the start of
+`RootLoop.run()` — the resulting prompt text is cached for all subsequent turns.
 
 > **Warning:** A single changing character anywhere in the prefix silently
 > invalidates the entire cache. Do not add timestamps or dynamic text to any
@@ -408,7 +462,7 @@ llama.cpp servers with GBNF grammar support will enforce the schema.
 
 The harness uses constrained decoding **only for sub-calls** and only when
 explicitly requested via `llm_query(prompt, schema=...)`. The root model's
-free-form ` ```repl ` output is never grammar-constrained—rescue parsing
+free-form ` ```repl ` output is never grammar-constrained — rescue parsing
 (Chapter 9) is cheaper and safer there.
 
 ---
@@ -437,7 +491,7 @@ The harness and worker communicate over a **bidirectional TCP socket** on
 ```
 
 Message types sent by the harness:
-- `{"cmd": "init", "context": "<raw text>"}` — initialize the worker
+- `{"cmd": "init", "context": "<raw text>", "helpers": [...]}` — initialize the worker with context and optional helper definitions
 - `{"cmd": "exec", "code": "<python source>"}` — execute a cell
 - `{"cmd": "shutdown"}` — terminate the worker
 
@@ -445,6 +499,8 @@ Message types sent by the worker:
 - `{"type": "result", "stdout": "...", "stderr": "...", "final_answer": null}` — cell result
 - `{"type": "subcall", "prompt": "...", "schema": null}` — request a sub-LLM call
 - `{"type": "subcall_batched", "prompts": [...], "schema": null}` — request batched sub-calls
+- `{"cmd": "search", "query": "...", "k": 5, "kinds": null}` — request vault search (kernel)
+- `{"cmd": "propose", "kind": "...", "name": "...", "body": "...", "rationale": "..."}` — propose new page (kernel)
 
 The subcall messages are **interleaved** with execution: the worker sends a
 subcall request, the harness proxies it to the `SubcallManager`, sends the
@@ -466,8 +522,28 @@ scope:
 | `chunk(size=None, by=None)` | function | Split context into chunks; `by="paragraph"` for paragraph splitting |
 | `map_query(items, template, batch=True)` | function | Apply a template to items and call `llm_query_batched` |
 | `show_vars()` | function | Print all user-defined variables in the REPL |
+| `search(query, k=5)` | function | **Kernel only.** Search the vault via BM25; returns formatted results |
+| `propose(kind, name, body, rationale)` | function | **Kernel only.** Propose a new page to quarantine for gate review |
 
-### 6.4 The `answer` Dict Mechanism
+### 6.4 Vault Helper Injection (Kernel Integration)
+
+When a `KernelBridge` is provided, the harness collects active helper definitions
+from vault helper pages and injects them into the worker's namespace alongside
+the hardcoded helpers. This follows the Forth dictionary property:
+user-authored helpers are structurally indistinguishable from builtins.
+
+The injection path:
+1. `RootLoop.run()` calls `kernel_bridge.get_helper_definitions()`.
+2. The result — `[{"name": "grep", "code": "def grep(...): ..."}, ...]` — is
+   passed to `REPLSandbox.start(definitions=defs)`.
+3. The `init` socket command includes a `helpers` array.
+4. The worker `exec()`s each helper's code into its globals.
+5. If no helpers are provided, the worker falls back to its hardcoded set.
+
+This means adding a capability to the system is authoring a helper page in the
+vault — no code changes to `rlm_local` required.
+
+### 6.5 The `answer` Dict Mechanism
 
 Termination is signaled from **inside** the REPL, not by regex-parsing the model's
 prose output. The model sets:
@@ -482,7 +558,7 @@ extracts `answer["content"]` as the final answer. This mechanism is strictly
 more robust than prose-based termination (e.g., "FINAL: ...") because it is
 programmatic, not linguistic.
 
-### 6.5 State Persistence
+### 6.6 State Persistence
 
 Variables defined in one cell are available in the next. The worker uses
 `exec(code, globals())` so that assignments survive across cells:
@@ -495,7 +571,7 @@ x = 42
 print(x)  # → 42
 ```
 
-### 6.6 Cell Limits
+### 6.7 Cell Limits
 
 | Limit | Default | Behavior on Violation |
 |---|---|---|
@@ -503,21 +579,23 @@ print(x)  # → 42
 | stdout capture | 256 KB | Truncated with `[... output truncated to N characters ...]` marker |
 | stderr capture | 256 KB | Truncated similarly |
 
-### 6.7 REPLSandbox Class
+### 6.8 REPLSandbox Class
 
 ```python
 class REPLSandbox:
     def __init__(self, cell_timeout: float = 60.0, stdout_cap: int = 256 * 1024): ...
-    def start(self, context: Any, subcall_manager: Any) -> None: ...
+    def start(self, context: Any, subcall_manager: Any,
+              definitions: list[dict[str, str]] | None = None) -> None: ...
     def execute(self, code: str) -> REPLResult: ...
     def shutdown(self) -> None: ...
 ```
 
 `start()` launches the subprocess, accepts the TCP connection, and sends the
-initial context.
+initial context along with optional helper definitions.
 
 `execute()` sends code, handles interleaved subcall requests, and returns a
-`REPLResult`:
+`REPLResult`. With kernel integration, it also proxies `search` and `propose`
+commands to the `KernelBridge`.
 
 ```python
 @dataclass
@@ -629,34 +707,61 @@ entire problem is a non-generalizing shortcut.
 root model, dispatches code to the REPL, interprets results, and decides when
 to terminate.
 
-### 8.2 Message Layout
+### 8.2 Constructor
+
+```python
+class RootLoop:
+    def __init__(
+        self,
+        config: Config,
+        backend: ModelBackend,
+        logger: TrajectoryLogger | None = None,
+        kernel_bridge: Any = None,
+    ) -> None:
+```
+
+The `kernel_bridge` parameter is optional. When provided (a `KernelBridge` from
+`rlm_kernel.repl_bridge`), the root loop gains vault awareness: helper
+definitions, core-memory injection, vault-first prompt loading, and
+`search`/`propose` proxy.
+
+### 8.3 Message Layout
 
 The message list is built once at startup and grown append-only. The byte-stable
 prefix is critical for prompt caching:
 
 ```
-┌──────────────────────────────────────────────┐
-│ system     │ SYSTEM_PROMPT (config-injected)  │  ← byte-stable
-├────────────┼─────────────────────────────────┤
-│ user       │ METADATA (query + context size) │  ← byte-stable
-├────────────┼─────────────────────────────────┤
-│ user       │ PROLOGUE (decomposition nudge)  │  ← byte-stable
-├────────────┼─────────────────────────────────┤
-│ (few-shot) │ user/assistant pairs            │  ← byte-stable
-├────────────┼─────────────────────────────────┤
-│ user       │ Turn 1/15. (safeguard)          │  ← first novelty
-├────────────┼─────────────────────────────────┤
-│ assistant  │ model response                  │
-├────────────┼─────────────────────────────────┤
-│ user       │ REPL output: ...                │
-├────────────┼─────────────────────────────────┤
-│ user       │ Turn 2/15.                      │
-├────────────┼─────────────────────────────────┤
-│ ...        │ ...                             │
-└────────────┴─────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│ system     │ SYSTEM_PROMPT (hardcoded or vault-loaded)    │  ← byte-stable
+├────────────┼─────────────────────────────────────────────┤
+│ user       │ METADATA (query + context size               │  ← byte-stable
+│            │  + optional core-memory summary)             │
+├────────────┼─────────────────────────────────────────────┤
+│ user       │ PROLOGUE (decomposition nudge)               │  ← byte-stable
+├────────────┼─────────────────────────────────────────────┤
+│ (few-shot) │ user/assistant pairs                         │  ← byte-stable
+├────────────┼─────────────────────────────────────────────┤
+│ user       │ Turn 1/15. (safeguard)                       │  ← first novelty
+├────────────┼─────────────────────────────────────────────┤
+│ assistant  │ model response                               │
+├────────────┼─────────────────────────────────────────────┤
+│ user       │ REPL output: ...                             │
+├────────────┼─────────────────────────────────────────────┤
+│ user       │ Turn 2/15.                                   │
+├────────────┼─────────────────────────────────────────────┤
+│ ...        │ ...                                          │
+└────────────┴─────────────────────────────────────────────┘
 ```
 
-### 8.3 Turn Flow
+**Kernel integration changes:**
+- The system prompt may be loaded from `contract/repl-contract.md` and
+  `contract/how-to-work.md` (vault-first, fallback to hardcoded).
+- The metadata message may include a "Core memory: ..." line if a
+  core-memory page exists in the vault.
+- Helper one-liners from active vault helper pages are included in
+  the system prompt under `Available helpers:`.
+
+### 8.4 Turn Flow
 
 Each turn follows this exact sequence:
 
@@ -675,7 +780,8 @@ Each turn follows this exact sequence:
    `user` message and the turn restarts (no REPL execution).
 
 5. **Code executed.** Each extracted block runs in the REPL via
-   `repl.execute(block)`.
+   `repl.execute(block)`. With kernel integration, `search` and `propose`
+   proxy commands are handled inline.
 
 6. **Termination checked.** If `result.final_answer` is set, the loop breaks.
 
@@ -685,7 +791,7 @@ Each turn follows this exact sequence:
 8. **Error budget checked.** If `consecutive_errors > max_consecutive_errors`,
    the loop breaks into forced finalization.
 
-### 8.4 Termination Paths
+### 8.5 Termination Paths
 
 The loop terminates by one of four mechanisms, in priority order:
 
@@ -701,7 +807,7 @@ The loop terminates by one of four mechanisms, in priority order:
 4. **Error budget exhaustion.** `max_consecutive_errors` exceeded. Triggers
    forced finalization.
 
-### 8.5 Forced Finalization
+### 8.6 Forced Finalization
 
 When the turn loop ends without a final answer, a single forced-finalization
 call is made:
@@ -717,10 +823,10 @@ contains a `FINAL:` line, that is extracted; otherwise the raw text is returned.
 Forced finalization **never returns empty**. If the model produces nothing,
 the string `"(No answer produced — forced finalization failed)"` is returned.
 
-### 8.6 Lifecycle
+### 8.7 Lifecycle
 
 ```python
-loop = RootLoop(config, backend, logger)
+loop = RootLoop(config, backend, logger, kernel_bridge=bridge)
 try:
     answer = loop.run(query, context)
 finally:
@@ -737,7 +843,7 @@ finally:
 
 The `Parser` is the guardrail layer. It extracts executable code from model
 responses, detects termination signals, and generates templated retry nudges
-when the model drifts off-format. Every rule is mechanical and cheap—the harness
+when the model drifts off-format. Every rule is mechanical and cheap — the harness
 never asks the model to re-do work it can fix itself.
 
 ### 9.2 Extraction Pipeline
@@ -783,7 +889,7 @@ containing the code you intend to run.
 ```
 
 **Nudge budget:** `max_consecutive_nudges` (default 2). After exhausting the
-budget, the parser emits no nudge—the turn counts as an error and the error
+budget, the parser emits no nudge — the turn counts as an error and the error
 budget is checked separately.
 
 ### 9.5 Error Tracking
@@ -897,9 +1003,14 @@ str(ctx)  # "doc1 text\ndoc2 text\ndoc3 text"
 All harness-generated text lives in two modules: `templates.py` (frozen message
 strings) and `prompts.py` (the system prompt and few-shot examples). This
 implements design requirement **R4.1**: every string the harness emits must be
-templated and stable—identical wording for identical situations across tasks.
+templated and stable — identical wording for identical situations across tasks.
 Free-form harness prose would break the token-level similarity that equivalence
 class induction depends on.
+
+When the `rlm-kernel` integration is active, these modules become **loaders**:
+they consult the vault's contract pages first, falling back to the hardcoded
+package-bundled defaults. This means the harness's own textual surface can be
+evolved without a `pip install -U`.
 
 ### 11.2 Templates (`templates.py`)
 
@@ -923,6 +1034,23 @@ Sixteen frozen constants, all `str.format()` templates. The most important:
 | `CELL_TIMEOUT_ERROR` | Cell exceeded time limit | `{timeout}` |
 | `CELL_STDOUT_TRUNCATED` | Output truncated marker | `{cap}` |
 
+#### 11.2.1 Vault-First Template Loading
+
+```python
+from rlm_local.templates import load_template
+
+# With vault: loads from contract/templates/<name>.md
+nudge = load_template("NUDGE_NO_BLOCK", vault=vault)
+
+# Without vault: returns the hardcoded constant
+nudge = load_template("NUDGE_NO_BLOCK")
+```
+
+Each template constant maps to a vault page path under `contract/templates/`.
+The page's body is used as the template text. This is how the harness's own
+wording becomes evolvable: edit the template page, re-seed, and the next
+completion uses the new text.
+
 ### 11.3 System Prompt (`prompts.py`)
 
 The system prompt is a `str.format()` template. All capacity claims are
@@ -939,6 +1067,20 @@ Three sections:
 2. **How to work** — PROBE → PLAN → EXECUTE → SUBMIT, with small-model guidance.
 3. **Few-shot example** — one worked transcript demonstrating the format.
 
+#### 11.3.1 Vault-First System Prompt Loading
+
+```python
+from rlm_local.prompts import load_system_prompt_from_vault
+
+system = load_system_prompt_from_vault(prompt_vars, vault=vault)
+```
+
+The vault-first assembly order:
+1. `contract/repl-contract.md` body (rendered with `{repl_cap}` slots).
+2. One-line summaries of active helper pages from `helpers/`.
+3. `contract/how-to-work.md` body.
+4. Falls back to the hardcoded `SYSTEM_PROMPT` if any vault page is missing.
+
 ### 11.4 Few-Shot Example
 
 The few-shot is **load-bearing**. Small models need the format demonstrated, not
@@ -950,7 +1092,11 @@ described. The example shows:
 - Setting `answer["content"]` and `answer["ready"] = True`
 
 The example uses a **generic, synthetic query** ("What color is mentioned?") to
-avoid content interference—the model should learn the *format*, not the *answer*.
+avoid content interference — the model should learn the *format*, not the *answer*.
+
+With kernel integration, additional few-shots can be stored as pages in
+`fewshots/` and loaded dynamically. The K4 GEPA optimizer can evolve
+few-shots against held-out eval suites.
 
 ### 11.5 `build_messages()`
 
@@ -958,6 +1104,10 @@ avoid content interference—the model should learn the *format*, not the *answe
 initial message list for a `RootLoop`. It assembles the byte-stable prefix:
 system prompt, metadata, prologue, and few-shot. The resulting list is the
 starting point for the turn loop.
+
+When a kernel bridge is active, the system prompt is loaded vault-first before
+`build_messages` is called, and the context type string includes the core-memory
+summary.
 
 ---
 
@@ -973,6 +1123,8 @@ completion. This is the data source for:
 - **Distillation data export**: filter trajectories with correct answers for
   QLoRA fine-tuning.
 - **Debugging**: replay exactly what the model saw at each turn.
+- **Optimization feedback**: GEPA-style mutation operators (K4) use trajectory
+  data as raw material for reflection.
 
 ### 12.2 Record Format
 
@@ -1078,9 +1230,138 @@ capability. Tasks impossible for the base model become slow-but-possible.
 
 ---
 
-## 14. Failure Modes and Mitigations
+## 14. Kernel Integration
 
-### 14.1 Model Narrates Instead of Emitting Code
+### 14.1 Overview
+
+The `rlm-kernel` package (documented fully in `docs/rlm-kernel-manual.md`)
+provides an evolvable layer over `rlm_local`. The integration is **surgical and
+backward-compatible**: without a kernel bridge, `rlm_local` behaves exactly as
+before.
+
+### 14.2 Activation
+
+```python
+from rlm_kernel.repl_bridge import KernelBridge
+from rlm_kernel.vault import LocalVault
+from rlm_kernel.seed import seed_vault
+
+# One-time setup
+vault = LocalVault(Path.home() / ".local" / "share" / "rlm-kernel" / "vault")
+seed_vault(vault)  # creates contracts, templates, builtin helpers
+
+# Per-completion
+bridge = KernelBridge(vault, vault.root / ".index" / "meta.sqlite")
+answer = rlm_local.completion(query, context, kernel_bridge=bridge)
+```
+
+### 14.3 What Changes with Kernel Active
+
+| Feature | Without Kernel | With Kernel |
+|---|---|---|
+| REPL helpers | Hardcoded in `_WORKER_SCRIPT` | Vault helper pages + hardcoded set |
+| System prompt | Hardcoded `SYSTEM_PROMPT` | `contract/repl-contract.md` body |
+| How-to-work | Hardcoded in system prompt | `contract/how-to-work.md` body |
+| Template messages | Hardcoded constants | `contract/templates/*.md` pages |
+| Few-shots | Hardcoded example | Vault `fewshots/` pages |
+| `search()` in REPL | Not available | Proxied to vault BM25 index |
+| `propose()` in REPL | Not available | Writes to `quarantine/` for gate review |
+| Core memory | None | `memory/notes/core-memory.md` summary in metadata |
+| Prompt evolvability | Requires code change | Edit contract page → re-seed → live |
+
+### 14.4 The Forth Dictionary Property
+
+A key invariant: user-authored helpers in the vault are structurally
+indistinguishable from the builtin helpers shipped with the package.
+Both are pages with `## Signature`, `## Implementation`, and
+`## Usage example` sections. The `HelperDef.from_page()` extractor
+treats them identically. Adding a capability is authoring a page, not
+editing `repl.py`.
+
+### 14.5 Search and Introspection
+
+With kernel integration, the root model gains a `search()` function in the
+REPL that queries the vault's BM25 index:
+
+```python
+# Inside a repl block:
+hits = search("how do I submit an answer", k=3)
+for h in hits:
+    print(h)
+```
+
+This makes the system **self-describing** (P6): the model can read its own
+contract, discover available helpers, and find relevant definitions — all
+through the same search mechanism the user uses.
+
+### 14.6 The Gate in the REPL
+
+The `propose()` function lets the model author new content that passes
+through the verification gate:
+
+```python
+# Inside a repl block:
+path = propose("helper", "extract-dates",
+               "## Implementation\n```python\ndef extract_dates(text):\n    import re\n    return re.findall(r'\\d{4}-\\d{2}-\\d{2}', text)\n```\n",
+               "Extracts ISO 8601 dates from text")
+print(f"Proposed to {path}")
+```
+
+The proposed helper goes to `quarantine/`, passes through deterministic
+validation (import allowlist, sandbox execution, signature check), and
+awaits human review before promotion. This is P8 in action: all growth
+passes through an evaluator gate.
+
+### 14.7 Core Memory
+
+When a `memory/notes/core-memory.md` page exists in the vault, its summary
+is included in the root model's metadata message at the start of every
+completion:
+
+```
+Your context is a str of 5000 total characters.
+A sub-LLM call handles roughly 8000 characters well. You have 8 turns.
+
+Core memory: This instance specializes in Python code analysis.
+It prefers aggressive decomposition with batched sub-calls.
+```
+
+This gives the model a durable, cross-session identity — the MemGPT core
+block pattern, adapted to the RLM harness.
+
+### 14.8 Integration Architecture
+
+```
+completion(query, context, kernel_bridge=bridge)
+    │
+    ▼
+RootLoop.__init__(..., kernel_bridge=bridge)
+    │
+    ▼
+RootLoop.run()
+    ├── kernel_bridge.get_helper_definitions()
+    │   → vault helper pages → REPL worker namespace
+    ├── kernel_bridge.get_core_memory_summary()
+    │   → injected into metadata message
+    ├── load_system_prompt_from_vault(prompt_vars, vault)
+    │   → contract pages → system prompt (vault-first)
+    │
+    ├── REPLSandbox.start(ctx, subcall_mgr, definitions=defs)
+    │   └── worker exec()s each helper into globals()
+    │
+    └── Turn loop:
+        └── REPLSandbox.execute(code)
+            ├── subcall → SubcallManager
+            ├── search → KernelBridge.handle_search()
+            ├── propose → KernelBridge.handle_propose()
+            └── result → REPLResult
+```
+
+---
+
+## 15. Failure Modes and Mitigations
+
+### 15.1 Model Narrates Instead of Emitting Code
 
 **Symptom:** Model says "I would run chunk(context) and then..." but emits no
 ` ```repl ` block.
@@ -1091,7 +1372,7 @@ capability. Tasks impossible for the base model become slow-but-possible.
 a templated nudge is appended: "You described code without emitting it..." After
 2 consecutive nudges, counted as an error.
 
-### 14.2 Whole-Context Single Sub-Call
+### 15.2 Whole-Context Single Sub-Call
 
 **Symptom:** Model passes the entire context to one `llm_query()` call. Works for
 small contexts, fails to generalize.
@@ -1100,15 +1381,15 @@ small contexts, fails to generalize.
 exceeds 60% of the context size. The decomposition prologue (§11.2) urges the
 model to plan before coding.
 
-### 14.3 Root History Bloat
+### 15.3 Root History Bloat
 
 **Symptom:** REPL output grows large, pushing the root context out of distribution.
 
 **Mitigation:** Per-block REPL output is truncated to `repl_output_char_cap`
 (default 4K chars). `show_vars()` lists names and types, not values. Sub-call
-results stay in REPL variables—the model must deliberately `print()` to see them.
+results stay in REPL variables — the model must deliberately `print()` to see them.
 
-### 14.4 Broken Python from Root Model
+### 15.4 Broken Python from Root Model
 
 **Symptom:** `NameError`, `SyntaxError`, `IndentationError` from model-generated code.
 
@@ -1116,14 +1397,14 @@ results stay in REPL variables—the model must deliberately `print()` to see th
 models are surprisingly good at fixing their own code when shown the traceback.
 Budget: `max_consecutive_errors` (default 3), then forced finalization.
 
-### 14.5 Runaway Cell
+### 15.5 Runaway Cell
 
 **Symptom:** `while True:` or huge list allocation hangs the REPL.
 
 **Mitigation:** Subprocess isolation + per-cell `cell_timeout`. The worker is
 killed on timeout and the error is reported as stderr.
 
-### 14.6 Sub-Call Quality Collapse
+### 15.6 Sub-Call Quality Collapse
 
 **Symptom:** Sub-call responses become incoherent when prompts exceed the model's
 comfortable context size.
@@ -1132,28 +1413,47 @@ comfortable context size.
 native context. The system prompt teaches a staging idiom: coarse filter first,
 then fine extraction on the survivors.
 
-### 14.7 Prompt-Cache Misses
+### 15.7 Prompt-Cache Misses
 
 **Symptom:** Every turn takes 5–10× longer than expected because the server
 re-evaluates the entire prefix.
 
 **Mitigation:** All harness messages use `.format()` with identical ordering.
 No timestamps, no per-turn randomness, no changing headers. `--cache-ram` on
-the server. Cache-hit rate is exported as a metric (future instrumentation).
+the server. With kernel integration, the vault is consulted once at the start
+of `run()` — the resulting prompt text is cached for all turns.
 
-### 14.8 Chat-Template Drift
+### 15.8 Chat-Template Drift
 
 **Symptom:** Model behaves differently than expected because the server's chat
 template doesn't match the model's training format.
 
-**Mitigation:** The conformance suite (Chapter 15) runs per model×server pair
+**Mitigation:** The conformance suite (Chapter 16) runs per model×server pair
 before any evaluation. Pinned server versions in the project lockfile.
+
+### 15.9 Kernel Bridge Unavailable
+
+**Symptom:** `kernel_bridge` provided but vault is corrupted or missing.
+
+**Mitigation:** All kernel features degrade gracefully. If vault pages are
+missing, prompt/template loading falls back to hardcoded constants. If the
+vault itself is unreachable, `get_helper_definitions()` returns an empty
+list and the REPL uses hardcoded helpers only. No kernel feature is required
+for basic harness operation.
+
+### 15.10 Vault Search Timeout
+
+**Symptom:** `search()` in the REPL takes too long on large vaults.
+
+**Mitigation:** FTS5 BM25 search over 500K pages is designed to stay under
+300 ms p95. The search call is bounded by the per-cell timeout (default 60 s).
+If the index is missing or corrupted, `search_vault` returns an empty list.
 
 ---
 
-## 15. Testing and Conformance
+## 16. Testing and Conformance
 
-### 15.1 Test Suite Structure
+### 16.1 Test Suite Structure
 
 ```
 tests/
@@ -1164,10 +1464,16 @@ tests/
 ├── test_context_store.py    # In-memory context, disk spill, grep/chunk
 ├── test_subcall_manager.py  # Budgets, memoization, batched calls, exhaustion
 ├── test_repl.py             # Sandbox lifecycle, state persistence, helpers, subcall proxying
-└── test_integration.py      # Real llama-server tests (marked @pytest.mark.slow)
+├── test_integration.py      # Real llama-server tests (marked @pytest.mark.slow)
+└── rlm_kernel/
+    ├── conftest.py            # temp_vault fixture
+    ├── test_schema.py         # 26 tests: frontmatter validation, parsing, helper extraction
+    ├── test_vault.py          # 16 tests: CRUD, atomic writes, wikilinks, round-trip
+    ├── test_index.py          # 10 tests: build, FTS search, incremental update, rebuild
+    └── test_search.py         # 8 tests: keyword search, kind filter, card budget, edge cases
 ```
 
-### 15.2 Running Tests
+### 16.2 Running Tests
 
 ```bash
 # Unit tests only (fast, no server required)
@@ -1178,12 +1484,19 @@ uv run pytest tests/ -v
 
 # Specific module
 uv run pytest tests/test_parser.py -v
+
+# Kernel tests only
+uv run pytest tests/rlm_kernel/ -v
+
+# Fallback parity check — verify kernel changes don't break rlm_local
+uv run pytest tests/ -k "not slow and not rlm_kernel" -v
 ```
 
-### 15.3 Test Conventions
+### 16.3 Test Conventions
 
 - **Unit tests** use fake backends (`FakeBackend`) and mock subcall managers
   (`MockSubcallMgr`). They run in under 2 seconds total.
+- **Kernel tests** use temporary vaults (`temp_vault` fixture) with `init_git=False`.
 - **Integration tests** use the real `llama-server` at `localhost:9010` with the
   `LFM2.5-VL-1.6B` model. They are marked `@pytest.mark.slow` and take ~8 seconds
   total.
@@ -1192,9 +1505,9 @@ uv run pytest tests/test_parser.py -v
 
 ---
 
-## 16. API Reference
+## 17. API Reference
 
-### 16.1 `rlm_local` (top-level)
+### 17.1 `rlm_local` (top-level)
 
 ```python
 def completion(
@@ -1206,11 +1519,12 @@ def completion(
     config: Config | None = None,
     logger: TrajectoryLogger | None = None,
     log_path: str | None = None,
+    kernel_bridge: Any = None,
     **overrides: Any,
 ) -> str:
 ```
 
-### 16.2 `rlm_local.config`
+### 17.2 `rlm_local.config`
 
 ```python
 @dataclass(frozen=True)
@@ -1240,7 +1554,6 @@ class Config:
     profile: Profile
     overrides: dict[str, Any]
     example_chunking_idiom: str
-
     def prompt_vars(self) -> dict[str, Any]: ...
 
 PROFILES: dict[str, Profile]  # {"tiny": ..., "laptop": ..., "workstation": ...}
@@ -1252,7 +1565,7 @@ def load_config(
 ) -> Config: ...
 ```
 
-### 16.3 `rlm_local.model_backend`
+### 17.3 `rlm_local.model_backend`
 
 ```python
 class ModelBackend(Protocol):
@@ -1276,21 +1589,11 @@ class HTTPModelBackend:
         verify: bool = False,
         timeout: float = 300.0,
     ) -> None: ...
-
-    def chat(
-        self,
-        messages: list[dict[str, str]],
-        *,
-        tier: str = "root",
-        max_tokens: int = 1500,
-        temperature: float = 0.0,
-        response_schema: dict[str, Any] | None = None,
-    ) -> str: ...
-
+    def chat(self, messages, *, tier, max_tokens, temperature, response_schema) -> str: ...
     def close(self) -> None: ...
 ```
 
-### 16.4 `rlm_local.repl`
+### 17.4 `rlm_local.repl`
 
 ```python
 @dataclass
@@ -1302,12 +1605,13 @@ class REPLResult:
 
 class REPLSandbox:
     def __init__(self, cell_timeout: float = 60.0, stdout_cap: int = 256 * 1024) -> None: ...
-    def start(self, context: Any, subcall_manager: Any) -> None: ...
+    def start(self, context: Any, subcall_manager: Any,
+              definitions: list[dict[str, str]] | None = None) -> None: ...
     def execute(self, code: str) -> REPLResult: ...
     def shutdown(self) -> None: ...
 ```
 
-### 16.5 `rlm_local.subcall_manager`
+### 17.5 `rlm_local.subcall_manager`
 
 ```python
 class SubcallManager:
@@ -1323,26 +1627,20 @@ class SubcallManager:
         shortcut_warn_fraction: float = 0.60,
         sub_model: str = "",
     ) -> None: ...
-
     def llm_query(self, prompt: str, *, schema: dict[str, Any] | None = None) -> str: ...
     def llm_query_batched(self, prompts: list[str], *, schema: dict[str, Any] | None = None) -> list[str]: ...
-
     @property
     def calls_used(self) -> int: ...
-
     @property
     def chars_used(self) -> int: ...
-
     @property
     def calls_remaining(self) -> int: ...
-
     @property
     def cache_hits(self) -> int: ...
-
     def shutdown(self) -> None: ...
 ```
 
-### 16.6 `rlm_local.parser`
+### 17.6 `rlm_local.parser`
 
 ```python
 @dataclass
@@ -1357,7 +1655,6 @@ class Parser:
     def __init__(self, max_consecutive_nudges: int = 2, max_consecutive_errors: int = 3) -> None: ...
     def parse(self, text: str, *, turn: int = 0) -> ParseResult: ...
     def check_answer_in_block(self, block: str) -> tuple[str | None, bool]: ...
-
     @property
     def consecutive_nudges(self) -> int: ...
     @property
@@ -1367,7 +1664,7 @@ class Parser:
 def repair_json(text: str, schema: dict[str, Any] | None = None) -> str: ...
 ```
 
-### 16.7 `rlm_local.context_store`
+### 17.7 `rlm_local.context_store`
 
 ```python
 class Context:
@@ -1385,7 +1682,7 @@ class ContextStore:
     def cleanup(self) -> None: ...
 ```
 
-### 16.8 `rlm_local.logger`
+### 17.8 `rlm_local.logger`
 
 ```python
 class TrajectoryLogger:
@@ -1402,7 +1699,7 @@ class TrajectoryLogger:
                 forced: bool = False) -> None: ...
 ```
 
-### 16.9 `rlm_local.prompts`
+### 17.9 `rlm_local.prompts`
 
 ```python
 SYSTEM_PROMPT: str                          # .format() template
@@ -1410,17 +1707,27 @@ FEWSHOT_EXAMPLE: list[tuple[str, str]]      # (role, content) pairs
 
 def build_system_prompt(prompt_vars: dict) -> str: ...
 def build_messages(
-    query: str,
-    context_len: int,
-    context_type: str,
-    prompt_vars: dict,
+    query: str, context_len: int, context_type: str, prompt_vars: dict,
 ) -> list[dict[str, str]]: ...
+
+# Kernel-enabled vault-first loading
+def load_system_prompt_from_vault(
+    prompt_vars: dict, vault: object | None = None,
+) -> str: ...
+def load_fewshots_from_vault(
+    vault: object | None = None,
+) -> list[tuple[str, str]]: ...
 ```
 
-### 16.10 `rlm_local.templates`
+### 17.10 `rlm_local.templates`
 
 All constants are `str` values, most are `.format()` templates. See §11.2 for the
 complete catalog.
+
+```python
+# Kernel-enabled vault-first loading
+def load_template(name: str, vault: object | None = None) -> str: ...
+```
 
 ---
 
@@ -1440,6 +1747,10 @@ complete catalog.
 | **Rescue parse** | Mechanical fixes for common model output errors (unclosed fences, wrong fence type) applied before spending a retry turn. |
 | **Nudge** | A templated user message appended to the conversation asking the model to fix a specific format error. |
 | **Byte-stable prefix** | The initial messages (system prompt, metadata, prologue, few-shots) are identical across all calls and tasks to maximize prompt-cache hits. |
+| **Kernel bridge** | The `KernelBridge` object that connects `rlm_local` to an `rlm-kernel` vault, enabling vault-first prompt loading, helper injection, and search/propose proxying. |
+| **Vault** | The git-versioned directory of markdown pages that serves as the system's persistent "image." |
+| **Gate** | The quarantine → validate → promote lifecycle that governs how model-authored content enters the live system. |
+| **Core memory** | A pinned page (`memory/notes/core-memory.md`) whose summary is always included in the root model's metadata message. |
 
 ---
 
@@ -1469,8 +1780,27 @@ implementation locations:
 
 ---
 
+## Appendix C: Kernel Integration Cross-Reference
+
+| Feature | Kernel Module | rlm_local Integration Point |
+|---|---|---|
+| Vault-first prompt loading | `prompts.py:load_system_prompt_from_vault()` | `root_loop.py:run()` |
+| Template vault loading | `templates.py:load_template()` | `root_loop.py` and callers |
+| Helper injection | `repl_bridge.py:KernelBridge.get_helper_definitions()` | `repl.py:REPLSandbox.start(definitions=)` |
+| `search()` in REPL | `repl_bridge.py:KernelBridge.handle_search()` | `repl.py:REPLSandbox.execute()` |
+| `propose()` in REPL | `repl_bridge.py:KernelBridge.handle_propose()` | `repl.py:REPLSandbox.execute()` |
+| Core memory summary | `repl_bridge.py:KernelBridge.get_core_memory_summary()` | `root_loop.py:run()` |
+| Vault seeding | `seed.py:seed_vault()` | `cli.py` and first-run scripts |
+
+---
+
 *RLM Local is built on the principles articulated by Zhang & Khattab in
 "Language Model Harnesses Are Compositional Generalizers" (July 2026) and
 "Recursive Language Models" (October 2025). The harness architecture,
 prompt design, guardrails, and evaluation methodology adapt those principles
 to the constraints of consumer hardware and small open-weight models.*
+
+*RLM Kernel adds the evolvability layer — the convergence of LISP's
+metacircular eval, Smalltalk's image, Forth's dictionary, and Nock's frozen
+core — making the system's prompts, helpers, memory, and ontology into
+human-readable, versioned, self-describing content.*

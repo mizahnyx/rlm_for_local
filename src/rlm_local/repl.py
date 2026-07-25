@@ -228,8 +228,43 @@ def main():
             # Receive context as a raw string (worker treats it as str)
             raw_ctx = msg.get("context", "")
             context = raw_ctx
+            # Inject helpers if provided (K1: definitions from vault)
+            helpers = msg.get("helpers", [])
+            for h in helpers:
+                try:
+                    exec(h["code"], globals())
+                    exec(f"{h['name']} = _harness_search", globals()) if h["name"] == "search" else None
+                except Exception:
+                    pass
             _send({"type": "result", "status": "ok"})
 
+        elif cmd == "search":
+            # Proxy search to harness (K1)
+            query = msg.get("query", "")
+            k = msg.get("k", 5)
+            kinds = msg.get("kinds")
+            _send({"cmd": "search", "query": query, "k": k, "kinds": kinds})
+            resp = _recv()
+            result_text = resp.get("result", "(no results)")
+            _send({
+                "type": "result",
+                "stdout": result_text,
+                "stderr": "",
+                "final_answer": None,
+            })
+
+        elif cmd == "propose":
+            # Proxy propose to harness (K1)
+            _send({"cmd": "propose", "kind": msg.get("kind", ""),
+                    "name": msg.get("name", ""), "body": msg.get("body", ""),
+                    "rationale": msg.get("rationale", "")})
+            resp = _recv()
+            _send({
+                "type": "result",
+                "stdout": resp.get("result", "Error: propose failed"),
+                "stderr": "",
+                "final_answer": None,
+            })
         elif cmd == "shutdown":
             _sock.close()
             break
@@ -256,9 +291,18 @@ class REPLSandbox:
         self._subcall_manager: Any = None
         self._lock = threading.Lock()
         self._accept_thread: threading.Thread | None = None
+        self._kernel_bridge: Any = None
 
-    def start(self, context: Any, subcall_manager: Any) -> None:
-        """Start the REPL worker and inject context + subcall manager."""
+    def start(self, context: Any, subcall_manager: Any,
+              definitions: list[dict[str, str]] | None = None) -> None:
+        """Start the REPL worker and inject context + subcall manager.
+
+        Args:
+            context: The user context data.
+            subcall_manager: The SubcallManager for sub-LLM call proxying.
+            definitions: Optional list of {"name": str, "code": str} helper
+                         definitions to inject into the REPL namespace (K1).
+        """
         self._subcall_manager = subcall_manager
 
         # Write worker script
@@ -298,9 +342,12 @@ class REPLSandbox:
         )
         self._accept_thread.start()
 
-        # Initialize: send context
+        # Initialize: send context + optional helpers (K1)
         ctx_str = str(context) if isinstance(context, (Context, _InMemoryContext, str)) else str(context)
-        _send_msg(self._worker_sock, {"cmd": "init", "context": ctx_str})
+        init_msg: dict = {"cmd": "init", "context": ctx_str}
+        if definitions:
+            init_msg["helpers"] = definitions
+        _send_msg(self._worker_sock, init_msg)
         resp = _recv_msg(self._worker_sock, timeout=5.0)
         if resp is None or resp.get("status") != "ok":
             self.shutdown()
@@ -360,6 +407,31 @@ class REPLSandbox:
                     else:
                         responses = ["Error: subcall manager not available"] * len(prompts)
                     _send_msg(self._worker_sock, {"responses": responses})
+
+                elif msg_type == "search":
+                    # K1: worker requesting a vault search
+                    if self._kernel_bridge:
+                        result_text = self._kernel_bridge.handle_search(
+                            msg.get("query", ""),
+                            k=msg.get("k", 5),
+                            kinds=msg.get("kinds"),
+                        )
+                    else:
+                        result_text = "Error: kernel bridge not available"
+                    _send_msg(self._worker_sock, {"result": result_text})
+
+                elif msg_type == "propose":
+                    # K1: worker proposing a new page
+                    if self._kernel_bridge:
+                        result_text = self._kernel_bridge.handle_propose(
+                            msg.get("kind", ""),
+                            msg.get("name", ""),
+                            msg.get("body", ""),
+                            msg.get("rationale", ""),
+                        )
+                    else:
+                        result_text = "Error: kernel bridge not available"
+                    _send_msg(self._worker_sock, {"result": result_text})
 
                 elif msg_type == "result":
                     # Final execution result

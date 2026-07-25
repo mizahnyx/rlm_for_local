@@ -40,10 +40,12 @@ class RootLoop:
         config: Config,
         backend: ModelBackend,
         logger: TrajectoryLogger | None = None,
+        kernel_bridge: Any = None,
     ) -> None:
         self._config = config
         self._backend = backend
         self._logger = logger
+        self._kernel_bridge = kernel_bridge
 
         # Subsystem instances (created fresh per run)
         self._parser: Parser | None = None
@@ -95,23 +97,36 @@ class RootLoop:
             context_total_chars=context_len,
             shortcut_warn_fraction=profile.shortcut_warn_fraction,
         )
-
-        # Parser
-        self._parser = Parser(
-            max_consecutive_nudges=profile.max_consecutive_nudges,
-            max_consecutive_errors=profile.max_consecutive_errors,
-        )
-
-        # REPL
         self._repl = REPLSandbox(
             cell_timeout=profile.cell_timeout,
         )
 
-        # Build initial messages (byte-stable prefix)
-        messages = build_messages(query, context_len, context_type, prompt_vars)
+        # K1: Get helper definitions and core-memory from kernel bridge
+        definitions = None
+        core_memory_summary = None
+        if self._kernel_bridge:
+            definitions = self._kernel_bridge.get_helper_definitions()
+            core_memory_summary = self._kernel_bridge.get_core_memory_summary()
 
-        # ── Start REPL with context ───────────────────────────────────────
-        self._repl.start(ctx_handle, self._subcall_mgr)
+        # Add core-memory to metadata if available
+        _context_type = context_type
+        if core_memory_summary:
+            _context_type = f"{context_type}\n\nCore memory: {core_memory_summary}"
+
+        # Build initial messages (byte-stable prefix)
+        # Use vault-first prompt loading if kernel is available
+        if self._kernel_bridge:
+            from rlm_local.prompts import load_system_prompt_from_vault
+            _system = load_system_prompt_from_vault(prompt_vars, self._kernel_bridge.vault)
+            _fewshots = load_system_prompt_from_vault.__self__  # not used, fallback
+        else:
+            _system = build_system_prompt(prompt_vars)
+
+        messages = build_messages(query, context_len, _context_type, prompt_vars)
+
+        # ── Start REPL with context and helpers ───────────────────────────
+        self._repl._kernel_bridge = self._kernel_bridge
+        self._repl.start(ctx_handle, self._subcall_mgr, definitions=definitions)
 
         # ── Main loop ─────────────────────────────────────────────────────
         final_answer: str | None = None
