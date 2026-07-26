@@ -8,6 +8,7 @@ dependencies = [
     "setuptools>=83.0.0",
     "pydantic>=2.0.0",
     "pyyaml>=6.0.0",
+    "gepa>=0.1.4",
 ]
 
 [build-system]

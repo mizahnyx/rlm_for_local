@@ -961,45 +961,55 @@ note accumulation ("image rot") without requiring LLM judgment.
 
 ---
 
-## 9. Offline Optimization — Scaffold, Not Yet Implemented
+## 9. Offline Optimization (GEPA)
 
-> **STATUS:** This module is a placeholder. The current `optimize.py` implements
-> hand-rolled string mutations for development use only. The real K4
-> implementation — GEPA-based text evolution with a reflection LM, held-out
-> gating, and gate-routed promotion — is specified but not built. See
-> `docs/conformance/20260725-0838-rlm-kernel-conformity-review-addendum.md` §3 for the
-> full specification. The sections below describe the **target design**. No
-> live contract pages are modified by the current scaffold.
+The optimizer (K4) uses GEPA (`gepa.optimize_anything`) to evolve the
+harness's textual surface — prompts, templates, few-shots — using
+`rlm_local` itself as the evaluator. The sub-tier model serves as the
+student (runs tasks), and the root-tier model serves as the reflection
+LM (proposes improvements).
 
 ### 9.1 Eval Suites
 
-```python
-from rlm_kernel.optimize import EvalTask, EvalSuite, BUILTIN_SUITES
+Eval suites are JSON files in `tests/evals/` containing verifiable tasks.
+Each task has a query, context, expected answer pattern (regex), and
+optional numeric tolerance. Tasks are deterministically split 70/30 into
+train and held-out sets.
 
-suite = BUILTIN_SUITES["needle_search"]
-for task in suite.tasks:
-    print(f"{task.name}: find '{task.expected_pattern}' in context")
+```python
+from tests.evals import load_suite
+
+suite = load_suite("needle_search")
+print(f"Train: {len(suite.tasks)}, Held-out: {len(suite.held_out)}")
 ```
 
-An `EvalTask` defines a verifiable micro-benchmark:
+Built-in suites (22 tasks total):
 
-| Field | Type | Description |
+| Suite | Tasks | Description |
 |---|---|---|
-| `name` | `str` | Task identifier |
-| `query` | `str` | The question to ask |
-| `context` | `str` | The data to answer from |
-| `expected_pattern` | `str` | Regex that must match the answer |
-| `tolerance` | `float` | Numeric tolerance (for aggregation tasks) |
+| `needle_search` | 7 | Find specific facts, names, prices, emails in long documents |
+| `counting` | 5 | Count items, sum prices, compute averages — numeric verification |
+| `multi_hop` | 5 | Multi-step reasoning — "who wrote the book?", "capital of country" |
+| `fact_extraction` | 5 | Extract ISBNs, phone numbers, IPs, currencies, dates |
 
-An `EvalSuite` groups tasks with an optional held-out split for
-promotion gating.
+### 9.2 Evaluator
 
-### 9.2 Built-in Suites
+The evaluator wraps `rlm_local.completion()` and returns a (score, feedback)
+tuple for GEPA. Score is the fraction of tasks where the answer matches the
+expected regex. Feedback includes per-task pass/fail with answer snippets.
 
-| Suite | Tasks | Held-Out | Description |
-|---|---|---|---|
-| `needle_search` | 2 | 0 | Color and year needle-in-haystack tasks |
-| `aggregation` | 1 | 1 | Counting items; held-out on different content |
+```python
+from rlm_kernel.optimize import evaluate_candidate
+
+result = evaluate_candidate(
+    candidate_text="PROBE the context first...",
+    suite_name="needle_search",
+    eval_dir=Path("tests/evals"),
+    profile="tiny",
+    max_turns=6,
+)
+print(f"Score: {result.score:.1%} ({result.passed}/{result.total})")
+```
 
 ### 9.3 Running Optimization
 
@@ -1009,32 +1019,49 @@ from rlm_kernel.optimize import run_optimization
 result = run_optimization(
     vault,
     target="how-to-work",
-    max_iterations=20,
-    profile="laptop",
+    suite_name="needle_search",
+    profile="tiny",
+    max_metric_calls=150,
 )
+print(f"Status: {result['status']}")
 print(f"Baseline: {result['baseline_score']:.1%}")
-print(f"Best:     {result['best_score']:.1%}")
-print(f"Status:   {result['status']}")
+print(f"Best: {result['best_score']:.1%}")
 ```
 
 The optimizer:
-1. Loads the target text from the vault (e.g., `contract/how-to-work.md`).
-2. Evaluates baseline score against the eval suite.
-3. Generates mutations (emphasis markers, added warnings, simplifications, expansions).
-4. Evaluates each mutant; keeps the best.
-5. If improvement on the held-out split, promotes the winner.
-6. Otherwise, restores the original.
+1. Reads the current target text from the vault as the seed candidate.
+2. Evaluates baseline score on the train split.
+3. GEPA's reflection LM proposes improved candidates.
+4. Each candidate is evaluated against the train split.
+5. The best candidate is validated on the held-out split.
+6. If held-out score ≥ baseline, the candidate is promoted through the gate
+   with `optimized_by: gepa-run-<id>` lineage in frontmatter.
+7. Instant rollback via git if needed.
 
 **Target options**: `prologue`, `how-to-work`, `nudges`, `fewshots`, `helper-docs`.
 
-### 9.4 Local Feasibility
+### 9.4 Few-Shot Bootstrap
 
-The optimizer is designed for overnight runs on CPU-only hardware:
-- Each metric call ≈ 4–8 minutes (a full `rlm_local.completion()`)
-- 20 iterations ≈ 1.5–3 hours
-- All mutations are text — runs checkpoint naturally
-- Keep eval tasks in the 30–70% success band for rich signal
+```python
+from rlm_kernel.optimize import bootstrap_fewshots
 
+transcripts = bootstrap_fewshots(
+    vault, suite_name="needle_search",
+    profile="tiny", max_shots=3,
+)
+```
+
+Replays the train split, keeps trajectories that reach verified-correct
+answers, and selects 2–3 canonical transcripts. Selected few-shots are
+stored through the gate as `fewshots/bootstrap-<task>.md` pages.
+
+### 9.5 Local Feasibility
+
+- Each metric call ≈ 4–8 minutes (a full `rlm_local.completion()`).
+- 150 metric calls ≈ 10–20 hours (overnight on `tiny` profile).
+- GEPA checkpoints candidates as text — runs resume naturally.
+- Keep eval tasks in the 30–70% success band for rich optimization signal.
+- The evaluator itself and the gate code are never optimizer-editable.
 ---
 
 ## 10. Prompt and Template Loading

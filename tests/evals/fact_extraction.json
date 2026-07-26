@@ -1,0 +1,32 @@
+[
+  {
+    "name": "extract_isbn",
+    "query": "What is the ISBN of the referenced book?",
+    "context": "Required textbook: 'Introduction to Algorithms' by Cormen, Leiserson, Rivest, and Stein. ISBN: 978-0-262-03384-8. Fourth edition, published 2022. Available at the campus bookstore or online retailers." + " Course materials continued with lecture slides, problem sets, and exam schedules." * 30,
+    "expected_pattern": "978-0-262-03384-8"
+  },
+  {
+    "name": "extract_phone",
+    "query": "What is the phone number for customer support?",
+    "context": "For assistance, contact our support team: Phone: (555) 123-4567, Email: help@example.com, Live Chat: available 9am-5pm EST. Response times are typically under 2 hours during business hours." + " Additional contact information for regional offices and specialized support teams follows." * 30,
+    "expected_pattern": "\\(?555\\)?\\s*123-4567"
+  },
+  {
+    "name": "extract_ip",
+    "query": "What is the primary server IP address mentioned?",
+    "context": "Server configuration:\nPrimary: 192.168.1.100 (production)\nBackup: 192.168.1.101 (failover)\nDatabase: 10.0.0.50 (internal)\nLoad Balancer: 203.0.113.10 (public)\n" + "Network topology diagrams, firewall rules, and access control lists continued for several pages." * 30,
+    "expected_pattern": "192\\.168\\.1\\.100"
+  },
+  {
+    "name": "extract_currency",
+    "query": "In what currency are the prices listed?",
+    "context": "International pricing guide:\nUnited States: $199.99 USD\nEuropean Union: 179.99 EUR\nUnited Kingdom: 159.99 GBP\nJapan: 22,000 JPY\nAll prices include applicable taxes. Shipping costs vary by region." + " Detailed pricing breakdowns for volume licensing and enterprise agreements followed." * 30,
+    "expected_pattern": "(?i)USD"
+  },
+  {
+    "name": "extract_date",
+    "query": "On what date was the report published?",
+    "context": "Quarterly Financial Report\nPublication Date: March 15, 2024\nPrepared by: Financial Analysis Division\nClassification: Internal Use Only\nSummary: Revenue exceeded projections by 12% in Q1 2024." + " Detailed financial statements, balance sheets, and cash flow analyses continued for dozens of pages." * 30,
+    "expected_pattern": "(?i)march 15,? 2024"
+  }
+]
