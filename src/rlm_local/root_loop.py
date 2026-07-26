@@ -127,7 +127,7 @@ class RootLoop:
         _fewshots: list | None = None
         if self._kernel_bridge:
             from rlm_local.prompts import load_system_prompt_from_vault, load_fewshots_from_vault
-            _system_prompt = load_system_prompt_from_vault(prompt_vars, self._kernel_bridge.vault)
+            _system_prompt = load_system_prompt_from_vault(prompt_vars, self._kernel_bridge.vault, bridge=self._kernel_bridge)
             _fewshots = load_fewshots_from_vault(self._kernel_bridge.vault)
 
         messages = build_messages(

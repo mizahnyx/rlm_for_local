@@ -1,0 +1,27 @@
+=== Tier-1 load gate: 100000 pages at C:\Users\Mizahnyx\load-corpus-synth-100k ===
+[1/5] generating…
+  ... 10000/100000 pages generated
+  ... 20000/100000 pages generated
+  ... 30000/100000 pages generated
+  ... 40000/100000 pages generated
+  ... 50000/100000 pages generated
+  ... 60000/100000 pages generated
+  ... 70000/100000 pages generated
+  ... 80000/100000 pages generated
+  ... 90000/100000 pages generated
+  ... 100000/100000 pages generated
+Generated 100000 pages in C:\Users\Mizahnyx\load-corpus-synth-100k
+  generated in 267s
+[2/5] full reindex…
+  100000 pages in 12680s  (target < 7200s)
+[3/5] search latency…
+  p95 = 158.1ms  (target < 300ms)
+[4/5] helper listing (G4b check)…
+  index list_paths: 370.9ms (9954 paths)
+  vault.list walk:  1633.7s (9954 parsed)  <- per-completion cost
+[5/5] git…
+  git status: 193ms  (target < 2000ms)
+
+=== RESULTS ===
+pages=100000 rebuild=12680s search_p95=158.1ms git_status=193ms helper_idx=370.9ms helper_walk=1633.7s
+gate: rebuild FAIL | search PASS | git PASS

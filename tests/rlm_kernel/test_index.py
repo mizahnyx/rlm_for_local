@@ -294,3 +294,58 @@ class TestPropertyRebuildDeltaEquivalence:
             assert fts_rows == 1, f"After edit {i}: expected 1 FTS row, got {fts_rows}"
 
         idx.close()
+
+    def test_delta_per_page_no_worse_than_10x_fresh(self, temp_vault):
+        """F5: scaling assertion — delta per-page ≤ 10× fresh per-page.
+
+        Catches quadratics in the update path (e.g. full-scan FTS DELETEs).
+        """
+        import time
+        from rlm_kernel.schema import Frontmatter, Page
+        from rlm_kernel.vault import LocalVault
+
+        vault = LocalVault(temp_vault, init_git=False)
+        index_path = temp_vault / ".index" / "meta.sqlite"
+
+        # Create 500 pages (enough to expose O(n) per-update costs)
+        for i in range(500):
+            kind = ["definition", "helper", "note"][i % 3]
+            dir_name = f"{kind}s"
+            fm = Frontmatter(
+                schema=1, kind=kind, name=f"page-{i:05d}",
+                title=f"Page {i}", summary=f"Summary {i}.",
+            )
+            body = f"# Page {i}\n\n" + "lorem ipsum " * 20
+            vault.put(Page(fm, body), f"{dir_name}/page-{i:05d}.md")
+
+        # Fresh build
+        idx = Index(index_path)
+        t0 = time.perf_counter()
+        idx.build(vault)
+        fresh_elapsed = time.perf_counter() - t0
+        fresh_per_page_ms = (fresh_elapsed / 500) * 1000
+
+        # 50 sequential edits via delta
+        t0 = time.perf_counter()
+        for edit_i in range(50):
+            i = edit_i * 2  # edit every other page
+            kind = ["definition", "helper", "note"][i % 3]
+            dir_name = f"{kind}s"
+            new_fm = Frontmatter(
+                schema=1, kind=kind, name=f"page-{i:05d}",
+                title=f"Page {i} v2", summary=f"Updated summary {i}.",
+            )
+            vault.put(Page(new_fm, f"# Page {i} v2\n\nupdated " * 10),
+                     f"{dir_name}/page-{i:05d}.md")
+        delta_elapsed = time.perf_counter() - t0
+        delta_per_page_ms = (delta_elapsed / 50) * 1000
+
+        idx.close()
+
+        ratio = delta_per_page_ms / max(fresh_per_page_ms, 0.001)
+        print(f"  Fresh: {fresh_per_page_ms:.1f} ms/page, Delta: {delta_per_page_ms:.1f} ms/page, ratio: {ratio:.1f}x")
+        assert ratio <= 10.0, (
+            f"Delta per-page ({delta_per_page_ms:.1f} ms) is {ratio:.1f}x "
+            f"fresh per-page ({fresh_per_page_ms:.1f} ms) — exceeds 10x limit. "
+            f"Possible quadratic in update path."
+        )

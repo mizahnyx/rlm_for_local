@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS pages (
     summary TEXT NOT NULL,
     hash TEXT,
     idx_hash TEXT,
+    fts_rowid INTEGER,
     version INTEGER DEFAULT 1,
     status TEXT DEFAULT 'active',
     updated TEXT
@@ -67,6 +68,7 @@ class Index:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: sqlite3.Connection | None = None
+
     @property
     def conn(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -76,12 +78,6 @@ class Index:
             self._conn.execute("PRAGMA foreign_keys=ON")
         return self._conn
 
-
-    def __enter__(self) -> Index:
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        self.close()
     def close(self) -> None:
         if self._conn:
             self._conn.close()
@@ -93,13 +89,21 @@ class Index:
         self.conn.executescript(_SCHEMA_SQL)
         self.conn.commit()
 
+    def _checkpoint(self) -> None:
+        """Checkpoint WAL after bulk writes (F4)."""
+        self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
     # ── Build / rebuild ───────────────────────────────────────────────────
 
     def build(self, vault: VaultStore) -> None:
-        """Full rebuild from vault pages. Idempotent."""
+        """Full rebuild from vault pages. Idempotent.
+
+        Uses for_update=False — skips per-page DELETEs since tables are
+        emptied up front. This avoids the FTS5 full-scan quadratic (F1).
+        """
         self._ensure_schema()
 
-        # Clear existing data
+        # Clear existing data — all at once, no per-page DELETEs needed
         self.conn.execute("DELETE FROM fts_pages")
         self.conn.execute("DELETE FROM tags")
         self.conn.execute("DELETE FROM links")
@@ -107,35 +111,57 @@ class Index:
 
         pages = vault.list()
         for page in pages:
-            self._index_page(page)
+            self._index_page(page, for_update=False)
         self.conn.commit()
-    def _index_page(self, page: Page) -> None:
-        """Insert or replace a single page in the index."""
+        self._checkpoint()
+    def _index_page(self, page: Page, for_update: bool = False) -> None:
+        """Insert or replace a single page in the index.
+
+        Args:
+            page: The page to index.
+            for_update: If True, this is an incremental update — per-page
+                DELETEs use rowid-keyed access (O(1) for FTS). If False
+                (fresh build), all tables were emptied up front so
+                per-page DELETEs are skipped entirely (F1 — avoids the
+                FTS5 full-scan quadratic).
+        """
         fm = page.frontmatter
-        # Clean up any existing data for this path (handles id changes)
-        old = self.conn.execute(
-            "SELECT id FROM pages WHERE path = ?", (page.path,)
-        ).fetchone()
-        if old and old["id"] != fm.id:
-            self.conn.execute("DELETE FROM tags WHERE page_id = ?", (old["id"],))
+
+        # On updates, clean up old data using indexed access paths
+        if for_update:
+            old = self.conn.execute(
+                "SELECT id, fts_rowid FROM pages WHERE path = ?", (page.path,)
+            ).fetchone()
+            if old:
+                if old["id"] != fm.id:
+                    self.conn.execute("DELETE FROM tags WHERE page_id = ?", (old["id"],))
+                self.conn.execute("DELETE FROM tags WHERE page_id = ?", (fm.id,))
+                self.conn.execute("DELETE FROM links WHERE src = ?", (page.path,))
+                # F2: rowid-keyed FTS DELETE — indexed in FTS5, O(1)
+                if old["fts_rowid"] is not None:
+                    self.conn.execute(
+                        "DELETE FROM fts_pages WHERE rowid = ?", (old["fts_rowid"],)
+                    )
+
+        # Insert/update pages row
         self.conn.execute(
-            """INSERT OR REPLACE INTO pages (id, path, kind, name, title, summary, hash, idx_hash, version, status, updated)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT OR REPLACE INTO pages (id, path, kind, name, title, summary,
+               hash, idx_hash, fts_rowid, version, status, updated)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 fm.id, page.path, fm.kind.value, fm.name, fm.title,
-                fm.summary, fm.hash, page.content_hash, fm.version, fm.status.value,
+                fm.summary, fm.hash, page.content_hash, None, fm.version,
+                fm.status.value,
                 fm.updated.isoformat() if fm.updated else None,
             ),
         )
         # Tags
-        self.conn.execute("DELETE FROM tags WHERE page_id = ?", (fm.id,))
         for tag in fm.tags:
             self.conn.execute(
                 "INSERT OR IGNORE INTO tags (page_id, tag) VALUES (?, ?)",
                 (fm.id, tag),
             )
-        # Links — extract wikilinks from body
-        self.conn.execute("DELETE FROM links WHERE src = ?", (page.path,))
+        # Links
         for link_text in WIKILINK_PATTERN.findall(page.body):
             target = link_text.split("|")[0].split("#")[0].strip()
             if target:
@@ -143,15 +169,17 @@ class Index:
                     "INSERT OR IGNORE INTO links (src, dst) VALUES (?, ?)",
                     (page.path, target),
                 )
-        # FTS — standalone table, direct insert
-        self.conn.execute(
-            "DELETE FROM fts_pages WHERE path = ?", (page.path,),
-        )
-        self.conn.execute(
+        # FTS insert — capture rowid for future rowid-keyed DELETEs (F2)
+        cursor = self.conn.execute(
             """INSERT INTO fts_pages (path, kind, name, title, summary, body)
                VALUES (?, ?, ?, ?, ?, ?)""",
             (page.path, fm.kind.value, fm.name, fm.title,
              fm.summary, page.body),
+        )
+        # Store FTS rowid for O(1) updates
+        self.conn.execute(
+            "UPDATE pages SET fts_rowid = ? WHERE path = ?",
+            (cursor.lastrowid, page.path),
         )
 
     # ── Queries ───────────────────────────────────────────────────────────
@@ -217,23 +245,26 @@ class Index:
             for row in self.conn.execute("SELECT * FROM pages").fetchall()
         }
 
-        # Remove deleted
+        # Remove deleted — use fts_rowid for O(1) FTS DELETE (F2)
         for path in set(indexed) - set(vault_pages):
             row = indexed[path]
             self.conn.execute("DELETE FROM pages WHERE path = ?", (path,))
             self.conn.execute("DELETE FROM tags WHERE page_id = ?", (row["id"],))
             self.conn.execute("DELETE FROM links WHERE src = ?", (path,))
-            self.conn.execute("DELETE FROM fts_pages WHERE path = ?", (path,))
+            if row.get("fts_rowid") is not None:
+                self.conn.execute("DELETE FROM fts_pages WHERE rowid = ?", (row["fts_rowid"],))
+            else:
+                self.conn.execute("DELETE FROM fts_pages WHERE path = ?", (path,))
 
-        # Add new / update changed
+        # Add new / update changed — use for_update=True (F1)
         for path, page in vault_pages.items():
             if path not in indexed:
-                self._index_page(page)
+                self._index_page(page, for_update=True)
             elif page.content_hash != (indexed[path].get("idx_hash") or ""):
-                # Hash changed — reindex
-                self._index_page(page)
+                self._index_page(page, for_update=True)
 
         self.conn.commit()
+        self._checkpoint()
 
     def list_paths(self, kind: str | None = None, status: str = "active") -> list[str]:
         """Return page paths matching kind/status from the index (avoiding full-tree parse).

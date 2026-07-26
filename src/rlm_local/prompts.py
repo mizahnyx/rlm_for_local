@@ -144,6 +144,7 @@ def build_messages(
 def load_system_prompt_from_vault(
     prompt_vars: dict,
     vault: object | None = None,
+    bridge: object | None = None,
 ) -> str:
     """Build the system prompt from vault pages, with package-bundled fallback.
 
@@ -152,6 +153,11 @@ def load_system_prompt_from_vault(
     2. One-line summaries of active helper pages
     3. contract/how-to-work.md body
     4. A few-shot transcript from fewshots/
+
+    Args:
+        bridge: Optional KernelBridge for index-backed helper listing (C1).
+            When provided, active helpers are listed via SQL index query
+            instead of full vault walk.
 
     Without a vault, falls back to the hardcoded SYSTEM_PROMPT + FEWSHOT_EXAMPLE.
     """
@@ -174,15 +180,28 @@ def load_system_prompt_from_vault(
         if howto_page is not None:
             parts.append(howto_page.body)
 
-        # 3. Helper one-liners from active helper pages
-        helpers = vault.list(kind="helper")
-        active_helpers = [h for h in helpers if h.frontmatter.status.value == "active"]
-        if active_helpers:
+        # 3. Helper one-liners — index-backed when bridge available (C1)
+        if bridge is not None and bridge.index_path.exists():
+            from rlm_kernel.index import Index
+            idx = Index(bridge.index_path)
+            try:
+                paths = idx.list_paths(kind="helper", status="active")
+                helpers = []
+                for path in paths:
+                    page = vault.get(path)
+                    if page is not None:
+                        helpers.append(page)
+            finally:
+                idx.close()
+        else:
+            helpers = vault.list(kind="helper")
+            helpers = [h for h in helpers if h.frontmatter.status.value == "active"]
+
+        if helpers:
             lines = ["\nAvailable helpers:"]
-            for h in active_helpers:
-                sig = h.frontmatter.summary
-                lines.append(f"  {h.name}: {sig}")
-            parts.append("\n".join(lines[:32]))  # progressive-disclosure cap
+            for h in helpers[:30]:  # progressive-disclosure cap (~30 lines)
+                lines.append(f"  {h.name}: {h.frontmatter.summary}")
+            parts.append("\n".join(lines))
 
         return "\n\n".join(parts)
     except Exception:
