@@ -325,8 +325,7 @@ class TestPropertyRebuildDeltaEquivalence:
         fresh_elapsed = time.perf_counter() - t0
         fresh_per_page_ms = (fresh_elapsed / 500) * 1000
 
-        # 50 sequential edits via delta
-        t0 = time.perf_counter()
+        # 50 sequential edits
         for edit_i in range(50):
             i = edit_i * 2  # edit every other page
             kind = ["definition", "helper", "note"][i % 3]
@@ -337,6 +336,10 @@ class TestPropertyRebuildDeltaEquivalence:
             )
             vault.put(Page(new_fm, f"# Page {i} v2\n\nupdated " * 10),
                      f"{dir_name}/page-{i:05d}.md")
+
+        # Time reindex_delta — one call processing all 50 changed pages (W2: was vacuous)
+        t0 = time.perf_counter()
+        idx.reindex_delta(vault)
         delta_elapsed = time.perf_counter() - t0
         delta_per_page_ms = (delta_elapsed / 50) * 1000
 

@@ -128,7 +128,7 @@ git-versioned wiki that the system can grow itself. Features include:
 **K4 offline optimization (GEPA) is a scaffold — not yet implemented.**
 The current `optimize.py` is a placeholder for development use only. Real
 GEPA-based text evolution will be implemented after the R1–R6 gate is fully
-green. See `docs/20260725-0838-rlm-kernel-conformity-review-addendum.md` §3
+green. See `docs/conformance/20260725-0838-rlm-kernel-conformity-review-addendum.md` §3
 for the full specification.
 
 Full documentation: [`docs/rlm-kernel-manual.md`](docs/rlm-kernel-manual.md).

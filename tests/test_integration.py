@@ -14,8 +14,36 @@ from rlm_local.model_backend import HTTPModelBackend
 
 @pytest.mark.slow
 class TestModelBackendIntegration:
+
     @pytest.fixture(scope="class")
     def backend(self):
+        """Create a backend, skipping if llama-server is unreachable."""
+        import httpx
+
+        # Probe endpoint — skip if server is down (W3)
+        try:
+            probe = httpx.Client(verify=False, timeout=2.0)
+            resp = probe.get("https://localhost:9010/health")
+            probe.close()
+        except Exception:
+            probe = None
+
+        if probe is None:
+            # Try one more time with a tiny chat request
+            try:
+                probe2 = httpx.Client(verify=False, timeout=2.0)
+                resp2 = probe2.post(
+                    "https://localhost:9010/v1/chat/completions",
+                    json={
+                        "model": "LFM2.5-VL-1.6B",
+                        "messages": [{"role": "user", "content": "hi"}],
+                        "max_tokens": 1,
+                    },
+                )
+                probe2.close()
+            except Exception:
+                pytest.skip("llama-server not available at https://localhost:9010")
+
         be = HTTPModelBackend(
             root_endpoint="https://localhost:9010/v1",
             root_model="LFM2.5-VL-1.6B",

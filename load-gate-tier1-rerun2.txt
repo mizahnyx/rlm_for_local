@@ -1,0 +1,25 @@
+C:\Users\Mizahnyx\Documents\Misc\rlm_for_local\src\rlm_kernel\schema.py:51: UserWarning: Field name "schema" in "Frontmatter" shadows an attribute in parent "BaseModel"
+  class Frontmatter(BaseModel):
+=== Tier-1 load gate: 100000 pages at C:\Users\Mizahnyx\load-corpus-synth-100k ===
+[1/5] corpus already present, skipping generation
+[2/5] full reindex…
+Traceback (most recent call last):
+  File "C:\Users\Mizahnyx\Documents\Misc\rlm_for_local\scripts\run_load_gate_100k.py", line 34, in <module>
+    idx = rebuild_index(vault, idx_path)
+  File "C:\Users\Mizahnyx\Documents\Misc\rlm_for_local\src\rlm_kernel\index.py", line 291, in rebuild_index
+    idx.build(vault)
+    ~~~~~~~~~^^^^^^^
+  File "C:\Users\Mizahnyx\Documents\Misc\rlm_for_local\src\rlm_kernel\index.py", line 114, in build
+    self._index_page(page, for_update=False)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Mizahnyx\Documents\Misc\rlm_for_local\src\rlm_kernel\index.py", line 147, in _index_page
+    self.conn.execute(
+    ~~~~~~~~~~~~~~~~~^
+        """INSERT OR REPLACE INTO pages (id, path, kind, name, title, summary,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<7 lines>...
+        ),
+        ^^
+    )
+    ^
+sqlite3.OperationalError: table pages has no column named fts_rowid

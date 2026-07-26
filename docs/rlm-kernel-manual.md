@@ -967,7 +967,7 @@ note accumulation ("image rot") without requiring LLM judgment.
 > hand-rolled string mutations for development use only. The real K4
 > implementation — GEPA-based text evolution with a reflection LM, held-out
 > gating, and gate-routed promotion — is specified but not built. See
-> `docs/20260725-0838-rlm-kernel-conformity-review-addendum.md` §3 for the
+> `docs/conformance/20260725-0838-rlm-kernel-conformity-review-addendum.md` §3 for the
 > full specification. The sections below describe the **target design**. No
 > live contract pages are modified by the current scaffold.
 

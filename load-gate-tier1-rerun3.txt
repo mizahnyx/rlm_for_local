@@ -1,0 +1,17 @@
+C:\Users\Mizahnyx\Documents\Misc\rlm_for_local\src\rlm_kernel\schema.py:51: UserWarning: Field name "schema" in "Frontmatter" shadows an attribute in parent "BaseModel"
+  class Frontmatter(BaseModel):
+=== Tier-1 load gate: 100000 pages at C:\Users\Mizahnyx\load-corpus-synth-100k ===
+[1/5] corpus already present, skipping generation
+[2/5] full reindex…
+  100000 pages in 582s  (target < 7200s)
+[3/5] search latency…
+  p95 = 116.9ms  (target < 300ms)
+[4/5] helper listing (G4b check)…
+  index list_paths: 46.0ms (9954 paths)
+  vault.list walk:  576.9s (9954 parsed)  <- per-completion cost
+[5/5] git…
+  git status: 38ms  (target < 2000ms)
+
+=== RESULTS ===
+pages=100000 rebuild=582s search_p95=116.9ms git_status=38ms helper_idx=46.0ms helper_walk=576.9s
+gate: rebuild PASS | search PASS | git PASS

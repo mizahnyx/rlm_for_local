@@ -76,6 +76,7 @@ class Index:
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
+            self._run_migrations()
         return self._conn
 
     def close(self) -> None:
@@ -87,11 +88,37 @@ class Index:
 
     def _ensure_schema(self) -> None:
         self.conn.executescript(_SCHEMA_SQL)
+        # Set user_version so migrations know they're already applied (W1)
+        self.conn.execute("PRAGMA user_version = 2")
         self.conn.commit()
-
     def _checkpoint(self) -> None:
         """Checkpoint WAL after bulk writes (F4)."""
         self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    _MIGRATIONS: list[tuple[int, str]] = [
+        (2, "ALTER TABLE pages ADD COLUMN fts_rowid INTEGER"),
+    ]
+
+    def _run_migrations(self) -> None:
+        """Apply pending schema migrations (W1).
+
+        Only runs if the database has been initialized (pages table exists).
+        Fresh databases get schema via _ensure_schema's CREATE TABLE IF NOT EXISTS.
+        """
+        # Guard: skip if database hasn't been initialized yet
+        table_check = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='pages'"
+        ).fetchone()
+        if table_check is None:
+            return
+
+        current = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        for target_version, sql in self._MIGRATIONS:
+            if current < target_version:
+                self._conn.execute(sql)
+                self._conn.execute(f"PRAGMA user_version = {target_version}")
+                current = target_version
+        self._conn.commit()
 
     # ── Build / rebuild ───────────────────────────────────────────────────
 
