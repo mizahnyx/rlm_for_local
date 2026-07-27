@@ -291,10 +291,16 @@ class TestPromotionContract:
                             lambda **kw: type('obj', (object,), {})())
         monkeypatch.setattr(gepa_oa, "EngineConfig",
                             lambda **kw: type('obj', (object,), {})())
-        # Mock: train tasks get correct answers, held-out tasks get garbage.
-        train_answers = ["the year is 1648", "the name is Alice",
-                         "the price is $42.99", "email is support@example.com",
-                         "version 3.7.2", "the year is 1648"]
+        # Train: 3/5 correct (score 0.6), best=0.9 > 0.6 → train gate OPENS
+        # Held-out: all wrong (score 0.0), 0.0 < 0.6 → held-out gate BLOCKS
+        # This discriminates: without the held-out gate, promotion would occur
+        train_answers = [
+            "the year is 1648",       # year task: PASS
+            "wrong answer",           # alice task: FAIL
+            "also wrong",             # price task: FAIL
+            "email is support@example.com",  # email task: PASS
+            "version 3.7.2",          # version task: PASS
+        ]
         answer_iter = iter(train_answers + ["xyzzy_nomatch_xyzzy"] * 20)
         def fake_completion(query, context, **kw):
             try:
