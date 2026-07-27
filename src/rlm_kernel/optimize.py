@@ -334,41 +334,41 @@ def run_optimization(
     best_score = result.best_score if hasattr(result, 'best_score') else baseline_result.score
     status = "no_improvement"
 
-    if best_score > baseline_result.score and held_out_result is not None:
-            try:
-                from rlm_kernel.gate import propose, validate, promote, demote
-                from rlm_kernel.schema import PageStatus
-                run_id = f"gepa-run-{int(time.time())}"
-                target_path, _ = TARGET_MAP[target]
+    if best_score > baseline_result.score and held_out_result is not None and held_out_result.score >= baseline_result.score:
+        try:
+            from rlm_kernel.gate import propose, validate, promote, demote
+            from rlm_kernel.schema import PageStatus
+            run_id = f"gepa-run-{int(time.time())}"
+            target_path, _ = TARGET_MAP[target]
 
-                # Archive the incumbent via demote (superseded_by the optimized version)
-                incumbent = vault.get(target_path)
-                if incumbent is not None and incumbent.frontmatter.status == PageStatus.ACTIVE:
-                    demote(vault, incumbent, superseded_by=target_path)
+            # Archive the incumbent via demote (superseded_by the optimized version)
+            incumbent = vault.get(target_path)
+            if incumbent is not None and incumbent.frontmatter.status == PageStatus.ACTIVE:
+                demote(vault, incumbent, superseded_by=target_path)
 
-                # Propose the candidate through quarantine
-                qpath = propose(
-                    vault, "contract", f"optimized-{target}",
-                    str(best_text),
-                    f"GEPA optimization of {target} — {best_score:.1%} vs baseline {baseline_result.score:.1%}",
-                )
-                qpage = vault.get(qpath)
-                if qpage:
-                    # Validate — slot variables must be intact (D-K4-1a guard)
-                    report = validate(qpage, vault=vault)
-                    if report.passed:
-                        # Add lineage to body before promotion
-                        qpage.body = f"<!-- optimized_by: {run_id} -->\n{qpage.body}"
-                        qpage.frontmatter.tags = list(qpage.frontmatter.tags) + ["gepa-optimized"]
-                        # Promote directly into the target path (replaces incumbent)
-                        promote(vault, qpage, target_path=target_path)
-                        vault.git_commit(
-                            f"kernel: GEPA optimize {target} ({run_id}) — "
-                            f"{best_score:.1%} vs baseline {baseline_result.score:.1%}"
-                        )
-                        status = "promoted"
-            except Exception:
-                status = "gate_error"
+            # Propose the candidate through quarantine
+            qpath = propose(
+                vault, "contract", f"optimized-{target}",
+                str(best_text),
+                f"GEPA optimization of {target} — {best_score:.1%} vs baseline {baseline_result.score:.1%}",
+            )
+            qpage = vault.get(qpath)
+            if qpage:
+                # Validate — slot variables must be intact (D-K4-1a guard)
+                report = validate(qpage, vault=vault)
+                if report.passed:
+                    # Add lineage to body before promotion
+                    qpage.body = f"<!-- optimized_by: {run_id} -->\n{qpage.body}"
+                    qpage.frontmatter.tags = list(qpage.frontmatter.tags) + ["gepa-optimized"]
+                    # Promote directly into the target path (replaces incumbent)
+                    promote(vault, qpage, target_path=target_path)
+                    vault.git_commit(
+                        f"kernel: GEPA optimize {target} ({run_id}) — "
+                        f"{best_score:.1%} vs baseline {baseline_result.score:.1%}"
+                    )
+                    status = "promoted"
+        except Exception:
+            status = "gate_error"
     # G-K4-1: Write run-state to JSONL log for checkpoint/resume
     if log_dir is not None:
         try:

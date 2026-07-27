@@ -255,3 +255,69 @@ class TestPromotionContract:
         assert optimized_text in current, "_get_target_text still returns old body"
 
         td.cleanup()
+
+    def test_train_winner_held_out_loser_not_promoted(self, monkeypatch):
+        """R-K4-1: train improvement + held-out loss → no promotion."""
+        import tempfile
+        from pathlib import Path
+
+        import rlm_local
+        from rlm_kernel.optimize import TARGET_MAP, _get_target_text, run_optimization
+        from rlm_kernel.seed import seed_vault
+        from rlm_kernel.vault import LocalVault
+
+        td = tempfile.TemporaryDirectory(prefix="k4_gate_", ignore_cleanup_errors=True)
+        vault = LocalVault(Path(td.name), init_git=False)
+        seed_vault(vault)
+
+        target = "nudges"
+        target_path, _ = TARGET_MAP[target]
+        incumbent = vault.get(target_path)
+        assert incumbent is not None
+        original_body = incumbent.body
+
+        # Mock GEPA to return a "winning" candidate
+        optimized_text = "OPTIMIZED: Emit exactly one ```repl block now."
+
+        class FakeResult:
+            best_candidate = optimized_text
+            best_score = 0.9  # improved on train
+            metric_calls = 1
+
+        import gepa.optimize_anything as gepa_oa
+        monkeypatch.setattr(gepa_oa, "optimize_anything",
+                            lambda **kw: FakeResult())
+        monkeypatch.setattr(gepa_oa, "GEPAConfig",
+                            lambda **kw: type('obj', (object,), {})())
+        monkeypatch.setattr(gepa_oa, "EngineConfig",
+                            lambda **kw: type('obj', (object,), {})())
+        # Mock: train tasks get correct answers, held-out tasks get garbage.
+        train_answers = ["the year is 1648", "the name is Alice",
+                         "the price is $42.99", "email is support@example.com",
+                         "version 3.7.2", "the year is 1648"]
+        answer_iter = iter(train_answers + ["xyzzy_nomatch_xyzzy"] * 20)
+        def fake_completion(query, context, **kw):
+            try:
+                return next(answer_iter)
+            except StopIteration:
+                return "xyzzy_nomatch_xyzzy"
+        monkeypatch.setattr(rlm_local, "completion", fake_completion)
+
+        result = run_optimization(
+            vault, target=target, suite_name="needle_search",
+            profile="tiny", max_metric_calls=1, max_turns_per_task=2,
+        )
+
+        # R-K4-1 assertion: must NOT be promoted
+        assert result["status"] != "promoted", (
+            f"Expected NOT promoted (held-out loss), got status={result['status']}"
+        )
+
+        # Incumbent body must be UNCHANGED
+        reloaded = vault.get(target_path)
+        assert reloaded is not None
+        assert reloaded.body == original_body, (
+            "Incumbent body was changed despite held-out loss"
+        )
+
+        td.cleanup()
