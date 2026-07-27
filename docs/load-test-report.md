@@ -41,19 +41,18 @@ over 20K pages, extrapolating to ~3.5 hours at 100K.
 - **F1:** `_index_page(for_update=False)` on fresh builds skips all per-page
   DELETEs (tables are emptied up front). This removes the quadratic from `build()`.
 - **F2:** `fts_rowid` column captures `last_insert_rowid()` on FTS insert;
-  updates use `DELETE FROM fts_pages WHERE rowid = ?` — indexed in FTS5, O(1).
-- **F4:** `PRAGMA wal_checkpoint(TRUNCATE)` after build/delta stabilizes search
-  latency measurements.
-- **C1:** `load_system_prompt_from_vault(bridge=)` routes helper listing through
-  `Index.list_paths(kind="helper")` — O(1) SQL query vs O(n) full vault walk.
-
 ## Tier 2 (Organic Corpus)
 
-**Pending.** The organic corpus validation requires the user to prepare a corpus
-folder and set `RLM_KERNEL_LOAD_CORPUS`. See the runbook
-(`docs/conformance/20260725-0953-load-gate-100k-runbook.md` §4) for instructions.
+**Shelved (insufficient corpus).** The organic corpus proved insufficient in
+quality and quantity for a meaningful 100K-class validation. If a suitable
+corpus ever emerges, the runbook
+(`docs/conformance/20260725-0953-load-gate-100k-runbook.md` §4) revives this
+test unchanged; the two env-gated Tier-2 suite tests stay in place and will
+activate on `RLM_KERNEL_LOAD_CORPUS` being set.
 
-Once the corpus is available, run:
+The kernel moves to **production soak testing** as a daily driver. Regression
+checkpoints (rebuild, search p95, git status) should be re-run when the real
+vault crosses 10K / 50K / 100K pages.
 ```
 .venv/Scripts/python.exe -m pytest tests/load/test_load.py -v -k "tier2" --timeout=7200
 ```

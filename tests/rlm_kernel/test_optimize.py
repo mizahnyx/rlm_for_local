@@ -181,50 +181,77 @@ class TestFewShotBootstrap:
         td.cleanup()
 
 
-class TestPromotionInertness:
-    """D-K4-1: promoted optimizations must change the incumbent page."""
+class TestPromotionContract:
+    """D-K4-1b: real-path contract test — exercises run_optimization end-to-end."""
 
-    def test_promotion_updates_incumbent_page(self):
-        """After a successful optimization, the target page body changes."""
+    def test_run_optimization_promotes_through_gate(self, monkeypatch):
+        """End-to-end: mocked GEPA → gate-routed promotion → prompt differs."""
         import tempfile
         from pathlib import Path
 
-        from rlm_kernel.optimize import TARGET_MAP, _get_target_text
+        import rlm_local
+        from rlm_kernel.optimize import TARGET_MAP, _get_target_text, run_optimization
         from rlm_kernel.seed import seed_vault
         from rlm_kernel.vault import LocalVault
 
-        td = tempfile.TemporaryDirectory(prefix="k4_inert_", ignore_cleanup_errors=True)
+        td = tempfile.TemporaryDirectory(prefix="k4_contract_", ignore_cleanup_errors=True)
         vault = LocalVault(Path(td.name), init_git=False)
         seed_vault(vault)
 
-        # Simulate what run_optimization does when promotion succeeds
-        target = "how-to-work"
+        target = "nudges"
         target_path, _ = TARGET_MAP[target]
         incumbent = vault.get(target_path)
-        assert incumbent is not None, f"Target page {target_path} not found after seed"
-
+        assert incumbent is not None
         original_body = incumbent.body
         original_version = incumbent.frontmatter.version
 
-        # Simulate promotion: replace body directly
-        new_text = "OPTIMIZED CONTENT: this replaces the incumbent."
-        incumbent.body = "<!-- optimized_by: gepa-run-test -->\n" + new_text
-        incumbent.frontmatter.version = incumbent.frontmatter.version + 1
-        if "gepa-optimized" not in incumbent.frontmatter.tags:
-            incumbent.frontmatter.tags = list(incumbent.frontmatter.tags) + ["gepa-optimized"]
-        vault.put(incumbent, target_path)
+        # Mock gepa.optimize_anything to return a "winning" candidate immediately
+        optimized_text = "OPTIMIZED: Emit exactly one ```repl block now."
 
-        # Verify the page actually changed
+        class FakeResult:
+            best_candidate = optimized_text
+            best_score = 0.9
+            metric_calls = 1
+
+        # Patch the GEPA import that run_optimization uses internally
+        import gepa.optimize_anything as gepa_oa
+        monkeypatch.setattr(gepa_oa, "optimize_anything",
+                            lambda **kw: FakeResult())
+        monkeypatch.setattr(gepa_oa, "GEPAConfig",
+                            lambda **kw: type('obj', (object,), {})())
+        monkeypatch.setattr(gepa_oa, "EngineConfig",
+                            lambda **kw: type('obj', (object,), {})())
+        # Mock rlm_local.completion for the evaluator (returns correct answers)
+        def fake_completion(query, context, **kw):
+            return "The answer is blue."  # matches needle_search tasks
+        monkeypatch.setattr(rlm_local, "completion", fake_completion)
+
+        # Run optimization (should promote since mocked GEPA returns a winner)
+        result = run_optimization(
+            vault, target=target, suite_name="needle_search",
+            profile="tiny", max_metric_calls=1, max_turns_per_task=2,
+        )
+
+        # D-K4-1b assertions:
+        # (a) status indicates promotion
+        assert result["status"] == "promoted", f"Expected promoted, got {result['status']}"
+
+        # (b) Incumbent page body changed
         reloaded = vault.get(target_path)
         assert reloaded is not None
         assert reloaded.body != original_body, "Body did not change after promotion"
-        assert new_text in reloaded.body, f"Optimized text not found in promoted body"
-        assert reloaded.frontmatter.version == original_version + 1
+        assert optimized_text in reloaded.body, "Optimized text not found in promoted body"
+
+        # (c) Version bumped from the quarantined page (starts at version 0+1=1)
+        assert reloaded.frontmatter.version >= 1
+
+        # (d) Lineage present
+        assert "optimized_by: gepa-run-" in reloaded.body
         assert "gepa-optimized" in reloaded.frontmatter.tags
 
-        # Verify _get_target_text returns the new body
+        # (e) _get_target_text returns the new text (prompt-level non-inertness)
         current = _get_target_text(vault, target)
         assert current is not None
-        assert new_text in current, f"_get_target_text still returns old body"
+        assert optimized_text in current, "_get_target_text still returns old body"
 
         td.cleanup()

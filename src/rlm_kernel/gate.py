@@ -439,32 +439,35 @@ def promote(
     vault: VaultStore,
     page: Page,
     index: Any | None = None,
+    target_path: str | None = None,
 ) -> str:
     """Promote a quarantined page into the live vault namespace.
 
-    Moves from ``quarantine/<ulid>.md`` to ``<kind>/<name>.md``, bumps the
-    version, sets status to ``active``, computes the content hash, deletes the
-    quarantine copy, and optionally triggers a delta reindex.
+    Moves from ``quarantine/<ulid>.md`` to ``<kind>/<name>.md`` (or
+    ``target_path`` if provided), bumps the version, sets status to
+    ``active``, computes the content hash, deletes the quarantine copy,
+    and optionally triggers a delta reindex.
 
     Args:
         vault: The vault store.
-        page: The quarantined page to promote (status must be ``pending`` and
-              path must start with ``quarantine/``).
-        index: Optional ``Index`` instance to update via ``reindex_delta``.
+        page: The quarantined page to promote.
+        index: Optional ``Index`` instance for ``reindex_delta``.
+        target_path: Optional override for the target path. When provided,
+            the page is written to this exact path instead of the default
+            ``<kind>/<name>.md``. Used by the optimizer to replace
+            incumbent pages without changing their path (D-K4-1a).
 
     Returns:
-        The new relative path of the promoted page.
+        The path the page was written to.
 
     Raises:
-        ValueError: If the page is not in quarantine, not pending, or the
-                    target namespace already has an active page with that name.
+        ValueError: If validation fails or the page is not promotable.
     """
     if not page.path.startswith(QUARANTINE_PREFIX):
         raise ValueError(
             f"Page path {page.path!r} is not in quarantine/"
         )
 
-    # Sanity: the page must still be pending
     if page.frontmatter.status != PageStatus.PENDING:
         raise ValueError(
             f"Page status is '{page.frontmatter.status.value}', expected 'pending'"
@@ -477,28 +480,28 @@ def promote(
             f"Cannot promote: validation failed: {'; '.join(report.errors)}"
         )
 
-    target_path = f"{page.kind.value}/{page.name}.md"
+    # Compute target path — override when replacing an incumbent (D-K4-1a)
+    final_path = target_path if target_path is not None else f"{page.kind.value}/{page.name}.md"
 
-    # Name-conflict guard
-    if vault.exists(target_path):
-        existing = vault.get(target_path)
+    # Name-conflict guard (skipped when target_path is explicit — caller takes responsibility)
+    if target_path is None and vault.exists(final_path):
+        existing = vault.get(final_path)
         if existing is not None and existing.frontmatter.status == PageStatus.ACTIVE:
             raise ValueError(
-                f"Active page already exists at {target_path!r}. "
+                f"Active page already exists at {final_path!r}. "
                 f"Demote it first or choose a different name."
             )
-
     # Mutate frontmatter for promotion (model_copy avoids caller side-effects)
     fm = page.frontmatter.model_copy()
     fm.status = PageStatus.ACTIVE
     fm.version = max(fm.version or 0, 0) + 1
     fm.updated = datetime.now(timezone.utc)
 
-    promoted = Page(frontmatter=fm, body=page.body, path=target_path)
+    promoted = Page(frontmatter=fm, body=page.body, path=final_path)
     fm.hash = promoted.content_hash
 
     # Write to target namespace
-    vault.put(promoted, target_path)
+    vault.put(promoted, final_path)
 
     # Remove quarantine copy
     vault.delete(page.path)
@@ -507,7 +510,7 @@ def promote(
     if index is not None:
         index.reindex_delta(vault)
 
-    return target_path
+    return final_path
 
 
 # ── Reject ───────────────────────────────────────────────────────────────────
