@@ -213,14 +213,12 @@ class TestPromotionContract:
             best_score = 0.9
             metric_calls = 1
 
-        # Patch the GEPA import that run_optimization uses internally
+        # Patch the GEPA import that run_optimization uses internally.
+        # NOTE: GEPAConfig/EngineConfig are deliberately NOT patched — the real
+        # config classes must construct successfully (D-R1 regression guard).
         import gepa.optimize_anything as gepa_oa
         monkeypatch.setattr(gepa_oa, "optimize_anything",
                             lambda **kw: FakeResult())
-        monkeypatch.setattr(gepa_oa, "GEPAConfig",
-                            lambda **kw: type('obj', (object,), {})())
-        monkeypatch.setattr(gepa_oa, "EngineConfig",
-                            lambda **kw: type('obj', (object,), {})())
         # Mock rlm_local.completion for the evaluator (returns correct answers)
         def fake_completion(query, context, **kw):
             return "The answer is blue."  # matches needle_search tasks
@@ -287,10 +285,7 @@ class TestPromotionContract:
         import gepa.optimize_anything as gepa_oa
         monkeypatch.setattr(gepa_oa, "optimize_anything",
                             lambda **kw: FakeResult())
-        monkeypatch.setattr(gepa_oa, "GEPAConfig",
-                            lambda **kw: type('obj', (object,), {})())
-        monkeypatch.setattr(gepa_oa, "EngineConfig",
-                            lambda **kw: type('obj', (object,), {})())
+        # NOTE: GEPAConfig/EngineConfig deliberately NOT patched (D-R1 guard).
         # Train: 3/5 correct (score 0.6), best=0.9 > 0.6 → train gate OPENS
         # Held-out: all wrong (score 0.0), 0.0 < 0.6 → held-out gate BLOCKS
         # This discriminates: without the held-out gate, promotion would occur
@@ -326,4 +321,117 @@ class TestPromotionContract:
             "Incumbent body was changed despite held-out loss"
         )
 
+        td.cleanup()
+
+
+class TestLiveWiringGuards:
+    """D-R1/D-R2: non-vacuous guards against the two live-run defects.
+
+    Both tests exercise REAL code paths (real GEPA config classes, real
+    rlm_local.completion construction) — they fail on the pre-fix code and
+    pass after, with discrimination verified by reasoning about each path,
+    not by assuming the mock proves anything.
+    """
+
+    def test_gepa_config_constructs_with_real_package(self, monkeypatch):
+        """D-R1: run_optimization must build GEPAConfig without TypeError.
+
+        Only optimize_anything is mocked; GEPAConfig/EngineConfig/
+        ReflectionConfig are the real classes from the installed gepa package.
+        Pre-fix, EngineConfig(student_model=..., reflection_model=...) raised
+        TypeError (unexpected kwargs) — this test goes red if bogus fields
+        ever come back.
+        """
+        import tempfile
+        from pathlib import Path
+
+        import rlm_local
+        from rlm_kernel.optimize import run_optimization
+        from rlm_kernel.seed import seed_vault
+        from rlm_kernel.vault import LocalVault
+
+        td = tempfile.TemporaryDirectory(prefix="k4_cfg_", ignore_cleanup_errors=True)
+        vault = LocalVault(Path(td.name), init_git=False)
+        seed_vault(vault)
+
+        captured: dict = {}
+
+        class FakeResult:
+            best_candidate = "X"
+            best_score = 0.0
+            metric_calls = 0
+
+        import gepa.optimize_anything as gepa_oa
+        real_config_cls = gepa_oa.GEPAConfig
+
+        def fake_optimize(**kw):
+            captured["config"] = kw.get("config")
+            return FakeResult()
+
+        monkeypatch.setattr(gepa_oa, "optimize_anything", fake_optimize)
+        monkeypatch.setattr(
+            rlm_local, "completion", lambda query, context, **kw: "no match"
+        )
+
+        result = run_optimization(
+            vault, target="nudges", suite_name="needle_search",
+            profile="tiny", max_metric_calls=1, max_turns_per_task=1,
+        )
+
+        assert result["status"] != "error", (
+            f"GEPA config construction failed: {result.get('reason')}"
+        )
+        cfg = captured.get("config")
+        assert isinstance(cfg, real_config_cls), (
+            f"optimize_anything received {type(cfg)}, not a real GEPAConfig"
+        )
+        assert cfg.engine.max_metric_calls == 1
+        assert cfg.reflection.reflection_lm, "reflection_lm must be configured"
+        td.cleanup()
+
+    def test_evaluator_injects_candidate_into_completion(self, monkeypatch):
+        """D-R2: candidate text must reach the model's messages.
+
+        Uses target='how-to-work' — a page whose body is assembled into the
+        system prompt via load_system_prompt_from_vault. A stub backend
+        records every message it receives; the candidate marker must appear.
+        Pre-fix (no kernel_bridge in the evaluator), the completion used the
+        hardcoded prompt and the marker never arrived — flat signal.
+        """
+        import tempfile
+        from pathlib import Path
+
+        import rlm_local
+        from rlm_kernel.optimize import make_gepa_evaluator
+        from rlm_kernel.seed import seed_vault
+        from rlm_kernel.vault import LocalVault
+
+        td = tempfile.TemporaryDirectory(prefix="k4_inj_", ignore_cleanup_errors=True)
+        vault = LocalVault(Path(td.name), init_git=False)
+        seed_vault(vault)
+
+        seen: list[str] = []
+
+        class StubBackend:
+            def chat(self, messages, *, tier="root", max_tokens=1500,
+                     temperature=0.0, response_schema=None):
+                for m in messages:
+                    seen.append(str(m.get("content", "")))
+                return "The answer is blue."
+
+        stub = StubBackend()
+        # Intercept the backend rlm_local.completion builds internally
+        monkeypatch.setattr(rlm_local, "HTTPModelBackend", lambda **kw: stub)
+
+        evaluator = make_gepa_evaluator(
+            "needle_search", None, "how-to-work", vault,
+            profile="tiny", max_turns=2, split="train",
+        )
+        marker = "UNIQUE_CANDIDATE_MARKER_7f3a"
+        evaluator(marker)
+
+        assert any(marker in m for m in seen), (
+            "Candidate text never reached the model — injection path broken "
+            "(kernel_bridge missing from the evaluator)"
+        )
         td.cleanup()

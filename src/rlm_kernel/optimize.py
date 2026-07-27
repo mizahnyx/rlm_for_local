@@ -67,6 +67,7 @@ def evaluate_candidate(
     profile: str = "tiny",
     max_turns: int = 6,
     split: str = "train",
+    kernel_bridge: Any | None = None,
 ) -> EvalResult:
     """Evaluate a candidate text artifact against an eval suite.
 
@@ -80,6 +81,10 @@ def evaluate_candidate(
         profile: Hardware profile for completion().
         max_turns: Turn budget per eval task.
         split: "train" or "held_out" — which split to evaluate.
+        kernel_bridge: Optional KernelBridge into the vault (D-R2). REQUIRED
+            for the candidate to actually influence the completion: without it,
+            rlm_local falls back to the hardcoded prompts and the injected
+            candidate text is never read.
 
     Returns:
         EvalResult with score (0.0–1.0), feedback text from harness warnings,
@@ -104,6 +109,7 @@ def evaluate_candidate(
             answer = rlm_local.completion(
                 task.query, task.context,
                 profile=profile, max_turns=max_turns,
+                kernel_bridge=kernel_bridge,
             )
         except Exception as e:
             per_task.append({"task": task.name, "passed": False,
@@ -136,6 +142,24 @@ def evaluate_candidate(
         feedback=feedback,
         per_task=per_task,
     )
+
+
+def _make_bridge(vault: Any) -> Any:
+    """Construct a KernelBridge into a vault for evaluation (D-R2).
+
+    The bridge lets rlm_local.completion() assemble prompts from vault pages
+    (load_system_prompt_from_vault) and inject vault-defined helpers into the
+    REPL. Without it, completions run on the hardcoded package prompts and
+    candidate text written into the vault is never read.
+    """
+    from rlm_kernel.repl_bridge import KernelBridge
+    from rlm_kernel.vault import LocalVault
+
+    if isinstance(vault, LocalVault):
+        index_path = vault.root / ".index" / "meta.sqlite"
+    else:
+        index_path = Path("__no_index__")
+    return KernelBridge(vault=vault, index_path=index_path)
 
 
 def make_gepa_evaluator(
@@ -172,6 +196,11 @@ def make_gepa_evaluator(
     target_path, _ = entry
     original = _get_target_text(vault, target)
 
+    # D-R2: the candidate must flow into the completion via a kernel bridge,
+    # otherwise rlm_local uses its hardcoded prompts and the injection below
+    # is inert (flat optimization signal).
+    bridge = _make_bridge(vault)
+
     def evaluator(candidate: str) -> tuple[float, dict[str, Any]]:
         # Inject candidate into vault for evaluation
         try:
@@ -186,6 +215,7 @@ def make_gepa_evaluator(
         result = evaluate_candidate(
             candidate, suite_name, eval_dir,
             profile=profile, max_turns=max_turns, split=split,
+            kernel_bridge=bridge,
         )
 
         # Restore original
@@ -235,7 +265,7 @@ def run_optimization(
     Returns:
         Dict with baseline, best, status, and lineage info.
     """
-    from gepa.optimize_anything import GEPAConfig, EngineConfig  # type: ignore
+    from gepa.optimize_anything import EngineConfig, GEPAConfig, ReflectionConfig  # type: ignore
     from gepa.optimize_anything import optimize_anything  # type: ignore
 
     if eval_dir is None:
@@ -279,18 +309,31 @@ def run_optimization(
             profile=profile, max_turns=max_turns_per_task, split="held_out",
         )
 
+    # D-R2: bridge so the vault (and thus the injected candidates) is actually
+    # used by completions — baseline and held-out must use the same prompt path.
+    bridge = _make_bridge(vault)
+
     # Baseline on train
     baseline_result = evaluate_candidate(
         seed, suite_name, eval_dir,
         profile=profile, max_turns=max_turns_per_task, split="train",
+        kernel_bridge=bridge,
     )
 
-    # Configure GEPA
+    # Configure GEPA against the installed package's real schema (D-R1).
+    # Reflection model = the harness's root tier, reached via litellm's
+    # openai/ provider (any OpenAI-compatible local server).
+    from rlm_local.config import load_config
+    harness_cfg = load_config(profile)
     config = GEPAConfig(
-        max_metric_calls=max_metric_calls,
-        engine=EngineConfig(
-            student_model="sub",   # uses sub-tier endpoint from config
-            reflection_model="root",  # uses root-tier endpoint
+        engine=EngineConfig(max_metric_calls=max_metric_calls),
+        reflection=ReflectionConfig(
+            reflection_lm=f"openai/{harness_cfg.root_model}",
+            reflection_lm_kwargs={
+                "api_base": harness_cfg.root_endpoint,
+                "api_key": "local",
+                "ssl_verify": False,
+            },
         ),
     )
 
@@ -328,6 +371,7 @@ def run_optimization(
         held_out_result = evaluate_candidate(
             str(best_text), suite_name, eval_dir,
             profile=profile, max_turns=max_turns_per_task, split="held_out",
+            kernel_bridge=bridge,
         )
 
     # D-K4-1a: Gate-routed promotion with slot validation + superseded_by archive
