@@ -21,6 +21,7 @@ def seed_vault(vault: VaultStore) -> None:
     _seed_contracts(vault)
     _seed_templates(vault)
     _seed_helpers(vault)
+    _seed_fewshots(vault)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -222,8 +223,18 @@ def _seed_templates(vault: VaultStore) -> None:
             "contract/templates/turn-header.md",
             "Turn {turn}/{max_turns}.",
         ),
+        # D-K4-2: Real prologue page (matches rlm_local.templates.PROLOGUE)
+        (
+            "prologue",
+            "Prologue: Decomposition Nudge",
+            "Mandatory turn-0 decomposition nudge — PROBE + PLAN before code.",
+            "contract/templates/prologue.md",
+            "Before writing code, describe in 1-2 sentences:\n"
+            "1. What you need to learn about the context (probe plan).\n"
+            "2. How the overall answer decomposes into smaller sub-problems.\n\n"
+            "Then emit exactly one ```repl block with your probing code.",
+        ),
     ]
-
     for name, title, summary, path, body in templates:
         _put_if_missing(
             vault,
@@ -456,3 +467,55 @@ _SHOW_VARS_USAGE = """\
 # Show all user-defined variables in the REPL
 show_vars()
 ```"""
+
+
+# ── Few-shots ──────────────────────────────────────────────────────────────
+
+_FEWSHOT_EXAMPLE_BODY = """\
+# Example Few-Shot Transcript
+
+This is a worked example demonstrating the exact message format.
+It shows probing, searching, verifying, and submitting an answer.
+
+## Query
+What color is mentioned in the context?
+
+## Context
+The sky appeared bright and clear today. The dominant color observed was blue.
+
+## Worked Transcript
+
+Turn 1: Probe
+```repl
+print(f'Context length: {len(context)}')
+print(f'First 200 chars: {context[:200]}')
+```
+
+Turn 2: Search
+```repl
+hits = grep('blue')
+print(f'Found {len(hits)} matches for blue')
+```
+
+Turn 3: Submit
+```repl
+answer['content'] = 'The color blue is mentioned in the context.'
+answer['ready'] = True
+```
+"""
+
+
+def _seed_fewshots(vault: VaultStore) -> None:
+    """Seed a canonical few-shot example page (D-K4-2)."""
+    _put_if_missing(
+        vault,
+        _page(
+            kind=PageKind.FEWSHOT,
+            name="example",
+            title="Example Few-Shot: Needle Search",
+            summary="Worked few-shot transcript demonstrating probe→search→submit.",
+            body=_FEWSHOT_EXAMPLE_BODY,
+            tags=["fewshot", "example"],
+        ),
+        "fewshots/example.md",
+    )

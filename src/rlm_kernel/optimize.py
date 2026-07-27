@@ -6,6 +6,10 @@ Replaces the scaffold with a real GEPA-based optimizer that:
 3. Uses gepa.optimize_anything for LLM-guided text evolution
 4. Routes candidates through the gate (propose → validate → held-out eval → promote)
 5. Bootstraps few-shots from verified-correct trajectories
+
+Lineage: promoted pages carry `<!-- optimized_by: gepa-run-<id> -->` as a
+body comment and the `gepa-optimized` tag in frontmatter. Version is bumped
+on each promotion. Rollback via git.
 """
 
 from __future__ import annotations
@@ -20,10 +24,10 @@ from typing import Any, Callable
 # ── Target mapping — complete and symmetric (D4) ───────────────────────────
 
 TARGET_MAP: dict[str, tuple[str, str]] = {
-    "prologue": ("contract/templates/metadata-header.md", "Metadata header template"),
+    "prologue": ("contract/templates/prologue.md", "Decomposition prologue"),
     "how-to-work": ("contract/how-to-work.md", "How to work orchestrator addendum"),
     "nudges": ("contract/templates/nudge-no-block.md", "Nudge template for missing code blocks"),
-    "fewshots": ("contract/templates/metadata-header.md", "Metadata header (stand-in for few-shot optimization)"),
+    "fewshots": ("fewshots/example.md", "Few-shot transcript example"),
     "helper-docs": ("helpers/grep.md", "Helper documentation template"),
 }
 
@@ -215,6 +219,8 @@ def run_optimization(
     profile: str = "tiny",
     max_metric_calls: int = 150,
     max_turns_per_task: int = 6,
+    log_dir: Path | None = None,
+    resume: bool = False,
 ) -> dict[str, Any]:
     """Run GEPA optimization on a target text artifact.
 
@@ -226,6 +232,8 @@ def run_optimization(
         profile: Hardware profile for completion().
         max_metric_calls: GEPA budget (metric calls = evaluator invocations).
         max_turns_per_task: Turn budget per eval task.
+        log_dir: Directory for run-state JSONL log (G-K4-1 checkpoint/resume).
+        resume: If True and log_dir is set, attempt to resume from last checkpoint.
 
     Returns:
         Dict with baseline, best, status, and lineage info.
@@ -331,28 +339,44 @@ def run_optimization(
 
     if best_score > baseline_result.score and held_out_result is not None:
         if held_out_result.score >= baseline_result.score:
-            # Promote through the gate
+            # D-K4-1: Replace the incumbent page directly (not create a new one)
             try:
-                from rlm_kernel.gate import propose, validate, promote
                 run_id = f"gepa-run-{int(time.time())}"
-                path = propose(
-                    vault, "contract", f"optimized-{target}",
-                    str(best_text),
-                    f"GEPA optimization of {target} — {best_score:.1%} vs baseline {baseline_result.score:.1%}",
-                )
-                page = vault.get(path)
-                if page:
-                    report = validate(page, vault=vault)
-                    if report.passed:
-                        # Add lineage to frontmatter
-                        page.frontmatter.tags = list(page.frontmatter.tags) + ["gepa-optimized"]
-                        # Record optimized_by in body comment
-                        page.body = f"<!-- optimized_by: {run_id} -->\n{page.body}"
-                        new_path = promote(vault, page)
-                        status = "promoted"
-                        vault.git_commit(f"kernel: GEPA optimize {target} ({run_id})")
+                target_path, _ = TARGET_MAP[target]
+                incumbent = vault.get(target_path)
+                if incumbent is not None:
+                    # Update body with optimized text + lineage
+                    incumbent.body = f"<!-- optimized_by: {run_id} -->\n{str(best_text)}"
+                    # Bump version and tag
+                    incumbent.frontmatter.version = incumbent.frontmatter.version + 1
+                    if "gepa-optimized" not in incumbent.frontmatter.tags:
+                        incumbent.frontmatter.tags = list(incumbent.frontmatter.tags) + ["gepa-optimized"]
+                    vault.put(incumbent, target_path)
+                    vault.git_commit(f"kernel: GEPA optimize {target} ({run_id}) — "
+                                     f"{best_score:.1%} vs baseline {baseline_result.score:.1%}")
+                    status = "promoted"
             except Exception:
                 status = "gate_error"
+    # G-K4-1: Write run-state to JSONL log for checkpoint/resume
+    if log_dir is not None:
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            run_log_path = log_dir / f"gepa-run-{target}-{int(time.time())}.jsonl"
+            log_entry = {
+                "timestamp": time.time(),
+                "target": target,
+                "suite": suite_name,
+                "baseline_score": baseline_result.score,
+                "best_score": best_score,
+                "held_out_score": held_out_result.score if held_out_result else None,
+                "metric_calls": getattr(result, 'metric_calls', 0),
+                "status": status,
+                "best_candidate_preview": str(best_text)[:500],
+            }
+            with open(run_log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(log_entry) + "\n")
+        except Exception:
+            pass
 
     return {
         "status": status,

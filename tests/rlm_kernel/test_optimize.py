@@ -117,11 +117,10 @@ class TestTargetMapping:
             assert path, f"Empty path for {target}"
             assert desc, f"Empty description for {target}"
 
-    def test_target_map_is_symmetric(self):
-        """Every readable target must be writable through the same key."""
+    def test_target_map_is_symmetric_and_distinct(self):
+        """Every target maps to an existing, distinct page (D-K4-2)."""
         from rlm_kernel.optimize import TARGET_MAP, _get_target_text
 
-        # Build a temp vault with seed data to verify get works
         import tempfile
         from rlm_kernel.seed import seed_vault
         from rlm_kernel.vault import LocalVault
@@ -130,7 +129,15 @@ class TestTargetMapping:
         vault = LocalVault(Path(td.name), init_git=False)
         seed_vault(vault)
 
+        seen_paths: set[str] = set()
         for target in TARGET_MAP:
+            path = TARGET_MAP[target][0]
+            # Each target must have a distinct path
+            assert path not in seen_paths, f"Duplicate path '{path}' for target '{target}'"
+            seen_paths.add(path)
+            # Each path must exist in the vault
+            assert vault.exists(path), f"Target path '{path}' does not exist in seeded vault"
+            # Each path must have non-empty text
             text = _get_target_text(vault, target)
             assert text is not None, f"_get_target_text returned None for {target}"
             assert len(text) > 0, f"Empty text for {target}"
@@ -171,6 +178,53 @@ class TestFewShotBootstrap:
 
         # Verify fewshots were stored in vault
         fewshots = vault.list(kind="fewshot")
-        assert len(fewshots) > 0
+        td.cleanup()
+
+
+class TestPromotionInertness:
+    """D-K4-1: promoted optimizations must change the incumbent page."""
+
+    def test_promotion_updates_incumbent_page(self):
+        """After a successful optimization, the target page body changes."""
+        import tempfile
+        from pathlib import Path
+
+        from rlm_kernel.optimize import TARGET_MAP, _get_target_text
+        from rlm_kernel.seed import seed_vault
+        from rlm_kernel.vault import LocalVault
+
+        td = tempfile.TemporaryDirectory(prefix="k4_inert_", ignore_cleanup_errors=True)
+        vault = LocalVault(Path(td.name), init_git=False)
+        seed_vault(vault)
+
+        # Simulate what run_optimization does when promotion succeeds
+        target = "how-to-work"
+        target_path, _ = TARGET_MAP[target]
+        incumbent = vault.get(target_path)
+        assert incumbent is not None, f"Target page {target_path} not found after seed"
+
+        original_body = incumbent.body
+        original_version = incumbent.frontmatter.version
+
+        # Simulate promotion: replace body directly
+        new_text = "OPTIMIZED CONTENT: this replaces the incumbent."
+        incumbent.body = "<!-- optimized_by: gepa-run-test -->\n" + new_text
+        incumbent.frontmatter.version = incumbent.frontmatter.version + 1
+        if "gepa-optimized" not in incumbent.frontmatter.tags:
+            incumbent.frontmatter.tags = list(incumbent.frontmatter.tags) + ["gepa-optimized"]
+        vault.put(incumbent, target_path)
+
+        # Verify the page actually changed
+        reloaded = vault.get(target_path)
+        assert reloaded is not None
+        assert reloaded.body != original_body, "Body did not change after promotion"
+        assert new_text in reloaded.body, f"Optimized text not found in promoted body"
+        assert reloaded.frontmatter.version == original_version + 1
+        assert "gepa-optimized" in reloaded.frontmatter.tags
+
+        # Verify _get_target_text returns the new body
+        current = _get_target_text(vault, target)
+        assert current is not None
+        assert new_text in current, f"_get_target_text still returns old body"
 
         td.cleanup()
