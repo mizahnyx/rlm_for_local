@@ -58,8 +58,8 @@ class Profile:
 PROFILES: dict[str, Profile] = {
     "tiny": Profile(
         name="tiny",
-        root_model="LFM2.5-VL-1.6B",
-        sub_model="LFM2.5-VL-1.6B",
+        root_model="Qwen3.5-4B-Abliterated",
+        sub_model="Qwen3.5-4B-Abliterated",
         root_ctx_size=8192,
         sub_ctx_size=8192,
         sub_prompt_char_budget=8000,
@@ -73,8 +73,8 @@ PROFILES: dict[str, Profile] = {
     ),
     "laptop": Profile(
         name="laptop",
-        root_model="LFM2.5-VL-1.6B",
-        sub_model="LFM2.5-VL-1.6B",
+        root_model="Qwen3.5-4B-Abliterated",
+        sub_model="Qwen3.5-4B-Abliterated",
         root_ctx_size=16384,
         sub_ctx_size=16384,
         sub_prompt_char_budget=16000,
@@ -85,8 +85,8 @@ PROFILES: dict[str, Profile] = {
     ),
     "workstation": Profile(
         name="workstation",
-        root_model="LFM2.5-VL-1.6B",
-        sub_model="LFM2.5-VL-1.6B",
+        root_model="Qwen3.5-4B-Abliterated",
+        sub_model="Qwen3.5-4B-Abliterated",
         root_ctx_size=32768,
         sub_ctx_size=32768,
         sub_prompt_char_budget=24000,

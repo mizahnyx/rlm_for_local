@@ -141,3 +141,35 @@ class TestRepairJson:
         result = repair_json('{"key": "value"')
         # Should return what it can
         assert result.startswith("{")
+
+
+class TestSmartQuoteNormalization:
+    """Small models emit Unicode smart quotes in code (observed live with
+    Qwen3.5-4B: answer[’content’] = ’…’) — the parser must normalize to
+    ASCII so the code is executable Python."""
+
+    def test_smart_quotes_normalized_in_repl_block(self):
+        parser = Parser()
+        text = "```repl\nanswer[’content’] = ’The year is 1648.’\nanswer[“ready”] = True\n```"
+        result = parser.parse(text)
+        assert len(result.blocks) == 1
+        block = result.blocks[0]
+        assert "answer['content'] = 'The year is 1648.'" in block
+        assert 'answer["ready"] = True' in block
+        # No smart quotes remain
+        for ch in "’‘“”":
+            assert ch not in block
+        assert any("Smart quotes normalized" in w for w in result.warnings)
+
+    def test_normalized_block_is_valid_python(self):
+        parser = Parser()
+        text = "```repl\nmsg = ’hello’\nprint(“done”)\n```"
+        result = parser.parse(text)
+        compile(result.blocks[0], "<block>", "exec")  # raises if invalid
+
+    def test_ascii_code_unchanged_and_no_warning(self):
+        parser = Parser()
+        text = "```repl\nanswer['content'] = 'x'\nanswer['ready'] = True\n```"
+        result = parser.parse(text)
+        assert result.blocks[0].count("'") == 6
+        assert not any("Smart quotes" in w for w in result.warnings)

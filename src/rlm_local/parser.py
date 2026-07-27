@@ -40,6 +40,29 @@ FINAL_LINE_RE = re.compile(r"^FINAL:\s*(.+)$", re.MULTILINE)
 ANSWER_READY_RE = re.compile(r"""answer\[(?:"ready"|'ready'|`ready`)\]\s*=\s*True""")
 ANSWER_CONTENT_RE = re.compile(r"""answer\[(?:"content"|'content'|`content`)\]\s*=\s*(.+)$""", re.MULTILINE)
 
+# Small models frequently emit Unicode "smart quotes" when writing code,
+# which is a syntax error in Python (observed live with Qwen3.5-4B:
+# answer[’content’] = ’…’). Normalize to ASCII before execution.
+SMART_QUOTES: dict[str, str] = {
+    "‘": "'", "’": "'", "‚": "'", "‛": "'",
+    "“": '"', "”": '"', "„": '"', "‟": '"',
+    "′": "'", "″": '"',
+}
+
+
+def normalize_code(text: str) -> tuple[str, bool]:
+    """Replace smart quotes with ASCII quotes in a code block.
+
+    Returns (normalized_text, changed) — changed=True if any replacement
+    was made (callers should record a templated warning, R4.1).
+    """
+    changed = False
+    for smart, ascii_q in SMART_QUOTES.items():
+        if smart in text:
+            text = text.replace(smart, ascii_q)
+            changed = True
+    return text, changed
+
 
 class Parser:
     """Parses root model responses into executable blocks and termination signals."""
@@ -72,6 +95,7 @@ class Parser:
         blocks = FENCE_RE.findall(text)
         if blocks:
             result.blocks = [b.strip() for b in blocks]
+            self._normalize(result)
             self._consecutive_nudges = 0
             self._consecutive_errors = 0
             return result
@@ -81,6 +105,7 @@ class Parser:
         if unclosed and unclosed[0].strip():
             result.blocks = [unclosed[0].strip()]
             result.warnings.append("Unclosed ```repl fence repaired.")
+            self._normalize(result)
             self._consecutive_nudges = 0
             self._consecutive_errors = 0
             return result
@@ -90,6 +115,7 @@ class Parser:
         if alt_blocks:
             result.blocks = [b.strip() for b in alt_blocks]
             result.warnings.append("Non-repl fence treated as ```repl.")
+            self._normalize(result)
             self._consecutive_nudges = 0
             self._consecutive_errors = 0
             return result
@@ -100,6 +126,7 @@ class Parser:
         if alt_unclosed:
             result.blocks = [alt_unclosed[0].strip()]
             result.warnings.append("Unclosed fence repaired (narration pattern).")
+            self._normalize(result)
             self._consecutive_nudges = 0
             self._consecutive_errors = 0
             return result
@@ -131,6 +158,18 @@ class Parser:
         if self._consecutive_nudges <= self._max_nudges:
             result.nudge = NUDGE_NO_BLOCK
         return result
+
+    def _normalize(self, result: ParseResult) -> None:
+        """Normalize smart quotes in extracted blocks; warn once if any changed."""
+        changed_any = False
+        normalized: list[str] = []
+        for block in result.blocks:
+            nb, changed = normalize_code(block)
+            normalized.append(nb)
+            changed_any = changed_any or changed
+        result.blocks = normalized
+        if changed_any:
+            result.warnings.append("Smart quotes normalized to ASCII.")
 
     def parse_stderr(self, text: str, stderr_text: str) -> ParseResult | None:
         """Check if the model fixed a previous error and extract the new block.
