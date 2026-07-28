@@ -323,6 +323,9 @@ def run_optimization(
     # Configure GEPA against the installed package's real schema (D-R1).
     # Reflection model = the harness's root tier, reached via litellm's
     # openai/ provider (any OpenAI-compatible local server).
+    import litellm  # noqa: F401 — required at runtime by gepa.lm.LM
+    litellm.ssl_verify = False  # local self-signed certs (module-level setting)
+
     from rlm_local.config import load_config
     harness_cfg = load_config(profile)
     config = GEPAConfig(
@@ -332,7 +335,6 @@ def run_optimization(
             reflection_lm_kwargs={
                 "api_base": harness_cfg.root_endpoint,
                 "api_key": "local",
-                "ssl_verify": False,
             },
         ),
     )

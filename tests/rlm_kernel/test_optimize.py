@@ -435,3 +435,12 @@ class TestLiveWiringGuards:
             "(kernel_bridge missing from the evaluator)"
         )
         td.cleanup()
+
+    def test_reflection_dependencies_importable(self):
+        """Guard: GEPA's live reflection path needs litellm + tenacity at
+        runtime — gepa declares neither as a hard dependency, and a missing
+        one caused a 24h circular run (reflection failed every iteration,
+        seed re-selected forever). Import check catches silent rebreakage."""
+        import importlib
+        for mod in ("litellm", "tenacity"):
+            importlib.import_module(mod)
