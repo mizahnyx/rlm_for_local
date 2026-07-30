@@ -399,11 +399,34 @@ def _process_chat_message(session_id: str, message: str, stream_id: str, profile
 
     import rlm_local
     try:
-        answer = rlm_local.completion(query, context, profile=profile, max_turns=10)
+        bridge = _get_kernel_bridge()
+        answer = rlm_local.completion(
+            query, context, profile=profile, max_turns=10,
+            kernel_bridge=bridge,
+        )
         emit("chunk", text=answer)
     except Exception as e:
         emit("error", text=str(e))
     emit("done", text="")
+
+
+def _get_kernel_bridge():
+    """Lazily create and cache a KernelBridge for vault-aware completions."""
+    global _cached_bridge
+    if "_cached_bridge" not in globals():
+        try:
+            from rlm_kernel.repl_bridge import KernelBridge
+            from rlm_kernel.vault import LocalVault
+            from rlm_kernel.index import rebuild_index
+            vault_root = Path.home() / ".local" / "share" / "rlm-kernel" / "vault"
+            vault = LocalVault(vault_root, init_git=False)
+            idx_path = vault_root / ".index" / "meta.sqlite"
+            if not idx_path.exists():
+                rebuild_index(vault, idx_path)
+            globals()["_cached_bridge"] = KernelBridge(vault, idx_path)
+        except Exception:
+            globals()["_cached_bridge"] = None
+    return globals().get("_cached_bridge")
 # ── Startup ────────────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> None:
