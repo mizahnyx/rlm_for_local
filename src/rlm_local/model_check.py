@@ -319,11 +319,14 @@ def probe_p3_stderr_recovery(
     for se in stderr_events:
         stderr_text = se.get("stderr", "")
         turn = se.get("turn", "?")
-        evidence_lines.append(
-            f"Turn {turn} stderr: {stderr_text[:120]}"
-        )
-
-    # Check if any assistant message after a stderr event contains a corrected
+        # Show the actual exception, not just Traceback header
+        for line in stderr_text.split("\n"):
+            stripped = line.strip()
+            if stripped and not stripped.startswith("File "):
+                evidence_lines.append(f"Turn {turn} stderr: {stripped[:200]}")
+                break
+        else:
+            evidence_lines.append(f"Turn {turn} stderr: (empty)")
     # grep call
     stderr_indices = [
         i for i, r in enumerate(repl_entries) if r.get("stderr", "").strip()
@@ -775,25 +778,39 @@ def check_model(
     Returns:
         Dict with keys: model_id, score, verdict, per_probe, evidence_lines.
     """
+    import time as _time
+    t0 = _time.perf_counter()
+
     probe_ids = QUICK_PROBES if quick else list(PROBES.keys())
     weights = {k: WEIGHTS[k] for k in probe_ids}
 
     per_probe: dict[str, dict[str, Any]] = {}
     all_evidence: list[str] = []
+    passed_count = 0
+    failed_count = 0
 
     for pid in probe_ids:
         probe_fn = PROBES[pid]
         result = probe_fn(backend, model_id=model_id, profile=profile)
         per_probe[pid] = result
+        if result["passed"]:
+            passed_count += 1
+        else:
+            failed_count += 1
         for line in result["evidence"]:
             all_evidence.append(f"[{pid}] {line}")
 
     score = _score_model(per_probe, weights)
+    elapsed = _time.perf_counter() - t0
 
     return {
         "model_id": model_id or "unknown",
         "score": score,
         "verdict": _verdict(score),
+        "elapsed_seconds": round(elapsed, 1),
+        "probes_passed": passed_count,
+        "probes_failed": failed_count,
+        "probes_total": len(probe_ids),
         "per_probe": per_probe,
         "evidence_lines": all_evidence,
     }
@@ -839,7 +856,10 @@ def save_check_report(
     body_lines: list[str] = []
     body_lines.append(f"# Model Suitability Report: {result['model_id']}\n")
     body_lines.append(f"**Score:** {result['score']}/100")
-    body_lines.append(f"**Verdict:** {result['verdict']}\n")
+    body_lines.append(f"**Verdict:** {result['verdict']}")
+    body_lines.append(f"**Probes:** {result['probes_passed']}/{result['probes_total']} passed, "
+                      f"{result['probes_failed']} failed")
+    body_lines.append(f"**Time:** {result['elapsed_seconds']:.0f}s\n")
 
     body_lines.append("## Per-Probe Results\n")
     for pid, probe_result in result["per_probe"].items():

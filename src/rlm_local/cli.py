@@ -401,15 +401,23 @@ def _cmd_check(args: argparse.Namespace) -> int:
         print(f"Model: {args.model_id}")
         print(f"Score: {result['score']}/100")
         print(f"Verdict: {result['verdict']}")
+        print(f"Probes: {result['probes_passed']}/{result['probes_total']} passed, "
+              f"{result['probes_failed']} failed")
+        print(f"Time: {result['elapsed_seconds']:.0f}s")
+        print()
+        print("Failed probes:")
+        for pid, pr in result.get("per_probe", {}).items():
+            if not pr["passed"]:
+                print(f"  {pid}: {pr['score']}/{pr['max_score']} pts")
+        print()
         if result.get("evidence_lines"):
-            for line in result["evidence_lines"][:15]:
+            print("Evidence:")
+            for line in result["evidence_lines"][:20]:
                 print(f"  {line}")
         return 0
     except ImportError:
         print("Model check not yet implemented.", file=sys.stderr)
         return 1
-
-
 # ── vault ─────────────────────────────────────────────────────────────────
 
 def _cmd_vault(args: argparse.Namespace) -> int:
