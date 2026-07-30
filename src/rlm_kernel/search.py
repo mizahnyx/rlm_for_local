@@ -29,24 +29,11 @@ def search_vault(
     query: str,
     k: int = 5,
     kinds: list[str] | None = None,
+    tags: list[str] | None = None,
     detail: str = "card",
     include_quarantine: bool = False,
 ) -> list[dict[str, Any]]:
-    """Search the vault via its index.
-
-    Args:
-        vault: VaultStore for full-page retrieval.
-        index_path: Path to meta.sqlite index file.
-        query: Free-text search query.
-        k: Max results.
-        kinds: Optional filter by page kind(s).
-        detail: "card" for compact, "full" for complete page.
-        include_quarantine: If True, also include pending pages from quarantine/.
-
-    Returns:
-        List of result dicts. "card" detail includes: path, kind, name, title,
-        summary, score, snippet. "full" adds: body, frontmatter.
-    """
+    """Search the vault via its index with optional kind and tag filters."""
     from rlm_kernel.index import Index
 
     if not index_path.exists():
@@ -54,7 +41,7 @@ def search_vault(
 
     idx = Index(index_path)
     try:
-        results = idx.fts_search(query, limit=k * 2, kinds=kinds)
+        results = idx.fts_search(query, limit=k * 2, kinds=kinds, tags=tags)
     finally:
         idx.close()
 

@@ -69,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     p_search = sub.add_parser("search", help="Search the vault")
     p_search.add_argument("query", help="Search query")
     p_search.add_argument("--kind", nargs="*", default=None)
+    p_search.add_argument("--tag", nargs="*", default=None)
     p_search.add_argument("-k", type=int, default=5)
     p_search.add_argument("--vault", type=Path, default=_default_vault())
 
@@ -77,6 +78,12 @@ def main(argv: list[str] | None = None) -> int:
     p_get.add_argument("path", help="Page path within vault")
     p_get.add_argument("--vault", type=Path, default=_default_vault())
 
+    # tag subcommand
+    p_tag = sub.add_parser("tag", help="Add or remove tags from a vault page")
+    p_tag.add_argument("path", help="Page path within vault")
+    p_tag.add_argument("--add", default="", help="Comma-separated tags to add")
+    p_tag.add_argument("--remove", default="", help="Comma-separated tags to remove")
+    p_tag.add_argument("--vault", type=Path, default=_default_vault())
     # ── check ────────────────────────────────────────────────────────────
     p_check = sub.add_parser("check", help="Model suitability battery")
     p_check.add_argument("model_id", help="Model ID on the server")
@@ -111,6 +118,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_search(args)
     elif args.command == "get":
         return _cmd_get(args)
+    elif args.command == "tag":
+        return _cmd_tag(args)
     elif args.command == "check":
         return _cmd_check(args)
     elif args.command == "vault":
@@ -120,7 +129,6 @@ def main(argv: list[str] | None = None) -> int:
     else:
         parser.print_help()
         return 0
-
 
 # ── ask ───────────────────────────────────────────────────────────────────
 
@@ -304,7 +312,7 @@ def _cmd_search(args: argparse.Namespace) -> int:
         print("Index not found. Run: rlm vault index --rebuild")
         return 1
 
-    results = search_vault(vault, idx_path, args.query, k=args.k, kinds=args.kind)
+    results = search_vault(vault, idx_path, args.query, k=args.k, kinds=args.kind, tags=args.tag)
     if not results:
         print("(no results)")
         return 0
@@ -328,6 +336,48 @@ def _cmd_get(args: argparse.Namespace) -> int:
         return 1
 
     print(page.to_markdown())
+    return 0
+
+
+
+# ── tag ────────────────────────────────────────────────────────────────────
+
+def _cmd_tag(args: argparse.Namespace) -> int:
+    """Add or remove tags from a vault page."""
+    from rlm_kernel.vault import LocalVault
+    from rlm_kernel.index import Index
+
+    vault = LocalVault(args.vault, init_git=False)
+    page = vault.get(args.path)
+    if page is None:
+        print(f"Page not found: {args.path}", file=sys.stderr)
+        return 1
+
+    add_tags = [t.strip() for t in args.add.split(",") if t.strip()]
+    remove_tags = [t.strip() for t in args.remove.split(",") if t.strip()]
+
+    if not add_tags and not remove_tags:
+        # Just show current tags
+        current = page.frontmatter.tags
+        print(f"Tags for {args.path}: {', '.join(current) if current else '(none)'}")
+        return 0
+
+    current = set(page.frontmatter.tags)
+    for t in add_tags:
+        current.add(t)
+    for t in remove_tags:
+        current.discard(t)
+
+    page.frontmatter.tags = sorted(current)
+    vault.put(page, args.path)
+
+    idx_path = args.vault / ".index" / "meta.sqlite"
+    if idx_path.exists():
+        idx = Index(idx_path)
+        idx.reindex_delta(vault)
+        idx.close()
+
+    print(f"Tags updated: {', '.join(page.frontmatter.tags) if page.frontmatter.tags else '(none)'}")
     return 0
 
 

@@ -228,32 +228,45 @@ class Index:
         return [r["src"] for r in rows]
 
     def fts_search(self, query: str, limit: int = 40,
-                   kinds: list[str] | None = None) -> list[dict[str, Any]]:
-        """BM25-ranked FTS5 search. Returns list of {name, kind, score, ...}."""
+                   kinds: list[str] | None = None,
+                   tags: list[str] | None = None) -> list[dict[str, Any]]:
+        """BM25-ranked FTS5 search with optional kind and tag filters."""
         if not query.strip():
             return []
 
-        # FTS5 query with BM25 ranking
-        # Escape special FTS5 characters
         safe = query.replace('"', '""')
         fts_query = f'"{safe}"'
 
-        where_kinds = ""
-        params: list[Any] = [fts_query, limit]
+        conditions = []
+        params: list[Any] = [fts_query]
+
         if kinds:
             placeholders = ",".join("?" for _ in kinds)
-            where_kinds = f"AND kind IN ({placeholders})"
-            params = [fts_query] + kinds + [limit]
+            conditions.append(f"kind IN ({placeholders})")
+            params.extend(kinds)
 
-        # Standalone FTS5: all columns are directly on fts_pages
+        if tags:
+            tag_placeholders = ",".join("?" for _ in tags)
+            conditions.append(
+                f"path IN (SELECT p.path FROM pages p "
+                f"JOIN tags t ON t.page_id = p.id "
+                f"WHERE t.tag IN ({tag_placeholders}))"
+            )
+            params.extend(tags)
+
+        where = " AND ".join(conditions) if conditions else ""
+        if where:
+            where = "AND " + where
+
         sql = f"""
             SELECT path, kind, name, title, summary, rank AS score
             FROM fts_pages
             WHERE fts_pages MATCH ?
-              {where_kinds}
+              {where}
             ORDER BY rank
             LIMIT ?
         """
+        params.append(limit)
         rows = self.conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
