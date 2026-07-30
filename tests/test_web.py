@@ -18,6 +18,15 @@ def client():
         yield c
 
 
+class TestStatic:
+    def test_htmx_js_served(self, client):
+        """htmx.min.js is served from /static/."""
+        resp = client.get("/static/htmx.min.js")
+        assert resp.status_code == 200
+        assert len(resp.content) > 1000
+        assert b"htmx" in resp.content.lower()
+
+
 class TestAuth:
     def test_login_with_correct_token(self, client):
         os.environ["RLM_WEB_TOKEN"] = "correct-horse"
