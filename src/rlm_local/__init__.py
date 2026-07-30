@@ -54,14 +54,16 @@ def completion(
     if config is None:
         config = load_config(profile, **overrides)
 
-    # Build backend
+    # Build backend (track whether we created it)
+    own_backend = False
     if backend is None:
+        own_backend = True
         backend = HTTPModelBackend(
             root_endpoint=config.root_endpoint,
             sub_endpoint=config.sub_endpoint,
             root_model=config.root_model,
             sub_model=config.sub_model,
-            verify=False,  # self-signed certs on localhost
+            verify=False,
             timeout=300.0,
         )
 
@@ -74,5 +76,5 @@ def completion(
         return loop.run(query, context)
     finally:
         loop.shutdown()
-        if isinstance(backend, HTTPModelBackend):
+        if own_backend and isinstance(backend, HTTPModelBackend):
             backend.close()

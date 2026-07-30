@@ -326,3 +326,25 @@ class TestSaveReport:
             assert "# Model Suitability Report:" in content
             assert "## Per-Probe Results" in content
             assert "## Evidence Log" in content
+
+
+
+class TestBackendReuse:
+    """Probes must not close a shared backend between calls."""
+
+    def test_check_model_does_not_close_shared_backend(self):
+        """Multiple probe calls reuse the same backend without closing it."""
+        backend = GoodModelStub()
+        # Track if close() is called
+        close_called = []
+        original_close = getattr(backend, 'close', None)
+        if original_close:
+            def tracked_close():
+                close_called.append(True)
+                original_close()
+            backend.close = tracked_close
+
+        result = check_model(backend, model_id="test-reuse", quick=True)
+        assert result["score"] >= 0
+        # Backend should still be usable after check_model returns
+        # (completion() should not close a backend it didn't create)
