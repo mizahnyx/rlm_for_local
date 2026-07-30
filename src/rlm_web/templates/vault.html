@@ -22,9 +22,39 @@
 
 <hr>
 <h3>Ingest Files into Vault</h3>
-<form method="post" action="/vault/ingest" enctype="multipart/form-data">
+<form id="ingest-form" enctype="multipart/form-data">
     <input type="file" name="files" accept=".md" multiple>
     <button type="submit">Upload to Vault</button>
 </form>
+<div id="ingest-result" style="margin-top: 0.5rem;"></div>
 <p><small>Uploaded .md files become permanent, searchable vault pages.</small></p>
+
+<script>
+document.getElementById('ingest-form').onsubmit = async function(e) {
+    e.preventDefault();
+    var form = e.target;
+    var data = new FormData(form);
+    var btn = form.querySelector('button');
+    var result = document.getElementById('ingest-result');
+    btn.disabled = true;
+    btn.textContent = 'Uploading...';
+    result.innerHTML = '';
+    try {
+        var resp = await fetch('/vault/ingest', {method: 'POST', body: data});
+        var json = await resp.json();
+        var lines = [];
+        for (var r of json.results) {
+            var icon = r.status === 'ok' ? '+' : r.status === 'skipped' ? '=' : '!';
+            lines.push(icon + ' ' + r.file + (r.path ? ' - ' + r.path : ' (' + r.reason + ')'));
+        }
+        result.innerHTML = '<p>' + json.ingested + ' ingested, ' + json.skipped + ' skipped</p>'
+            + '<pre>' + lines.join('\\n') + '</pre>';
+        form.reset();
+    } catch(err) {
+        result.innerHTML = '<p style=\"color:red\">Error: ' + err.message + '</p>';
+    }
+    btn.disabled = false;
+    btn.textContent = 'Upload to Vault';
+};
+</script>
 {% endblock %}
