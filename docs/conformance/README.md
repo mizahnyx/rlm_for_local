@@ -1,5 +1,10 @@
 # Conformance History — rlm-kernel
 
+> **Layout note (2026-07-30):** all conformance documents were consolidated into
+> `docs/` (this directory's parent) alongside the design specs and research
+> reports; this folder retains only this index. Paths below are relative to
+> `docs/`.
+
 This directory contains the full conformance review and remediation trail
 for the `rlm-kernel` implementation against its specification
 (`docs/20260724-1736-rlm-kernel-evolvable-spec.md`).

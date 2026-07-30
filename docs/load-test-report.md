@@ -46,7 +46,7 @@ over 20K pages, extrapolating to ~3.5 hours at 100K.
 **Shelved (insufficient corpus).** The organic corpus proved insufficient in
 quality and quantity for a meaningful 100K-class validation. If a suitable
 corpus ever emerges, the runbook
-(`docs/conformance/20260725-0953-load-gate-100k-runbook.md` §4) revives this
+(`docs/20260725-0953-load-gate-100k-runbook.md` §4) revives this
 test unchanged; the two env-gated Tier-2 suite tests stay in place and will
 activate on `RLM_KERNEL_LOAD_CORPUS` being set.
 
