@@ -35,6 +35,14 @@ class TestAuth:
             del os.environ["RLM_WEB_TOKEN"]
 
 
+
+
+class TestConsole:
+    def test_console_returns_200(self, client):
+        """GET / returns 200 OK — template renders without hash error."""
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert "Console" in resp.text
 class TestJobs:
     def test_job_creation_redirects(self, client):
         resp = client.post("/jobs", data={

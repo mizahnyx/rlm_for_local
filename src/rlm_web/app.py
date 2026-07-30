@@ -33,6 +33,7 @@ app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 # Templates
 from fastapi.templating import Jinja2Templates  # noqa: E402
+
 templates_dir = Path(__file__).parent / "templates"
 templates_dir.mkdir(exist_ok=True)
 templates = Jinja2Templates(directory=str(templates_dir))
@@ -51,6 +52,10 @@ def _check_auth(request: Request) -> None:
     except Exception:
         pass  # Session not available (e.g., TestClient)
     raise HTTPException(status_code=401, detail="Authentication required")
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request):
+    return templates.TemplateResponse(request, "login.html")
 @app.post("/login")
 async def login(request: Request, token: str = Form(...)):
     expected = os.environ.get("RLM_WEB_TOKEN", "")
@@ -126,7 +131,7 @@ def _run_job(job_id: str) -> None:
 @app.get("/", response_class=HTMLResponse)
 async def console(request: Request):
     _check_auth(request)
-    return templates.TemplateResponse("console.html", {"request": request})
+    return templates.TemplateResponse(request, "console.html")
 
 
 @app.post("/jobs", response_class=HTMLResponse)
@@ -147,8 +152,8 @@ async def job_view(request: Request, job_id: str):
     job = _jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return templates.TemplateResponse("job.html", {
-        "request": request, "job": job,
+    return templates.TemplateResponse(request, "job.html", {
+        "job": job,
     })
 
 
@@ -195,8 +200,8 @@ async def vault_search(request: Request, q: str = ""):
                 results = search_vault(vault, idx_path, q, k=10)
         except Exception:
             pass
-    return templates.TemplateResponse("vault.html", {
-        "request": request, "query": q, "results": results,
+    return templates.TemplateResponse(request, "vault.html", {
+        "query": q, "results": results,
     })
 
 
@@ -210,8 +215,8 @@ async def vault_page(request: Request, path: str):
         page = vault.get(path)
         if page is None:
             raise HTTPException(status_code=404)
-        return templates.TemplateResponse("vault_page.html", {
-            "request": request, "page": page,
+        return templates.TemplateResponse(request, "vault_page.html", {
+            "page": page,
         })
     except HTTPException:
         raise
@@ -222,7 +227,7 @@ async def vault_page(request: Request, path: str):
 @app.get("/check", response_class=HTMLResponse)
 async def check_page(request: Request):
     _check_auth(request)
-    return templates.TemplateResponse("check.html", {"request": request})
+    return templates.TemplateResponse(request, "check.html")
 
 
 @app.get("/docs/{name:path}", response_class=HTMLResponse)
@@ -233,8 +238,8 @@ async def docs_page(request: Request, name: str):
     if not doc_path.exists() or not doc_path.is_file():
         raise HTTPException(status_code=404)
     content = doc_path.read_text(encoding="utf-8", errors="replace")
-    return templates.TemplateResponse("docs.html", {
-        "request": request, "name": name, "content": content,
+    return templates.TemplateResponse(request, "docs.html", {
+        "name": name, "content": content,
     })
 
 
