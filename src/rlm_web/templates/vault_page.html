@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}{{ page.frontmatter.title }}{% endblock %}
+{% block content %}
+<h2>{{ page.frontmatter.title }}</h2>
+<div class="card">
+    <p><strong>Kind:</strong> {{ page.frontmatter.kind.value }}</p>
+    <p><strong>Name:</strong> {{ page.frontmatter.name }}</p>
+    <p><strong>Version:</strong> {{ page.frontmatter.version }}</p>
+    <p><strong>Status:</strong> {{ page.frontmatter.status.value }}</p>
+    {% if page.frontmatter.tags %}
+    <p><strong>Tags:</strong> {{ page.frontmatter.tags|join(', ') }}</p>
+    {% endif %}
+</div>
+<div class="card">
+    <pre>{{ page.body }}</pre>
+</div>
+<p><a href="/vault">← Back to search</a></p>
+{% endblock %}

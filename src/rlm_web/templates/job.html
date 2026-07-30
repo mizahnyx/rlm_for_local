@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Job {{ job.id }}{% endblock %}
+{% block content %}
+<h2>Job: {{ job.query[:80] }}</h2>
+<div class="card">
+    <strong>State:</strong> <span id="job-state">{{ job.state }}</span>
+    <strong>Profile:</strong> {{ job.profile }}
+</div>
+
+<div class="card">
+    <h3>Live Progress</h3>
+    <div id="events" class="events" hx-ext="sse" sse-connect="/jobs/{{ job.id }}/events" sse-swap="message">
+        Waiting for events...
+    </div>
+</div>
+
+{% if job.result %}
+<div class="card">
+    <h3>Answer</h3>
+    <pre>{{ job.result }}</pre>
+</div>
+{% endif %}
+
+<script>
+    document.body.addEventListener('htmx:sseMessage', function(evt) {
+        var data = JSON.parse(evt.detail.data);
+        var el = document.getElementById('events');
+        if (data.type === 'done') {
+            el.textContent += '\n\n--- ANSWER ---\n' + data.answer;
+            document.getElementById('job-state').textContent = 'done';
+        } else {
+            el.textContent += '\n' + JSON.stringify(data);
+        }
+    });
+</script>
+{% endblock %}

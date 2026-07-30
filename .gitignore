@@ -12,3 +12,6 @@ wheels/
 *.jsonl
 rlm_repl_*/
 docs/*.pdf
+k4-acceptance-run.txt
+k4_prog3_candidate.txt
+logs/k4-gepa-checkpoints/

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Vault Search{% endblock %}
+{% block content %}
+<h2>Vault Search</h2>
+<form method="get" action="/vault">
+    <input type="text" name="q" value="{{ query }}" placeholder="Search the vault..." required>
+    <button type="submit">Search</button>
+</form>
+
+{% if results %}
+    <p>{{ results|length }} results for "{{ query }}"</p>
+    {% for r in results %}
+    <div class="card">
+        <strong>[{{ r.kind }}] {{ r.name }}</strong>: {{ r.title }}
+        <p>{{ r.summary[:200] }}</p>
+        <a href="/vault/page/{{ r.path }}">View page</a>
+    </div>
+    {% endfor %}
+{% elif query %}
+    <p>(no results)</p>
+{% endif %}
+{% endblock %}

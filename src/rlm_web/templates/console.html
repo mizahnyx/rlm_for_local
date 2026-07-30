@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Console{% endblock %}
+{% block content %}
+<h2>Console</h2>
+<form method="post" action="/jobs" enctype="multipart/form-data">
+    <label>Query:</label>
+    <textarea name="query" rows="3" placeholder="What do you want to know?" required></textarea>
+
+    <label>Context (paste Markdown):</label>
+    <textarea name="context" rows="8" placeholder="Paste your context Markdown here..."></textarea>
+
+    <label>Or upload .md files (max 20):</label>
+    <input type="file" name="files" accept=".md" multiple>
+
+    <label>Profile:</label>
+    <select name="profile">
+        <option value="tiny">Tiny (8 GB RAM, CPU)</option>
+        <option value="laptop" selected>Laptop (16 GB, M-series)</option>
+        <option value="workstation">Workstation (32 GB, GPU)</option>
+    </select>
+
+    <button type="submit">Submit Query</button>
+</form>
+{% endblock %}

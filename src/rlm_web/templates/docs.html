@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}{{ name }}{% endblock %}
+{% block content %}
+<div class="card">
+    <pre style="white-space: pre-wrap;">{{ content }}</pre>
+</div>
+<p><a href="/docs/operator-guide.md">← Operator Guide</a> | <a href="/docs/rlm-local-manual.md">RLM Local Manual</a> | <a href="/docs/rlm-kernel-manual.md">RLM Kernel Manual</a></p>
+{% endblock %}

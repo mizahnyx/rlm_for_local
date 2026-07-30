@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Model Check{% endblock %}
+{% block content %}
+<h2>Model Suitability Check</h2>
+<form method="post" action="/check">
+    <label>Model ID:</label>
+    <input type="text" name="model_id" placeholder="e.g. Qwen3.5-4B-Abliterated" required>
+    <label>Endpoint:</label>
+    <input type="text" name="endpoint" value="https://localhost:9010/v1">
+    <label>
+        <input type="checkbox" name="quick" value="1"> Quick mode (P1+P4+P6 only)
+    </label>
+    <button type="submit">Run Check</button>
+</form>
+{% endblock %}
