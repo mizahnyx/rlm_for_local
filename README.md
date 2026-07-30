@@ -156,6 +156,7 @@ uv run python -m rlm_web.app
 | [Operator Guide](docs/operator-guide.md) | New users — install, configure, operate |
 | [RLM Local Manual](docs/rlm-local-manual.md) | Engineers — architecture, modules, API |
 | [RLM Kernel Manual](docs/rlm-kernel-manual.md) | Engineers — vault, gate, memory, optimizer |
+| [Extensibility Guide](docs/extensibility-guide.md) | Developers — adding tools, helpers, capabilities |
 | [Conformance History](docs/conformance/README.md) | Auditors — review and remediation trail |
 
 ## Testing
