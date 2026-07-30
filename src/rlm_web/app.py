@@ -102,6 +102,7 @@ def _run_job(job_id: str) -> None:
         if not job:
             return
         job["state"] = "running"
+        job["events"].append({"type": "started", "message": "Completion running..."})
 
     try:
         log_path = f"data/jobs/{job_id}/trajectory.jsonl"
@@ -124,7 +125,9 @@ def _run_job(job_id: str) -> None:
             if job_id in _jobs:
                 _jobs[job_id]["state"] = "error"
                 _jobs[job_id]["result"] = str(e)
-
+                _jobs[job_id]["events"].append(
+                    {"type": "error", "message": str(e)}
+                )
 
 # ── Routes ─────────────────────────────────────────────────────────────────
 

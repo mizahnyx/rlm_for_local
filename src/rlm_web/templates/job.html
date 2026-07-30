@@ -9,28 +9,45 @@
 
 <div class="card">
     <h3>Live Progress</h3>
-    <div id="events" class="events" hx-ext="sse" sse-connect="/jobs/{{ job.id }}/events" sse-swap="message">
-        Waiting for events...
+    <div id="events" class="events">
+        Connecting to job stream...
     </div>
 </div>
 
-{% if job.result %}
-<div class="card">
+<div id="answer-section" class="card" style="display:none;">
     <h3>Answer</h3>
-    <pre>{{ job.result }}</pre>
+    <pre id="answer-text"></pre>
 </div>
-{% endif %}
 
 <script>
-    document.body.addEventListener('htmx:sseMessage', function(evt) {
-        var data = JSON.parse(evt.detail.data);
+    (function() {
         var el = document.getElementById('events');
-        if (data.type === 'done') {
-            el.textContent += '\n\n--- ANSWER ---\n' + data.answer;
-            document.getElementById('job-state').textContent = 'done';
-        } else {
-            el.textContent += '\n' + JSON.stringify(data);
-        }
-    });
+        var stateEl = document.getElementById('job-state');
+        var answerSection = document.getElementById('answer-section');
+        var answerText = document.getElementById('answer-text');
+        var es = new EventSource('/jobs/{{ job.id }}/events');
+        el.textContent = '';
+
+        es.onmessage = function(evt) {
+            var data = JSON.parse(evt.data);
+            if (data.type === 'started') {
+                el.textContent = data.message + '\n';
+            } else if (data.type === 'done') {
+                stateEl.textContent = 'done';
+                answerText.textContent = data.answer;
+                answerSection.style.display = 'block';
+                es.close();
+            } else if (data.type === 'error') {
+                el.textContent += '\nERROR: ' + data.message;
+                stateEl.textContent = 'error';
+                es.close();
+            }
+        };
+
+        es.onerror = function() {
+            el.textContent += '\nConnection lost. The job may still be running.';
+            es.close();
+        };
+    })();
 </script>
 {% endblock %}
