@@ -123,7 +123,7 @@ Scripted stub backends: a "good model" (valid blocks, correct args, answers need
 
 ---
 
-## D4 — Documentation (O'Reilly quality)
+## D4 — Documentation (comprehensive quality)
 
 **New:** `docs/operator-guide.md` — the single entry point. Chapters:
 
@@ -139,7 +139,7 @@ Scripted stub backends: a "good model" (valid blocks, correct args, answers need
 7. **Troubleshooting** (from our real history: cp1252 errors, smart quotes, model swaps/timeouts, slow runs, power-loss recovery via checkpoints).
 8. **FAQ** (10–15 real Qs: where does the vault live, how do I back it up, why did my model fail the check, can I use model X…).
 
-**Update:** `README.md` (frontends section + quickstart links), `rlm-local-manual.md` and `rlm-kernel-manual.md` (link to the operator guide). Style: task-oriented, every procedure numbered and copy-pasteable, no filler — O'Reilly animal-book register.
+**Update:** `README.md` (frontends section + quickstart links), `rlm-local-manual.md` and `rlm-kernel-manual.md` (link to the operator guide). Style: task-oriented, every procedure numbered and copy-pasteable, no filler.
 
 **Acceptance D4:** a new user can go from clone to first answer using only the operator guide (verify by following it yourself on a fresh vault); all links resolve; the three procedures work as written.
 
