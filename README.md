@@ -132,44 +132,50 @@ before promotion.
 
 Full documentation: [`docs/rlm-kernel-manual.md`](docs/rlm-kernel-manual.md).
 
-## Design Principles
+## Frontends
 
-Built on [Zhang & Khattab's RLM research](https://alexzhang13.github.io/blog/2026/harness/):
+**CLI** — single completions, interactive chat, vault management, model checks:
+```bash
+uv run python -m rlm_local.cli ask "What color?" --context-file doc.md
+uv run python -m rlm_local.cli chat --profile laptop
+uv run python -m rlm_local.cli ingest notes/*.md
+uv run python -m rlm_local.cli check Qwen3.5-4B-Abliterated
+```
 
-- **Locally in-distribution observations** — every individual LM call handles a
-  prompt within its training distribution, even when the overall task is OOD.
-- **Context offloading** — the root model never sees raw context; it lives in the
-  REPL and on disk.
-- **Programmatic sub-agent calling** — sub-calls are plain Python functions
-  (`llm_query`), not JSON tool-calling protocols.
-- **Equivalence classes over tasks** — structurally similar tasks produce
-  near-identical harness trajectories, enabling compositional generalization.
-- **Depth-1 recursion** — root orchestrator + flat sub-calls; deeper recursion is
-  rarely needed and doubles latency on one server.
+**Web UI** — HTTPS/Tailscale-ready console with live SSE progress:
+```bash
+export RLM_WEB_TOKEN="your-token"
+uv run python -m rlm_web.app
+# Open https://localhost:8778
+```
 
 ## Documentation
 
-The full manual — architecture, every module, every config knob, failure modes,
-and API reference — is at [`docs/rlm-local-manual.md`](docs/rlm-local-manual.md).
+| Document | Audience |
+|---|---|
+| [Operator Guide](docs/operator-guide.md) | New users — install, configure, operate |
+| [RLM Local Manual](docs/rlm-local-manual.md) | Engineers — architecture, modules, API |
+| [RLM Kernel Manual](docs/rlm-kernel-manual.md) | Engineers — vault, gate, memory, optimizer |
+| [Conformance History](docs/conformance/README.md) | Auditors — review and remediation trail |
 
 ## Testing
 
 ```bash
 # Unit tests (fast, no server needed)
-uv run pytest tests/ -k "not slow" -v
+uv run pytest tests/ -k "not slow and not load" -v
 
 # Full suite including integration (requires running llama-server)
 uv run pytest tests/ -v
 ```
 
-72 unit tests, 3 integration tests against a live server.
+243 unit tests, 3 integration tests, 12 load tests.
 
 ## Requirements
 
 - Python ≥ 3.12
-- `httpx` (HTTP client)
-- `setuptools` (build)
+- `httpx`, `pydantic`, `pyyaml`, `gepa`, `fastapi`, `uvicorn`, `jinja2`
 - An OpenAI-compatible inference server (llama.cpp, Ollama, LM Studio, MLX)
+- Git (for vault versioning)
 
 ## License
 

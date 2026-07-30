@@ -1,0 +1,475 @@
+# RLM Operator Guide
+
+**How to install, configure, and operate the RLM harness, kernel, and web frontend.**
+
+---
+
+## 1. What This System Is
+
+RLM (Recursive Language Model) is a harness that wraps a local LLM and
+transforms it into a recursive reasoning system. It can answer questions
+over contexts 10×–100× larger than the model's native context window.
+
+```
+User ──► completion(query, context)
+              │
+              ▼
+     ┌──────────────────────────────────────────────────┐
+     │  RootLoop (orchestrator)                         │
+     │  Root model writes code in ```repl blocks        │
+     │  REPL sandbox executes code, proxies sub-calls    │
+     │  Results flow through REPL variables              │
+     └──────────────────────────────────────────────────┘
+              │                       │
+              ▼                       ▼
+     ┌──────────────┐        ┌──────────────────┐
+     │  Model server │        │  rlm-kernel vault │
+     │  (llama.cpp)  │        │  (pages, index,   │
+     │  :9010        │        │   gate, memory)   │
+     └──────────────┘        └──────────────────┘
+```
+
+The **root model** never sees your data. Context lives in a sandboxed Python
+REPL. The model writes code to probe, search, chunk, and delegate. Results
+stay in REPL variables — only small, deliberate `print()` outputs reach the
+model's conversation.
+
+The **rlm-kernel** makes the system evolvable. Prompts, helpers, few-shots,
+and memory are human-readable pages in a git-versioned wiki. The system can
+describe itself to itself, grow new vocabulary, and improve its own prompts
+through GEPA offline optimization.
+
+---
+
+## 2. Quickstart
+
+### 2.1 Prerequisites
+
+- Python ≥ 3.12
+- [llama.cpp](https://github.com/ggerganov/llama.cpp) server (or Ollama, LM Studio)
+- Git (for vault versioning)
+
+### 2.2 Install
+
+```bash
+git clone <repo> rlm_for_local
+cd rlm_for_local
+uv sync
+```
+
+### 2.3 Start the Model Server
+
+```bash
+llama-server \
+    --model qwen3-4b-instruct-2507-q4_k_m.gguf \
+    --host 127.0.0.1 --port 9010 \
+    --ctx-size 16384 --flash-attn \
+    --cache-type-k q8_0 --cache-type-v q8_0 \
+    --parallel 2
+```
+
+### 2.4 Initialize the Vault
+
+```bash
+uv run python -m rlm_kernel.cli init
+```
+
+This creates `~/.local/share/rlm-kernel/vault/` with contract pages,
+template pages, and builtin helpers.
+
+### 2.5 Build the Search Index
+
+```bash
+uv run python -m rlm_kernel.cli index --rebuild
+```
+
+### 2.6 First Query
+
+```bash
+# Ask a question with a Markdown file as context
+uv run python -m rlm_local.cli ask "What color is mentioned?" \
+    --context-file my_document.md \
+    --profile laptop
+```
+
+### 2.7 Interactive Chat
+
+```bash
+uv run python -m rlm_local.cli chat --profile laptop
+```
+
+Type queries directly. Use `/ingest <file>` to load documents, `/search <query>`
+to search the vault, `/context` to see what's loaded.
+
+### 2.8 Web Frontend (First Login)
+
+```bash
+# Set a token for web auth
+export RLM_WEB_TOKEN="your-secret-token"
+
+# Start the web server
+uv run python -m rlm_web.app
+```
+
+Open `http://localhost:8778`, log in with your token. Upload Markdown files
+or paste context, submit queries, watch live progress.
+
+---
+
+## 3. CLI Reference
+
+### `rlm ask`
+
+```bash
+rlm ask "QUERY" [--context-file FILE.md ...] [--context-dir DIR] \
+    [--stdin] [--vault PATH] [--profile tiny|laptop|workstation] \
+    [--max-turns N] [--log-path FILE]
+```
+
+Context is assembled in this order: `--context-file` (each with a `# filename`
+heading, separated by `---`), `--context-dir` (all `*.md` sorted), `--stdin`,
+`--vault`. Returns the answer on stdout. Exit code 0 on success, 2 on error.
+
+**Examples:**
+```bash
+# Single file
+rlm ask "Summarize the report." --context-file report.md
+
+# Multiple files
+rlm ask "Compare proposals." --context-file proposal-a.md --context-file proposal-b.md
+
+# From stdin
+cat notes.md | rlm ask "Extract dates." --stdin
+
+# From vault
+rlm ask "What is a widget?" --vault definitions/widget.md
+
+# With trajectory logging
+rlm ask "Find dates." --context-file data.md --log-path /tmp/traj.jsonl
+```
+
+### `rlm chat`
+
+```bash
+rlm chat [--profile tiny|laptop|workstation] [--vault-path PATH]
+```
+
+Interactive loop with slash commands:
+- `/ask <query>` — completion with session context
+- `/ingest <path...>` — load `.md` files into session context
+- `/context` — show loaded files and total characters
+- `/clear` — drop session context
+- `/search <query>` — hybrid vault search (compact cards)
+- `/get <path>` — print a vault page
+- `/note <text>` — create a memory note
+- `/check <model-id>` — run suitability battery
+- `/quit` — exit
+
+Non-slash input is treated as `/ask`. Ctrl+C to interrupt, Ctrl+D to quit.
+
+### `rlm ingest`
+
+```bash
+rlm ingest <path...> [--kind note|source|definition] [--tags a,b] [--vault PATH]
+```
+
+Creates one vault page per Markdown file. Slugifies the filename, extracts
+title from the first `# heading`. Idempotent — re-ingesting the same content
+prints `skipped (duplicate)`.
+
+### `rlm search`
+
+```bash
+rlm search "QUERY" [--kind K] [-k N] [--vault PATH]
+```
+
+BM25 hybrid search over the vault. Compact cards showing kind, name, title,
+summary.
+
+### `rlm get`
+
+```bash
+rlm get <path> [--vault PATH]
+```
+
+Prints the full page (frontmatter + body).
+
+### `rlm check`
+
+```bash
+rlm check <model-id> [--endpoint URL] [--quick] [--profile tiny]
+```
+
+Runs the 9-probe suitability battery. `--quick` runs P1+P4+P6 only.
+Reports score, verdict, and per-probe evidence. Persists report to
+`docs/model-checks/<id>-<ts>.md`.
+
+### `rlm vault`
+
+```bash
+rlm vault init|index|review|promote|demote [--vault PATH]
+```
+
+Pass-through to `rlm-kernel` vault management.
+
+### `rlm optimize`
+
+```bash
+rlm optimize [--target T] [--suite S] [--profile P] [--max-calls N]
+```
+
+GEPA offline optimization of harness prompts. Targets: `prologue`,
+`how-to-work`, `nudges`, `fewshots`, `helper-docs`.
+
+---
+
+## 4. Web UI Reference
+
+### Pages
+
+| Route | Description |
+|---|---|
+| `GET /` | Console — query form with Markdown upload/paste |
+| `POST /jobs` | Submit a query → redirects to job page |
+| `GET /jobs/{id}` | Live job view with SSE progress stream |
+| `GET /vault?q=` | Read-only vault search |
+| `GET /vault/page/{path}` | Read-only page view |
+| `GET /check` | Model check form |
+| `GET /docs/{name}` | Operator guide and manuals |
+
+### Job Lifecycle
+
+1. User submits query + context on `/`.
+2. A job is created with a unique ID, state = `pending`.
+3. A background thread runs `rlm_local.completion()` with trajectory logging.
+4. The job page opens an SSE connection to `/jobs/{id}/events`.
+5. Events stream as they occur (turns, REPL output, final answer).
+6. Final answer is rendered when the job completes.
+
+Jobs survive page refresh (state is in memory; not resumable across server
+restarts in v1).
+
+### HTTPS Setup
+
+**Option A — Tailscale cert (preferred):**
+```bash
+tailscale cert <machine>.<tailnet>.ts.net
+# Certificates land in the current directory
+uv run python -m rlm_web.app \
+    --host 0.0.0.0 --port 8778 \
+    --ssl-keyfile <machine>.ts.net.key \
+    --ssl-certfile <machine>.ts.net.crt
+```
+This gives you a real Let's Encrypt certificate — no phone warnings.
+
+**Option B — Self-signed cert (fallback):**
+```bash
+# Generate
+openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem \
+    -days 365 -nodes \
+    -subj "/CN=<tailscale-hostname>" \
+    -addext "subjectAltName=DNS:<tailscale-hostname>,IP:<100.x.y.z>"
+
+# Start server
+uv run python -m rlm_web.app \
+    --host 0.0.0.0 --port 8778 \
+    --ssl-keyfile key.pem --ssl-certfile cert.pem
+```
+Install the cert on your phone (Android: Settings → Security → Install from
+storage; iOS: Settings → General → About → Certificate Trust Settings).
+
+### Phone Setup on Tailscale
+
+1. Install Tailscale on your phone.
+2. Connect to your tailnet.
+3. Open `https://<machine>.<tailnet>.ts.net:8778` in your browser.
+4. Accept the self-signed cert warning (first time only) or use the
+   Tailscale cert path above.
+5. Log in with your `RLM_WEB_TOKEN`.
+
+---
+
+## 5. Model Management
+
+### 5.1 Initialize a Vault for a New Model
+
+1. **Start the model server** with your new model.
+2. **Create a vault:**
+   ```bash
+   uv run python -m rlm_kernel.cli init
+   uv run python -m rlm_kernel.cli index --rebuild
+   ```
+3. **Run the suitability check:**
+   ```bash
+   uv run python -m rlm_local.cli check <model-id>
+   ```
+4. **If SUITABLE**, update your profile:
+   ```python
+   # In your script or config
+   config = load_config("laptop", root_model="<model-id>")
+   ```
+5. **Baseline sanity eval:**
+   ```bash
+   uv run python -m rlm_local.cli ask "What color?" \
+       --context-file test.md --max-turns 4
+   ```
+
+### 5.2 Repurpose an Existing Vault for a New Model
+
+Vault content is model-agnostic — nothing to migrate. Required steps:
+
+1. **Run suitability check on the new model:**
+   ```bash
+   uv run python -m rlm_local.cli check <new-model-id>
+   ```
+2. **Update your config** to point at the new model.
+3. **Evaluate evolved prompts against the new model:**
+   ```python
+   from rlm_kernel.optimize import evaluate_candidate
+   from rlm_kernel.vault import LocalVault
+   vault = LocalVault(Path.home() / ".local/share/rlm-kernel/vault")
+   result = evaluate_candidate(
+       vault.get("contract/how-to-work.md").body,
+       "needle_search", Path("tests/evals"),
+       profile="tiny", max_turns=6,
+   )
+   print(f"Score: {result.score:.1%}")
+   ```
+4. **If degraded** (per the AppWorld negative-transfer lesson), restore the
+   seed and re-optimize:
+   ```bash
+   git -C ~/.local/share/rlm-kernel/vault checkout -- contract/
+   uv run python -m rlm_local.cli optimize --target how-to-work
+   ```
+
+### 5.3 Grade a Model's Suitability
+
+Run the full battery:
+```bash
+uv run python -m rlm_local.cli check <model-id>
+```
+
+**Verdict bands:**
+- **≥75: SUITABLE** — can serve as root tier. Correct protocol, recovers from errors, answers needles.
+- **50–74: MARGINAL** — usable as sub-tier or with assistance. May need more nudges or lower expectations.
+- **<50: NOT SUITABLE** — cannot reliably operate the harness protocol. Try a different model.
+
+**Re-check cadence:** on model upgrade, on prompt change, or when you notice
+degradation. The report is persisted to `docs/model-checks/`.
+
+---
+
+## 6. Security Notes
+
+- **Token handling:** `RLM_WEB_TOKEN` via environment variable. Never commit it.
+  Change it periodically. The login form sets an HttpOnly session cookie.
+- **Tailscale scope:** the web frontend binds `0.0.0.0` but only the Tailscale
+  interface is reachable from outside your LAN. Verify with `tailscale status`.
+- **Self-signed certs:** browsers and phones will warn. Either use the
+  Tailscale cert path for a real certificate, or accept the warning on your
+  own devices only.
+- **No debug in production:** the web server runs without `--reload` in
+  production. Set `RLM_WEB_TOKEN`.
+- **Upload caps:** 20 files / 8 MB total per request. Files larger than 1 MB
+  per document are rejected.
+- **Server-escaped rendering:** all user content in the web UI is HTML-escaped
+  via Jinja2 autoescaping. No raw user input is rendered.
+
+---
+
+## 7. Troubleshooting
+
+### cp1252 / Unicode Errors
+
+**Symptom:** `UnicodeEncodeError: 'charmap' codec can't encode character`
+
+**Fix:** All file writes in this project use explicit `encoding="utf-8"`. If
+you encounter this in your own scripts, add `encoding="utf-8"` to `open()` or
+`write_text()` calls.
+
+### Smart Quotes in Model Output
+
+**Symptom:** Model emits `"content"` (curly quotes) instead of `"content"`.
+
+**Fix:** The parser's rescue path handles this. If you see `NameError` on
+variables using curly quotes, the model may need a different chat template.
+Run `rlm check <model>` to assess.
+
+### Model Swap / Timeout
+
+**Symptom:** `httpx.ReadTimeout` or long pauses between turns.
+
+**Fix:** The model server may be swapping models (llama-swap). Wait for the
+swap to complete (2–6 seconds on NVMe). If persistent, reduce `max_turns`.
+
+### Slow Runs
+
+**Symptom:** Completions take 10+ minutes.
+
+**Fix:** This is expected on CPU-only hardware. A 10-turn loop with 24 sub-calls
+takes 4–8 minutes on a 4B model. Use `--profile tiny` for lower budgets, or
+upgrade to a GPU.
+
+### Power-Loss Recovery
+
+**Symptom:** PC powered off during an optimization run.
+
+**Fix:** GEPA checkpoints are saved in `logs/k4-gepa-checkpoints/`. Restart
+the model server, re-run the same `rlm optimize` command — GEPA will detect
+the existing state and resume from the last checkpoint.
+
+### Web Frontend Won't Start
+
+**Symptom:** `ModuleNotFoundError: No module named 'fastapi'`
+
+**Fix:** `uv sync` to install dependencies. Ensure `fastapi`, `uvicorn`,
+`jinja2`, and `python-multipart` are in `pyproject.toml` dependencies.
+
+---
+
+## 8. FAQ
+
+**Q: Where does the vault live?**
+A: `~/.local/share/rlm-kernel/vault/` by default. Override with `--vault PATH`
+on any command.
+
+**Q: How do I back up the vault?**
+A: The vault is a git repository. `git -C ~/.local/share/rlm-kernel/vault push`
+to a remote, or use `restic`/`rsync` for the entire directory including
+`.index/`.
+
+**Q: Why did my model fail the suitability check?**
+A: Run `rlm check <model>` and read the per-probe evidence. Common failures:
+model emits JSON prose instead of ```repl blocks (P5), can't recover from
+errors (P3), or can't find needles in context (P6). The report file at
+`docs/model-checks/` has the full evidence.
+
+**Q: Can I use model X?**
+A: Run `rlm check <model-id>` to find out. Models below ~1.5B parameters
+rarely pass. Models above ~8B usually pass but may be slow on CPU. The
+sweet spot is 4B–8B instruct-tuned models (Qwen3, Llama-3, Phi-4).
+
+**Q: What if the optimizer makes things worse?**
+A: The vault is git-versioned. `git -C ~/.local/share/rlm-kernel/vault log`
+shows the promotion commit. `git revert <commit>` rolls back instantly.
+The optimizer only promotes candidates that beat baseline on the held-out
+eval split.
+
+**Q: How do I add my own helpers?**
+A: Write a helper page in `helpers/<name>.md` with `## Signature` and
+`## Implementation` sections. Rebuild the index: `rlm vault index --rebuild`.
+The helper will be available in the next completion.
+
+**Q: Is my data sent anywhere?**
+A: No. Everything runs locally. The model server is on localhost. The vault
+is on your filesystem. No telemetry, no cloud, no external API calls (unless
+you configure a remote model endpoint).
+
+**Q: Can I use this without the kernel/vault?**
+A: Yes. `rlm_local.completion()` works standalone. The kernel and web
+frontend are optional layers.
+
+**Q: How do I upgrade?**
+A: `git pull && uv sync`. The vault is never clobbered by upgrades — seed
+pages are created on first run only; subsequent upgrades add new pages but
+never overwrite existing ones.
