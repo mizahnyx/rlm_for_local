@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -250,21 +251,43 @@ def run_optimization(
     max_metric_calls: int = 150,
     max_turns_per_task: int = 6,
     log_dir: Path | None = None,
+    max_workers: int | None = None,
+    run_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Run GEPA optimization on a target text artifact.
 
     Args:
         vault: VaultStore for page access and gate-routed promotion.
         target: Which text artifact to optimize (key into TARGET_MAP).
-        max_metric_calls: GEPA budget (metric calls = evaluator invocations).
+        max_metric_calls: GEPA budget (metric calls = evaluator invocations;
+            NOTE: counts individual task evals, not iterations, and is only
+            checked between iterations — verified against gepa source).
         max_turns_per_task: Turn budget per eval task.
         log_dir: Directory for run-state JSONL summary log. Checkpoint/resume
             from within a run is not yet implemented — an interrupted run
             restarts from zero. Future work.
+        max_workers: GEPA parallel-evaluation workers. Default None = gepa
+            default (cpu_count) — on small/shared boxes pass 2 to avoid
+            self-contention (learned the hard way: 6 workers × slow CPU
+            turned one iteration into 2–3 hours).
+        run_dir: GEPA checkpoint directory — the engine writes per-iteration
+            JSON state here. This is the authoritative live-progress channel;
+            never rely on piped stdout for observability.
 
     Returns:
         Dict with baseline, best, status, and lineage info.
     """
+    # Windows cp1252 consoles crash on Unicode in GEPA's own print() logs —
+    # a proposed candidate containing '\u2011' killed a 3.7h acceptance run
+    # at "Proposed new text" (the optimization itself had WORKED). Force
+    # UTF-8 with backslash-replace so logging can never kill a run.
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            try:
+                _stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+            except Exception:
+                pass
+
     from gepa.optimize_anything import EngineConfig, GEPAConfig, ReflectionConfig  # type: ignore
     from gepa.optimize_anything import optimize_anything  # type: ignore
 
@@ -328,8 +351,14 @@ def run_optimization(
 
     from rlm_local.config import load_config
     harness_cfg = load_config(profile)
+    engine_kwargs: dict[str, Any] = {"max_metric_calls": max_metric_calls}
+    if max_workers is not None:
+        engine_kwargs["max_workers"] = max_workers
+    if run_dir is not None:
+        engine_kwargs["run_dir"] = str(run_dir)
+        engine_kwargs["display_progress_bar"] = True  # live rollout counter
     config = GEPAConfig(
-        engine=EngineConfig(max_metric_calls=max_metric_calls),
+        engine=EngineConfig(**engine_kwargs),
         reflection=ReflectionConfig(
             reflection_lm=f"openai/{harness_cfg.root_model}",
             reflection_lm_kwargs={
