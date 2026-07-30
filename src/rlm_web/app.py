@@ -193,7 +193,7 @@ async def vault_search(request: Request, q: str = ""):
         try:
             from rlm_kernel.search import search_vault
             from rlm_kernel.vault import LocalVault
-            vault_root = Path.home() / ".local" / "share" / "rlm-kernel" / "vault"
+            vault_root = _get_vault_root()
             vault = LocalVault(vault_root, init_git=False)
             idx_path = vault_root / ".index" / "meta.sqlite"
             if idx_path.exists():
@@ -210,7 +210,7 @@ async def vault_page(request: Request, path: str):
     _check_auth(request)
     try:
         from rlm_kernel.vault import LocalVault
-        vault_root = Path.home() / ".local" / "share" / "rlm-kernel" / "vault"
+        vault_root = _get_vault_root()
         vault = LocalVault(vault_root, init_git=False)
         page = vault.get(path)
         if page is None:
@@ -223,6 +223,92 @@ async def vault_page(request: Request, path: str):
     except Exception:
         raise HTTPException(status_code=500)
 
+
+def _get_vault_root() -> Path:
+    """Return the vault root path (env-configurable, for testing)."""
+    return Path(os.environ.get("RLM_VAULT_ROOT",
+                str(Path.home() / ".local" / "share" / "rlm-kernel" / "vault")))
+
+
+@app.post("/vault/ingest")
+async def vault_ingest(request: Request, files: list[UploadFile] | None = None):
+    """Ingest uploaded Markdown files into the vault as permanent pages."""
+    _check_auth(request)
+    if not files:
+        return JSONResponse({"error": "no files uploaded"}, status_code=400)
+
+    from rlm_kernel.schema import Frontmatter, Page, PageKind
+    from rlm_kernel.vault import LocalVault
+    from rlm_kernel.index import Index
+
+    vault_root = _get_vault_root()
+    vault = LocalVault(vault_root, init_git=False)
+    idx_path = vault_root / ".index" / "meta.sqlite"
+
+    ingested = 0
+    skipped = 0
+    results: list[dict] = []
+
+    for f in files:
+        if not f.filename or not f.filename.endswith(".md"):
+            results.append({"file": f.filename, "status": "rejected",
+                            "reason": "not a .md file"})
+            continue
+
+        content = (await f.read()).decode("utf-8", errors="replace")
+        if not content.strip():
+            results.append({"file": f.filename, "status": "rejected",
+                            "reason": "empty file"})
+            continue
+
+        # Extract title from first heading
+        title = f.filename.replace(".md", "")
+        for line in content.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("# "):
+                title = stripped[2:].strip()
+                break
+
+        # Slugify name
+        import re
+        name = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:64]
+
+        # Content hash for dedup
+        import hashlib
+        content_hash = "sha256:" + hashlib.sha256(content.encode()).hexdigest()
+
+        # Check duplicates
+        existing = vault.list(kind="note")
+        duplicate = any(
+            (ex.frontmatter.hash and ex.frontmatter.hash == content_hash)
+            or ex.body.strip() == content.strip()
+            for ex in existing
+        )
+        if duplicate:
+            skipped += 1
+            results.append({"file": f.filename, "status": "skipped",
+                            "reason": "duplicate"})
+            continue
+
+        fm = Frontmatter(
+            schema=1, kind=PageKind.NOTE, name=name,
+            title=title, summary=title, hash=content_hash,
+        )
+        page = Page(fm, content)
+        page_path = f"memory/notes/{name}.md"
+        vault.put(page, page_path)
+        ingested += 1
+        results.append({"file": f.filename, "status": "ok",
+                        "path": page_path})
+
+    if ingested > 0 and idx_path.exists():
+        idx = Index(idx_path)
+        idx.reindex_delta(vault)
+        idx.close()
+
+    return JSONResponse({
+        "ingested": ingested, "skipped": skipped, "results": results,
+    })
 
 @app.get("/check", response_class=HTMLResponse)
 async def check_page(request: Request):

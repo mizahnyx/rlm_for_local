@@ -19,4 +19,12 @@
 {% elif query %}
     <p>(no results)</p>
 {% endif %}
+
+<hr>
+<h3>Ingest Files into Vault</h3>
+<form method="post" action="/vault/ingest" enctype="multipart/form-data">
+    <input type="file" name="files" accept=".md" multiple>
+    <button type="submit">Upload to Vault</button>
+</form>
+<p><small>Uploaded .md files become permanent, searchable vault pages.</small></p>
 {% endblock %}
