@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}Chat{% endblock %}
+{% block content %}
+<h2>Chat</h2>
+
+<div id="chat-messages" class="card" style="max-height: 500px; overflow-y: auto; font-family: monospace; font-size: 0.9rem; white-space: pre-wrap;">
+    <p><strong>System:</strong> RLM Chat — type a query or use slash commands.</p>
+    <p>Commands: /ask, /ingest &lt;path&gt;, /context, /clear, /search, /get, /note, /quit</p>
+    <p>Profile: <span id="chat-profile">{{ profile }}</span></p>
+</div>
+
+<form id="chat-form" style="margin-top: 1rem;">
+    <input type="text" id="chat-input" name="message" placeholder="Type a message or /command..." 
+           style="width: 80%;" autofocus>
+    <button type="submit">Send</button>
+</form>
+
+<div style="margin-top: 0.5rem;">
+    <button onclick="clearChat()">Clear Context</button>
+    <button onclick="showContext()">Show Context</button>
+</div>
+
+<script>
+    const messages = document.getElementById('chat-messages');
+    const form = document.getElementById('chat-form');
+    const input = document.getElementById('chat-input');
+    let eventSource = null;
+    let sessionId = crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+
+    form.onsubmit = async function(e) {
+        e.preventDefault();
+        const msg = input.value.trim();
+        if (!msg) return;
+        
+        messages.innerHTML += '<p><strong>You:</strong> ' + escapeHtml(msg) + '</p>';
+        input.value = '';
+        messages.scrollTop = messages.scrollHeight;
+
+        try {
+            const resp = await fetch('/chat/send', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({session_id: sessionId, message: msg, profile: document.getElementById('chat-profile').textContent})
+            });
+            const data = await resp.json();
+            
+            if (data.error) {
+                messages.innerHTML += '<p style="color:red"><strong>Error:</strong> ' + escapeHtml(data.error) + '</p>';
+                return;
+            }
+            
+            // Stream response via SSE
+            if (eventSource) eventSource.close();
+            eventSource = new EventSource('/chat/events/' + data.stream_id);
+            
+            let responseText = '';
+            eventSource.onmessage = function(evt) {
+                const d = JSON.parse(evt.data);
+                if (d.type === 'chunk') {
+                    responseText += d.text;
+                    // Update last assistant message
+                    const lastMsg = messages.lastElementChild;
+                    if (lastMsg && lastMsg.innerHTML.startsWith('<p><strong>Assistant:</strong>')) {
+                        lastMsg.textContent = 'Assistant: ' + responseText;
+                    } else {
+                        messages.innerHTML += '<p><strong>Assistant:</strong> ' + escapeHtml(responseText) + '</p>';
+                    }
+                } else if (d.type === 'done') {
+                    eventSource.close();
+                } else if (d.type === 'error') {
+                    messages.innerHTML += '<p style="color:red"><strong>Error:</strong> ' + escapeHtml(d.text) + '</p>';
+                    eventSource.close();
+                }
+                messages.scrollTop = messages.scrollHeight;
+            };
+        } catch(err) {
+            messages.innerHTML += '<p style="color:red"><strong>Error:</strong> ' + escapeHtml(String(err)) + '</p>';
+        }
+    };
+
+    function clearChat() {
+        messages.innerHTML = '<p><strong>System:</strong> Context cleared.</p>';
+        fetch('/chat/clear', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_id: sessionId})});
+    }
+
+    function showContext() {
+        fetch('/chat/context', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({session_id: sessionId})})
+        .then(r => r.json())
+        .then(d => {
+            messages.innerHTML += '<p><strong>System:</strong> Context: ' + escapeHtml(d.context || '(empty)') + '</p>';
+        });
+    }
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+</script>
+{% endblock %}

@@ -243,13 +243,186 @@ async def docs_page(request: Request, name: str):
     })
 
 
+# ── Chat ───────────────────────────────────────────────────────────────────
+
+_chat_sessions: dict[str, dict[str, Any]] = {}
+_chat_lock = threading.Lock()
+
+
+@app.get("/chat", response_class=HTMLResponse)
+async def chat_page(request: Request):
+    _check_auth(request)
+    return templates.TemplateResponse(request, "chat.html", {"profile": "laptop"})
+
+
+@app.post("/chat/send")
+async def chat_send(request: Request):
+    """Queue a chat message and return a stream ID for SSE."""
+    _check_auth(request)
+    body = await request.json()
+    session_id = body.get("session_id", "default")
+    message = body.get("message", "").strip()
+    profile = body.get("profile", "laptop")
+    if not message:
+        return JSONResponse({"error": "empty message"}, status_code=400)
+    stream_id = uuid.uuid4().hex[:8]
+    with _chat_lock:
+        sess = _chat_sessions.setdefault(session_id, {"context": ""})
+    threading.Thread(
+        target=_process_chat_message,
+        args=(session_id, message, stream_id, profile),
+        daemon=True,
+    ).start()
+    return JSONResponse({"stream_id": stream_id, "session_id": session_id})
+
+
+@app.get("/chat/events/{stream_id}")
+async def chat_events(request: Request, stream_id: str):
+    """SSE endpoint for chat response streaming."""
+    import asyncio as _asyncio
+    from fastapi.responses import StreamingResponse
+
+    async def event_stream():
+        while True:
+            found = None
+            with _chat_lock:
+                for sess in _chat_sessions.values():
+                    queues = sess.get("_queues", {})
+                    if stream_id in queues:
+                        found = queues[stream_id]
+                        break
+            if found is None:
+                await _asyncio.sleep(0.2)
+                continue
+            while found:
+                evt = found.pop(0)
+                yield f"data: {json.dumps(evt)}\n\n"
+                if evt.get("type") in ("done", "error"):
+                    return
+            await _asyncio.sleep(0.3)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/chat/clear")
+async def chat_clear(request: Request):
+    """Clear a chat session's context."""
+    _check_auth(request)
+    body = await request.json()
+    session_id = body.get("session_id", "default")
+    with _chat_lock:
+        if session_id in _chat_sessions:
+            _chat_sessions[session_id]["context"] = ""
+    return JSONResponse({"status": "ok"})
+
+
+@app.post("/chat/context")
+async def chat_context(request: Request):
+    """Return current chat session context."""
+    _check_auth(request)
+    body = await request.json()
+    session_id = body.get("session_id", "default")
+    with _chat_lock:
+        ctx = _chat_sessions.get(session_id, {}).get("context", "")
+    return JSONResponse({"context": ctx[:500], "total_chars": len(ctx)})
+
+
+def _process_chat_message(session_id: str, message: str, stream_id: str, profile: str) -> None:
+    """Process a chat message in a background thread."""
+    queue: list[dict] = []
+    with _chat_lock:
+        sess = _chat_sessions.setdefault(session_id, {"context": ""})
+        sess.setdefault("_queues", {})[stream_id] = queue
+        context = sess["context"]
+
+    def emit(t: str, **kw: Any) -> None:
+        queue.append({"type": t, **kw})
+
+    msg = message.strip()
+    low = msg.lower()
+
+    if low == "/context":
+        display = context[:500] if context else "(empty)"
+        emit("chunk", text=f"Context ({len(context)} chars):\n{display}\n")
+        emit("done", text="")
+        return
+
+    if low == "/clear":
+        with _chat_lock:
+            if session_id in _chat_sessions:
+                _chat_sessions[session_id]["context"] = ""
+        emit("chunk", text="Context cleared.\n")
+        emit("done", text="")
+        return
+
+    if low == "/quit":
+        emit("chunk", text="Goodbye.\n")
+        emit("done", text="")
+        return
+
+    if low.startswith("/search "):
+        query = msg[len("/search "):].strip()
+        try:
+            from rlm_kernel.search import search_vault
+            from rlm_kernel.vault import LocalVault
+            vr = Path.home() / ".local" / "share" / "rlm-kernel" / "vault"
+            vault = LocalVault(vr, init_git=False)
+            idx = vr / ".index" / "meta.sqlite"
+            if idx.exists():
+                for r in search_vault(vault, idx, query, k=5):
+                    emit("chunk", text=f"[{r['kind']}] {r['name']}: {r['title']}\n")
+            else:
+                emit("chunk", text="Index not found.\n")
+        except Exception as e:
+            emit("error", text=str(e))
+        emit("done", text="")
+        return
+
+    if low.startswith("/get "):
+        path = msg[len("/get "):].strip()
+        try:
+            from rlm_kernel.vault import LocalVault
+            vault = LocalVault(Path.home() / ".local/share/rlm-kernel/vault", init_git=False)
+            page = vault.get(path)
+            emit("chunk", text=f"{page.frontmatter.title}\n\n{page.body[:1000]}\n" if page else f"Not found: {path}\n")
+        except Exception as e:
+            emit("error", text=str(e))
+        emit("done", text="")
+        return
+
+    # /ask or plain text — needs context
+    query = msg[5:].strip() if low.startswith("/ask ") else msg
+    if not context:
+        emit("chunk", text="No context loaded. Use /ingest to load .md files.\n")
+        emit("done", text="")
+        return
+
+    import rlm_local
+    try:
+        answer = rlm_local.completion(query, context, profile=profile, max_turns=10)
+        emit("chunk", text=answer)
+    except Exception as e:
+        emit("error", text=str(e))
+    emit("done", text="")
 # ── Startup ────────────────────────────────────────────────────────────────
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    import argparse
     import uvicorn
-    host = os.environ.get("RLM_WEB_HOST", "127.0.0.1")
-    port = int(os.environ.get("RLM_WEB_PORT", "8778"))
-    uvicorn.run("rlm_web.app:app", host=host, port=port, reload=False)
+
+    parser = argparse.ArgumentParser(description="RLM Web — HTTPS frontend")
+    parser.add_argument("--host", default=os.environ.get("RLM_WEB_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("RLM_WEB_PORT", "8778")))
+    parser.add_argument("--ssl-keyfile", default=os.environ.get("RLM_WEB_SSL_KEY"))
+    parser.add_argument("--ssl-certfile", default=os.environ.get("RLM_WEB_SSL_CERT"))
+    args = parser.parse_args(argv)
+
+    kwargs: dict = {"host": args.host, "port": args.port, "reload": False}
+    if args.ssl_keyfile and args.ssl_certfile:
+        kwargs["ssl_keyfile"] = args.ssl_keyfile
+        kwargs["ssl_certfile"] = args.ssl_certfile
+
+    uvicorn.run("rlm_web.app:app", **kwargs)
 
 
 if __name__ == "__main__":
