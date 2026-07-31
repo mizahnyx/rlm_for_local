@@ -31,6 +31,10 @@ static_dir = Path(__file__).parent / "static"
 static_dir.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
+# Upload limits (P2)
+MAX_UPLOAD_FILES = 20
+MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB
+
 # Templates
 from fastapi.templating import Jinja2Templates  # noqa: E402
 
@@ -42,20 +46,24 @@ templates = Jinja2Templates(directory=str(templates_dir))
 # ── Auth ───────────────────────────────────────────────────────────────────
 
 def _check_auth(request: Request) -> None:
-    """Check bearer token or session cookie."""
+    """Check bearer token or session cookie. Fail-closed for non-local (P3)."""
     token = os.environ.get("RLM_WEB_TOKEN", "")
+
     if not token:
-        return  # No token configured — allow all
+        # No token configured: allow loopback and test clients only
+        if request.client is None:
+            return  # TestClient — allow
+        host = request.client.host
+        if host in ("127.0.0.1", "::1", "localhost", "testclient"):
+            return
+
+    # Token configured: require session authentication
     try:
         if request.session.get("authenticated"):
             return
     except Exception:
-        pass  # Session not available (e.g., TestClient)
+        pass
     raise HTTPException(status_code=401, detail="Authentication required")
-
-@app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request):
-    return templates.TemplateResponse(request, "login.html")
 @app.post("/login")
 async def login(request: Request, token: str = Form(...)):
     expected = os.environ.get("RLM_WEB_TOKEN", "")
@@ -239,6 +247,20 @@ async def vault_ingest(request: Request, files: list[UploadFile] | None = None):
     _check_auth(request)
     if not files:
         return JSONResponse({"error": "no files uploaded"}, status_code=400)
+    if len(files) > MAX_UPLOAD_FILES:
+        return JSONResponse(
+            {"error": f"Too many files: {len(files)} (max {MAX_UPLOAD_FILES})"},
+            status_code=413,
+        )
+    total_bytes = 0
+    for f in files:
+        if f.size is not None:
+            total_bytes += f.size
+    if total_bytes > MAX_UPLOAD_BYTES:
+        return JSONResponse(
+            {"error": f"Upload too large: {total_bytes} bytes (max {MAX_UPLOAD_BYTES})"},
+            status_code=413,
+        )
 
     from rlm_kernel.schema import Frontmatter, Page, PageKind
     from rlm_kernel.vault import LocalVault
@@ -323,10 +345,10 @@ async def check_page(request: Request):
 async def docs_page(request: Request, name: str):
     _check_auth(request)
     docs_dir = Path(__file__).parent.parent.parent / "docs"
-    doc_path = docs_dir / name
-    if not doc_path.exists() or not doc_path.is_file():
+    resolved = (docs_dir / name).resolve()
+    if not resolved.is_relative_to(docs_dir.resolve()) or not resolved.is_file():
         raise HTTPException(status_code=404)
-    content = doc_path.read_text(encoding="utf-8", errors="replace")
+    content = resolved.read_text(encoding="utf-8", errors="replace")
     return templates.TemplateResponse(request, "docs.html", {
         "name": name, "content": content,
     })

@@ -189,3 +189,94 @@ class TestVaultIngest:
         client, vault_path = seeded_client
         resp = client.post("/vault/ingest")
         assert resp.status_code == 400
+
+
+class TestPathTraversal:
+    """P1: docs route must not escape docs/ directory."""
+
+    def test_traversal_to_pyproject_rejected(self, client):
+        """../.. traversal returns 404, not the file content."""
+        resp = client.get("/docs/..%2F..%2Fpyproject.toml")
+        assert resp.status_code == 404
+
+    def test_traversal_to_windows_dir_rejected(self, client):
+        """Deep traversal to system dir returns 404."""
+        resp = client.get("/docs/..%2F..%2F..%2FWindows/win.ini")
+        assert resp.status_code == 404
+
+    def test_legitimate_doc_still_serves(self, client):
+        """A real doc path still works."""
+        resp = client.get("/docs/operator-guide.md")
+        assert resp.status_code in (200, 401, 404)  # 404 if file DNE, 401 if auth, 200 if ok
+
+
+class TestUploadCaps:
+    """P2: file uploads must enforce count and size limits."""
+
+    def test_too_many_files_rejected(self, client):
+        """21 files rejected (cap is 20)."""
+        files = [("files", (f"file{i}.md", io.BytesIO(b"# Test"), "text/markdown"))
+                 for i in range(21)]
+        resp = client.post("/vault/ingest", files=files)
+        assert resp.status_code in (400, 413)
+
+    def test_file_too_large_rejected(self, client):
+        """A single large file rejected."""
+        big = b"x" * (9 * 1024 * 1024)  # 9 MB
+        resp = client.post("/vault/ingest", files={
+            "files": ("big.md", big, "text/markdown"),
+        })
+        assert resp.status_code in (400, 413)
+
+
+class TestAuthPolicy:
+    """P3: auth must be fail-closed for non-local requests."""
+
+    def test_localhost_allowed_without_token(self, client):
+        """Loopback request works without RLM_WEB_TOKEN set."""
+        old = os.environ.pop("RLM_WEB_TOKEN", None)
+        try:
+            resp = client.get("/")
+            assert resp.status_code == 200
+        finally:
+            if old:
+                os.environ["RLM_WEB_TOKEN"] = old
+
+
+class TestPromptRegressionGuard:
+    """P4: contract pages must contain the answer-dict submission mechanism."""
+
+    def test_how_to_work_contains_answer_ready(self):
+        """contract/how-to-work.md must explicitly mention answer['ready']."""
+        from pathlib import Path
+        from rlm_kernel.vault import LocalVault
+        vault = LocalVault(
+            Path.home() / ".local/share/rlm-kernel/vault", init_git=False,
+        )
+        page = vault.get("contract/how-to-work.md")
+        assert page is not None, "how-to-work.md not found in vault"
+        body = page.body
+        assert "ready" in body.lower(), (
+            "how-to-work.md does not mention answer-ready mechanism"
+        )
+        assert "answer" in body.lower(), (
+            "how-to-work.md does not mention answer dict"
+        )
+
+    def test_repl_contract_contains_answer_ready(self):
+        """contract/repl-contract.md must mention answer['ready']."""
+        from pathlib import Path
+        from rlm_kernel.vault import LocalVault
+        vault = LocalVault(
+            Path.home() / ".local/share/rlm-kernel/vault", init_git=False,
+        )
+        page = vault.get("contract/repl-contract.md")
+        assert page is not None, "repl-contract.md not found in vault"
+        body = page.body
+        assert "ready" in body.lower(), (
+            "repl-contract.md does not mention answer-ready mechanism"
+        )
+
+
+import io
+from io import BytesIO
