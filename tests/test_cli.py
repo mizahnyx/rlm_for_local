@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -51,16 +52,28 @@ class TestAsk:
 
 
 class TestSearch:
-    def test_search_no_results(self, monkeypatch):
-        """rlm search with no results prints (no results)."""
-        from rlm_kernel.search import search_vault
-        monkeypatch.setattr("rlm_kernel.search.search_vault",
-                            lambda *a, **kw: [])
+    def test_search_no_index_reports_rebuild(self, tmp_path, capsys):
+        """rlm search on a vault with no index exits 1 and says what to run."""
+        rc = cli_main(["search", "xyzzy", "--vault", str(tmp_path)])
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "Index not found" in out
+        assert "rlm vault index --rebuild" in out
 
-        rc = cli_main(["search", "xyzzy", "--vault",
-                       str(Path.home() / ".local/share/rlm-kernel/vault")])
-        # May fail if vault doesn't exist, but won't crash
-        assert rc in (0, 1)
+    def test_search_no_results(self, tmp_path, capsys):
+        """rlm search over a real index prints '(no results)' and exits 0."""
+        from rlm_kernel.index import rebuild_index
+        from rlm_kernel.seed import seed_vault
+        from rlm_kernel.vault import LocalVault
+
+        vault_path = tmp_path / "vault"
+        vault = LocalVault(vault_path, init_git=False)
+        seed_vault(vault)
+        rebuild_index(vault, vault_path / ".index" / "meta.sqlite")
+
+        rc = cli_main(["search", "xyzzyplugh", "--vault", str(vault_path)])
+        assert rc == 0
+        assert "(no results)" in capsys.readouterr().out
 
 
 class TestGet:
@@ -139,11 +152,20 @@ class TestIngest:
 
 
 class TestVaultPassThrough:
-    def test_vault_init(self):
-        """rlm vault init delegates to rlm-kernel."""
-        # Just test it doesn't crash — actual init tested in kernel
-        pass
+    def test_vault_init(self, tmp_path, capsys):
+        """rlm vault init delegates to rlm-kernel and seeds a real vault.
 
+        This test used to be a literal `pass`. It now asserts the pass-through
+        actually reaches the kernel command: exit code 0, the kernel's
+        confirmation line, and pages on disk afterwards.
+        """
+        from rlm_kernel.vault import LocalVault
 
-# Needed for stdin test
-import sys
+        vault_path = tmp_path / "vault"
+        rc = cli_main(["vault", "init", "--vault", str(vault_path)])
+
+        assert rc == 0
+        assert f"Vault seeded at {vault_path}" in capsys.readouterr().out
+
+        vault = LocalVault(vault_path, init_git=False)
+        assert vault.list(), "vault init reported success but seeded no pages"

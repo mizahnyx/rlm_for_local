@@ -41,6 +41,22 @@ over 20K pages, extrapolating to ~3.5 hours at 100K.
 - **F1:** `_index_page(for_update=False)` on fresh builds skips all per-page
   DELETEs (tables are emptied up front). This removes the quadratic from `build()`.
 - **F2:** `fts_rowid` column captures `last_insert_rowid()` on FTS insert;
+  updates then run `DELETE FROM fts_pages WHERE rowid = ?` (indexed in FTS5)
+  instead of `WHERE path = ?`, keeping `reindex_delta` O(log) per changed page.
+  A `PRAGMA user_version` migration step (`D-b`) adds the column to pre-existing
+  indexes.
+- **F3:** external-content FTS (plain `content` table + `VALUES('rebuild')` bulk
+  pass, storage dedup) — **not taken.** The F1+F2 minimal path is the sanctioned
+  route and measured sufficient; F3 remains available as a non-urgent
+  structural upgrade.
+- **F4:** `_checkpoint()` runs `PRAGMA wal_checkpoint(TRUNCATE)` after `build()`,
+  and search is measured after the checkpoint — the run-2 p95 artifact is gone.
+- **F5:** scaling regression test on the rebuild≡delta property (see D-a in the
+  validation doc for why the first version of it was vacuous).
+- **C1:** `load_system_prompt_from_vault(..., bridge=)` lists active helpers from
+  the SQL index when it exists, replacing the per-completion vault walk
+  (1,634 s → 46 ms at 100K pages).
+
 ## Tier 2 (Organic Corpus)
 
 **Shelved (insufficient corpus).** The organic corpus proved insufficient in
@@ -53,6 +69,10 @@ activate on `RLM_KERNEL_LOAD_CORPUS` being set.
 The kernel moves to **production soak testing** as a daily driver. Regression
 checkpoints (rebuild, search p95, git status) should be re-run when the real
 vault crosses 10K / 50K / 100K pages.
-```
+
+To revive Tier 2 once a suitable corpus exists, set `RLM_KERNEL_LOAD_CORPUS` and
+run the two env-gated suite tests:
+
+```bash
 .venv/Scripts/python.exe -m pytest tests/load/test_load.py -v -k "tier2" --timeout=7200
 ```

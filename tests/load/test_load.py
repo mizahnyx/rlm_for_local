@@ -19,7 +19,10 @@ Usage:
     # Both
     python -m pytest tests/load/test_load.py -v
 
-All load tests are marked @pytest.mark.slow and excluded from default runs.
+All load tests are marked @pytest.mark.slow and @pytest.mark.load, and are
+excluded from default runs by both `-m "not slow"` and `-k "not load"`
+(README's documented `-k "not slow and not load"` therefore selects the fast
+unit suite exactly).
 """
 
 from __future__ import annotations
@@ -34,6 +37,10 @@ import pytest
 
 from rlm_kernel.index import Index, rebuild_index
 from rlm_kernel.vault import LocalVault
+
+# Every test in this module is a load-gate benchmark: slow by construction and
+# permanently excluded from the fast suite by *both* markers.
+pytestmark = [pytest.mark.slow, pytest.mark.load]
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -70,7 +77,6 @@ def _percentile(values: list[float], p: float) -> float:
 
 # ── Tier 1 — Synthetic corpus ──────────────────────────────────────────────
 
-@pytest.mark.slow
 class TestLoadTier1:
     """Load tests against a 10K-page synthetic corpus (smoke test for CI)."""
 
@@ -146,7 +152,6 @@ def _get_organic_corpus() -> Path | None:
     return p
 
 
-@pytest.mark.slow
 class TestLoadTier2:
     """Load tests against an organic corpus (optional, env-var gated)."""
 

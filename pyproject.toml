@@ -29,6 +29,7 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
     "slow: marks tests as slow (deselect with '-k \"not slow\"')",
+    "load: marks load-gate benchmark tests (deselect with '-k \"not load\"' or '-m \"not load\"')",
 ]
 
 [tool.ruff]

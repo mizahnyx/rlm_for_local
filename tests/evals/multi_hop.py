@@ -1,4 +1,9 @@
-"""Eval suite — multi-hop reasoning tasks."""
+"""Eval suite — multi-hop reasoning tasks.
+
+Patterns are anchored at token boundaries; names tolerate hyphen/space
+variation (``Martin Fowler`` / ``Martin-Fowler``) but not prefix extensions
+(``Martina Fowler`` no longer matches). See ``tests/evals/__init__.py``.
+"""
 
 from tests.evals import EvalTask
 
@@ -14,7 +19,7 @@ TASKS = [
             "The instructor noted that Martin Fowler's insights were particularly "
             "relevant to the design patterns module." + PAD
         ),
-        expected_pattern="(?i)martin.?fowler",
+        expected_pattern=r"(?i)\bmartin[\s-]*fowler\b",
     ),
     EvalTask(
         name="capital_of_country",
@@ -23,7 +28,7 @@ TASKS = [
             "The annual tech conference was held in Tokyo this year. Attendees from "
             "over 30 countries participated in workshops and keynote sessions." + PAD
         ),
-        expected_pattern="(?i)tokyo",
+        expected_pattern=r"(?i)\btokyo\b",
     ),
     EvalTask(
         name="ceo_of_company",
@@ -33,7 +38,7 @@ TASKS = [
             "by MegaCorp's CEO, Sarah Chen, who called it a strategic move into the "
             "AI space." + PAD
         ),
-        expected_pattern="(?i)sarah.?chen",
+        expected_pattern=r"(?i)\bsarah[\s-]*chen\b",
     ),
     EvalTask(
         name="most_expensive_product",
@@ -44,7 +49,7 @@ TASKS = [
             "Furniture: Desk $450, Chair $200, Shelf $150\n"
             "Clothing: Jacket $120, Shirt $40, Pants $60\n" + PAD
         ),
-        expected_pattern="(?i)electronics",
+        expected_pattern=r"(?i)\belectronics\b",
     ),
     EvalTask(
         name="oldest_employee",
@@ -57,6 +62,6 @@ TASKS = [
             "David Lee, age 31, Developer\n"
             "Eve Wilson, age 39, Architect\n" + PAD
         ),
-        expected_pattern="(?i)carol.?davis",
+        expected_pattern=r"(?i)\bcarol[\s-]*davis\b",
     ),
 ]

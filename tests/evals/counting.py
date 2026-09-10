@@ -1,4 +1,9 @@
-"""Eval suite — counting and aggregation tasks (numeric tolerance)."""
+"""Eval suite — counting and aggregation tasks (anchored numeric patterns).
+
+Numeric patterns use ``(?<!\\d)…(?!\\d)`` rather than ``\\b`` so that an answer
+like ``35`` cannot be satisfied by ``135`` while ``25.8C`` still matches (see
+the pattern convention in ``tests/evals/__init__.py``).
+"""
 
 from tests.evals import EvalTask
 
@@ -9,15 +14,13 @@ TASKS = [
         name="count_fruits",
         query="How many fruits are listed in total?",
         context=("apple\n" * 15 + "banana\n" * 8 + "cherry\n" * 12 + PAD),
-        expected_pattern="35",
-        tolerance=0.0,
+        expected_pattern=r"(?<!\d)35(?!\d)",
     ),
     EvalTask(
         name="count_colors",
         query="How many color names appear in the list?",
         context=("red\n" * 7 + "blue\n" * 5 + "green\n" * 9 + "yellow\n" * 3 + PAD),
-        expected_pattern="24",
-        tolerance=0.0,
+        expected_pattern=r"(?<!\d)24(?!\d)",
     ),
     EvalTask(
         name="count_errors",
@@ -34,8 +37,7 @@ TASKS = [
             "2024-01-15 08:00:40 INFO Health check passed\n"
             + "Additional system log entries with routine operational messages. " * 50
         ),
-        expected_pattern=r"\b4\b",
-        tolerance=0.0,
+        expected_pattern=r"(?<!\d)4(?!\d)",
     ),
     EvalTask(
         name="sum_prices",
@@ -45,8 +47,7 @@ TASKS = [
             "Widget A: $12.50\nWidget B: $8.75\nWidget C: $15.00\nWidget D: $6.25\n"
             + "Detailed product descriptions follow. " * 50
         ),
-        expected_pattern="42\\.?50",
-        tolerance=0.01,
+        expected_pattern=r"(?<!\d)42\.?50(?!\d)",
     ),
     EvalTask(
         name="average_temperature",
@@ -57,7 +58,6 @@ TASKS = [
             "Friday: 21\nSaturday: 23\nSunday: 25\n"
             + "Detailed meteorological analysis follows. " * 50
         ),
-        expected_pattern="22\\.?86",
-        tolerance=0.1,
+        expected_pattern=r"(?<!\d)22\.?86(?!\d)",
     ),
 ]

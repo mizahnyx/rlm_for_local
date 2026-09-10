@@ -359,14 +359,22 @@ The complete reference:
 ```python
 pv = config.prompt_vars()
 # {
-#     "repl_cap": 2000,          # repl_output_char_cap
-#     "sub_budget": 8000,        # sub_prompt_char_budget
-#     "max_turns": 12,           # max_turns
+#     "repl_cap": 4000,          # repl_output_char_cap
+#     "sub_budget": 16000,       # sub_prompt_char_budget
+#     "max_turns": 15,           # max_turns
 #     "example_chunking_idiom": "...",
-#     "root_ctx_size": 8192,
-#     "sub_ctx_size": 8192,
 # }
 ```
+
+The dict is **exactly** the set of placeholders the system prompt consumes.
+`tests/test_prompts.py::TestPromptVarsDiscipline` asserts set equality in both
+directions: an inert key is a capacity claim the model never sees, and a
+placeholder with no key is a `KeyError` at run time. `root_ctx_size` /
+`sub_ctx_size` were inert and were removed (R16).
+
+Note that the root loop reads *operating* values (caps, turn limits, budgets,
+thresholds) through the `Config`, not the frozen `Profile`, so a keyword override
+changes both what the model is told and what is enforced (R10).
 
 ### 4.4 The `Profile` Dataclass
 
@@ -407,6 +415,22 @@ class ModelBackend(Protocol):
 The sole implementation is `HTTPModelBackend`, an OpenAI-compatible HTTP client
 that speaks `/v1/chat/completions`.
 
+**Robustness contract (R9).**
+
+- **Endpoint normalization.** Endpoints are normalized to a `/v1` base:
+  `http://host:9010`, `http://host:9010/` and `http://host:9010/v1/` all become
+  `http://host:9010/v1`. The comment always claimed this; the code only stripped
+  trailing slashes, so an endpoint without `/v1` produced a 404 path.
+- **Guarded extraction.** A response without `choices` / `message` / `content`
+  raises `ModelBackendError` carrying the HTTP status and a body snippet, instead
+  of leaking a bare `KeyError` or `IndexError` out of `completion()`. A null
+  `content` with a `reasoning_content` sibling uses the latter (reasoning
+  models); a `content` that is an empty string is returned as-is.
+- **Retries.** Transport errors and 5xx responses are retried twice with
+  exponential backoff (the `tenacity` dependency was declared but never
+  imported). 4xx is not retried — retrying a client error cannot help.
+- **Auth headers.** `headers=` allows a bearer token for a proxied endpoint.
+
 ### 5.2 Constructor
 
 ```python
@@ -417,17 +441,26 @@ HTTPModelBackend(
     sub_model: str = "",
     verify: bool = False,
     timeout: float = 300.0,
+    headers: dict[str, str] | None = None,
 )
 ```
 
 | Parameter | Default | Description |
 |---|---|---|
-| `root_endpoint` | `"https://localhost:9010/v1"` | Base URL for root-tier chat completions |
+| `root_endpoint` | `"https://localhost:9010/v1"` | Base URL for root-tier chat completions (normalized to a `/v1` base) |
 | `sub_endpoint` | `""` (same as root) | Base URL for sub-tier chat completions |
 | `root_model` | `""` (from config) | Model name for root tier |
 | `sub_model` | `""` (same as root) | Model name for sub tier |
 | `verify` | `False` | TLS certificate verification (self-signed certs on localhost) |
 | `timeout` | `300.0` | HTTP request timeout in seconds |
+| `headers` | `None` | Extra headers on every request (auth) |
+
+**TLS posture (R18).** `verify=False` stays the default because a local
+self-signed server is the reference deployment. When the endpoint is `https` on a
+non-loopback host *and* verification is off, the constructor emits a
+`UserWarning` naming the endpoint — the traffic can be intercepted, and that
+should not be silent. Plain `http` has no certificate to verify and is exempt.
+`tests/test_model_backend.py::TestTLSVerificationWarning` pins both sides.
 
 ### 5.3 Two-Tier Routing
 
@@ -491,20 +524,27 @@ The harness and worker communicate over a **bidirectional TCP socket** on
 ```
 
 Message types sent by the harness:
-- `{"cmd": "init", "context": "<raw text>", "helpers": [...]}` — initialize the worker with context and optional helper definitions
-- `{"cmd": "exec", "code": "<python source>"}` — execute a cell
+- `{"cmd": "init", "context": <spec>, "helpers": [...]}` — initialize the worker with context and optional helper definitions. `<spec>` is either the raw text (small/in-memory context) or a **file reference** `{"kind": "file", "path": "...", "total": <bytes>}` when the context spilled to disk (R1). The reference is small and constant-size regardless of context size; the worker opens a lazy reader over the same path.
+- `{"cmd": "exec", "code": "<python source>", "cell_id": <int>}` — execute a cell
 - `{"cmd": "shutdown"}` — terminate the worker
 
 Message types sent by the worker:
-- `{"type": "result", "stdout": "...", "stderr": "...", "final_answer": null}` — cell result
-- `{"type": "subcall", "prompt": "...", "schema": null}` — request a sub-LLM call
-- `{"type": "subcall_batched", "prompts": [...], "schema": null}` — request batched sub-calls
-- `{"cmd": "search", "query": "...", "k": 5, "kinds": null}` — request vault search (kernel)
-- `{"cmd": "propose", "kind": "...", "name": "...", "body": "...", "rationale": "..."}` — propose new page (kernel)
+- `{"type": "result", "cell_id": <int>, "stdout": "...", "stderr": "...", "final_answer": null}` — cell result
+- `{"type": "subcall", "prompt": "...", "schema": null, "cell_id": <int>}` — request a sub-LLM call
+- `{"type": "subcall_batched", "prompts": [...], "schema": null, "cell_id": <int>}` — request batched sub-calls
+- `{"cmd": "search", "query": "...", "k": 5, "kinds": null, "cell_id": <int>}` — request vault search (kernel)
+- `{"cmd": "propose", "kind": "...", "name": "...", "body": "...", "rationale": "...", "cell_id": <int>}` — propose new page (kernel)
 
 The subcall messages are **interleaved** with execution: the worker sends a
 subcall request, the harness proxies it to the `SubcallManager`, sends the
 response back, and the worker continues executing the cell.
+
+**Cell correlation (R4).** Every `exec` carries a monotonically increasing
+`cell_id`, and every worker message echoes it. If a cell exceeds its timeout the
+harness returns a timeout error while the worker keeps running; the next
+`execute()` discards any `result` whose `cell_id` is not the current one instead
+of handing it to the model as this cell's output. Two consecutive timeouts
+restart the worker (the model is told the REPL namespace was lost).
 
 ### 6.3 REPL Namespace
 
@@ -513,7 +553,7 @@ scope:
 
 | Name | Type | Description |
 |---|---|---|
-| `context` | `str` | The full user context (as a plain string in the worker) |
+| `context` | `str` or lazy file handle | For an in-memory context, a plain `str`. For a disk-backed context, a byte-addressed lazy reader over the spilled file — `len()`, indexing, `lines()`, `grep()` and `chunk()` all read from disk (R1). |
 | `answer` | `dict` | `{"content": "", "ready": False}` — set to signal completion |
 | `llm_query(prompt, *, schema=None)` | function | One-shot sub-LLM call; no history, no system prompt |
 | `llm_query_batched(prompts, *, schema=None)` | function | Batched sub-calls with bounded parallelism |
@@ -575,27 +615,38 @@ print(x)  # → 42
 
 | Limit | Default | Behavior on Violation |
 |---|---|---|
-| Wall-clock timeout | 60 s (`tiny`/`laptop`), 120 s (`workstation`) | Worker killed; error returned as stderr |
-| stdout capture | 256 KB | Truncated with `[... output truncated to N characters ...]` marker |
-| stderr capture | 256 KB | Truncated similarly |
+| Wall-clock timeout | 60 s (`tiny`/`laptop`), 120 s (`workstation`) | Templated `Error: cell exceeded the {timeout}s time limit.` returned as stderr; the worker keeps running, and its late result is discarded by cell id (R4). Two consecutive timeouts restart the worker. |
+| stdout capture | `repl_output_char_cap` — 2 000 / 4 000 / 8 000 chars by profile (R10) | Head-truncated with `[... output truncated to N characters ...]` appended |
+| stderr capture | same cap (R10) | **Tail-preserving**: the head *and* the tail are kept with the elided middle replaced by `[... N characters of stderr elided ...]`, because a traceback's last line is the useful one |
+
+The stdout cap is exactly the number the system prompt advertises as
+`{repl_cap}`: both come from the same `Config` attribute, so the prompt cannot
+promise a different limit than the one enforced.
 
 ### 6.8 REPLSandbox Class
 
 ```python
 class REPLSandbox:
-    def __init__(self, cell_timeout: float = 60.0, stdout_cap: int = 256 * 1024): ...
+    def __init__(self, cell_timeout: float = 60.0,
+                 stdout_cap: int = 256 * 1024,
+                 restart_after_consecutive_timeouts: int = 2): ...
     def start(self, context: Any, subcall_manager: Any,
               definitions: list[dict[str, str]] | None = None) -> None: ...
     def execute(self, code: str) -> REPLResult: ...
+    def restart_worker(self) -> None: ...
     def shutdown(self) -> None: ...
 ```
 
 `start()` launches the subprocess, accepts the TCP connection, and sends the
-initial context along with optional helper definitions.
+initial context (inline text, or a file reference for a spilled context) along
+with optional helper definitions.
 
 `execute()` sends code, handles interleaved subcall requests, and returns a
 `REPLResult`. With kernel integration, it also proxies `search` and `propose`
 commands to the `KernelBridge`.
+
+`restart_worker()` kills and relaunches the worker, replaying the init payload.
+The REPL namespace is lost; the loop tells the model so.
 
 ```python
 @dataclass
@@ -666,14 +717,22 @@ Identical sub-call prompts within a single completion are memoized via SHA-256
 hash. If the model retries the exact same sub-call (a common pattern under retry
 nudges), the cached response is returned without hitting the server.
 
+**The cache is consulted before the budget is charged (R3).** Memoization exists
+to relieve budget pressure, so a cache hit costs neither a call nor a character
+budget unit — a repeated prompt still works once the budget is exhausted:
+
 ```python
-# First call: goes to server
+# First call: goes to server, charges 1 call
 result1 = mgr.llm_query("Summarize: The quick brown fox...")
 
-# Second call with identical prompt: cache hit
+# Second call with identical prompt: cache hit, free
 result2 = mgr.llm_query("Summarize: The quick brown fox...")
-assert result1 is result2  # same string object
+assert result1 == result2
+assert mgr.calls_used == 1
+assert mgr.cache_hits == 1
 ```
+
+`cache_hits` counts hits; `cache_size` counts distinct memoized prompts.
 
 ### 7.6 Anti-Shortcut Guard
 
@@ -692,10 +751,11 @@ entire problem is a non-generalizing shortcut.
 
 | Property | Type | Description |
 |---|---|---|
-| `calls_used` | `int` | Total sub-calls executed |
-| `chars_used` | `int` | Total prompt characters sent |
+| `calls_used` | `int` | Total sub-calls charged against the call budget |
+| `chars_used` | `int` | Total prompt characters charged against the char budget |
 | `calls_remaining` | `int` | `max_calls - calls_used` (floor 0) |
-| `cache_hits` | `int` | Number of distinct cached prompts |
+| `cache_hits` | `int` | Number of sub-calls **served from the cache** (R3 — this used to return the cache size) |
+| `cache_size` | `int` | Number of distinct prompts memoized |
 
 ---
 
@@ -783,20 +843,34 @@ Each turn follows this exact sequence:
    `repl.execute(block)`. With kernel integration, `search` and `propose`
    proxy commands are handled inline.
 
-6. **Termination checked.** If `result.final_answer` is set, the loop breaks.
+6. **stderr checked (R5).** If the cell produced a traceback, the parser counts
+   it as a consecutive error and — while the error budget holds — its
+   `NUDGE_STDERR_ERROR` nudge is appended after the REPL output. A cell that ran
+   clean resets the error streak.
 
-7. **Output formatted.** The REPL stdout/stderr is converted to a templated
+7. **Termination checked.** If `result.final_answer is not None`, the loop breaks.
+   Note `is not None`, never truthiness: an empty string is a *submission*.
+
+8. **Empty submission nudged (R6).** If the submission is empty or whitespace
+   only, `NUDGE_EMPTY_ANSWER` is appended and the turn restarts, counted against
+   `max_consecutive_nudges`. After that budget is exhausted the loop breaks into
+   forced finalization. Before R6 an empty submission silently continued the
+   loop (the truthiness check read `""` as "not final"), wasting turns with no
+   explanation.
+
+9. **Output formatted.** The REPL stdout/stderr is converted to a templated
    `"REPL output:"` message and appended.
 
-8. **Error budget checked.** If `consecutive_errors > max_consecutive_errors`,
-   the loop breaks into forced finalization.
+10. **Error budget checked.** If `consecutive_errors > max_consecutive_errors`,
+    the loop breaks into forced finalization.
 
 ### 8.5 Termination Paths
 
-The loop terminates by one of four mechanisms, in priority order:
+The loop terminates by one of five mechanisms, in priority order:
 
 1. **answer-dict signal (highest priority).** `answer["ready"] == True` detected
-   in post-execution REPL state. Returns `answer["content"]`.
+   in post-execution REPL state, with non-empty content. Returns
+   `answer["content"]`.
 
 2. **Courtesy `FINAL:` line.** The parser detects a line matching
    `^FINAL:\s*(.+)$`. Returns the captured text.
@@ -806,6 +880,9 @@ The loop terminates by one of four mechanisms, in priority order:
 
 4. **Error budget exhaustion.** `max_consecutive_errors` exceeded. Triggers
    forced finalization.
+
+5. **Empty-submission nudge exhaustion.** Repeated empty submissions past
+   `max_consecutive_nudges`. Triggers forced finalization.
 
 ### 8.6 Forced Finalization
 
@@ -821,7 +898,11 @@ The model's response to this prompt becomes the final answer. If the response
 contains a `FINAL:` line, that is extracted; otherwise the raw text is returned.
 
 Forced finalization **never returns empty**. If the model produces nothing,
-the string `"(No answer produced — forced finalization failed)"` is returned.
+the templated constants `NO_ANSWER_PRODUCED` (`"(No answer produced)"`, returned
+when the loop ends with no answer at all or with an empty one) and
+`FINALIZATION_FAILED` (`"(No answer produced — forced finalization failed)"`,
+returned when the finalization call itself raised) are used. Both live in
+`templates.py`; the fallback strings used to be inline in `root_loop.py` (R7).
 
 ### 8.7 Lifecycle
 
@@ -852,13 +933,19 @@ The `parse()` method applies these rules in order, returning on the first match:
 
 | Step | Rule | Example Input |
 |---|---|---|
-| 1 | Extract ` ```repl ` fenced blocks (DOTALL regex) | ```` ```repl\nprint("hi")\n``` ```` |
-| 2 | Rescue: unclosed final fence | ```` ```repl\nprint("hi") ```` |
-| 3 | Rescue: ` ```python ` or bare ` ``` ` fences | ```` ```python\nprint("hi")\n``` ```` |
-| 3b | Rescue: unclosed bare fence (narration pattern) | ```` ```python\nprint("hi") ```` |
-| 4 | Courtesy `FINAL:` line | `FINAL: The answer is 42.` |
-| 5 | Narration nudge (code keywords, no fences) | `I would run llm_query to find...` |
-| 6 | Generic no-block nudge | `The answer is 42.` |
+| 1 | Extract ` ```repl ` fenced blocks (DOTALL regex; also accepts ` ```python ` and bare fences) | ```` ```repl\nprint("hi")\n``` ```` |
+| 2 | Rescue: unclosed final fence (also the unclosed narration pattern) | ```` ```repl\nprint("hi") ```` |
+| 3 | Courtesy `FINAL:` line | `FINAL: The answer is 42.` |
+| 4 | Narration nudge (code keywords, no fences) | `I would run llm_query to find...` |
+| 5 | Generic no-block nudge | `The answer is 42.` |
+
+**R5 note.** The original pipeline had four fence stages. Stages 3 and 3b
+("` ```python ` or bare ```" and its unclosed variant) were strict subsets of
+stages 1 and 2 — their regexes accepted `(?:python)?` where stages 1/2 accept
+`(?:repl|python)?` — so no input could ever reach them. They were deleted; the
+behaviour they were meant to provide is covered by stages 1/2, and
+`tests/test_parser.py::TestUnreachableStagesRemoved` pins both the behaviour and
+the absence of the dead regexes.
 
 ### 9.3 The `ParseResult` Dataclass
 
@@ -892,12 +979,32 @@ containing the code you intend to run.
 budget, the parser emits no nudge — the turn counts as an error and the error
 budget is checked separately.
 
+A third nudge exists for a distinct mistake: the model sets
+`answer["ready"] = True` while `answer["content"]` is empty (or whitespace).
+The root loop appends `NUDGE_EMPTY_ANSWER` rather than treating the submission
+as final, and counts it against the same `max_consecutive_nudges` budget before
+falling through to forced finalization (R6).
+
 ### 9.5 Error Tracking
 
-`Parser` tracks `consecutive_errors` (incremented on stderr from REPL) and
-`consecutive_nudges` (incremented on unparseable output). Both counters reset
-to zero on any successful parse or reset. The `RootLoop` checks the error
-counter against `max_consecutive_errors` to trigger forced finalization.
+`Parser` tracks `consecutive_errors` (incremented by `parse_stderr()` after a
+cell produces a traceback) and `consecutive_nudges` (incremented on unparseable
+output). The `RootLoop` checks the error counter against
+`max_consecutive_errors` to trigger forced finalization.
+
+`parse_stderr(text, stderr_text)` is **wired into the root loop** (R5): after any
+REPL result with non-empty stderr the parser counts the failing cell and, while
+the error budget holds, returns a templated nudge naming the exception class
+(`NUDGE_STDERR_ERROR`). A cell that runs clean calls `reset_errors()`.
+
+Two deliberate details:
+
+- `parse()` does **not** reset the error streak. It runs *before* execution, so
+  a successful parse is not evidence of a successful execution; only a clean
+  REPL result is. Resetting there made `consecutive_errors` unreachable and the
+  error budget inert.
+- `parse_stderr()` is side-effect free apart from the error counter — it must
+  not advance the nudge counter or re-run the extraction pipeline.
 
 ### 9.6 Answer-in-Block Detection
 
@@ -909,8 +1016,11 @@ content, ready = parser.check_answer_in_block(code)
 # ready: bool — whether answer["ready"] = True appears
 ```
 
-This is used as a fast-path check before REPL execution, though the definitive
-check is the post-execution REPL state.
+This is advisory: it says what the block *declares*, before execution. The
+definitive check is the post-execution REPL state (an expression like
+`answer["content"] = result` only has a value at runtime). The root loop logs the
+static reading alongside the runtime one when it has to nudge an empty
+submission.
 
 ### 9.7 JSON Repair
 
@@ -918,6 +1028,11 @@ check is the post-execution REPL state.
 (§5.6 item 6). It strips markdown fences, finds the first `{`, balances braces,
 and returns the extracted object. If no JSON is found, the text is returned
 as-is.
+
+It is **wired into `SubcallManager._do_call`** (R5): whenever a sub-call was
+issued with a `schema`, the response is repair-parsed before it is returned and
+cached, because servers that only honour `response_format` loosely hand back
+fenced or prose-wrapped JSON.
 
 ```python
 from rlm_local.parser import repair_json
@@ -956,6 +1071,27 @@ class Context:
 `chunk()` methods. For disk-backed contexts, all operations stream from the file
 rather than loading the entire text into memory.
 
+**Offset semantics (R2): every context handle is byte-addressed.**
+
+| Expression | Meaning |
+|---|---|
+| `len(ctx)` | UTF-8 **byte** count (not a character count) |
+| `ctx[i]` | the character *starting* at byte offset `i` |
+| `ctx[a:b]` | the text decoded from byte offsets `a`..`b` |
+| `ctx.lines()`, `ctx.grep()`, `ctx.chunk()` | decoded `str`, as before |
+
+Addressing a byte that is not a character boundary raises `UnicodeDecodeError`.
+That is the honest answer for a byte-addressed view: the alternative — silently
+returning the wrong characters — is worse. `_InMemoryContext` follows the same
+contract, so indexing does not quietly change meaning when a context crosses the
+spill threshold.
+
+Before R2 the disk handle mixed the two: `len()` was a character count while
+`f.seek()` took a byte offset, so any non-ASCII context corrupted indexing or
+raised mid-codepoint. `tests/test_context_store.py::TestByteOffsetSemantics`
+covers emoji/CJK round-trips, slices, `lines()`, `grep()`, `chunk()` and the
+mid-codepoint failure mode, with a property test against `str` ground truth.
+
 ### 10.3 In-Memory vs. Disk-Backed
 
 - **Below `context_spill_threshold`:** An `_InMemoryContext` wraps the raw string.
@@ -963,7 +1099,8 @@ rather than loading the entire text into memory.
 
 - **Above `context_spill_threshold`:** The text is written to a temp file and a
   `Context` handle is returned. Slicing reads byte ranges; `grep()` streams
-  line-by-line.
+  line-by-line; `chunk()` reads fixed-size character windows; `lines(start)`
+  seeks using a byte-offset line index built at ingest time.
 
 The `ContextStore.ingest()` method makes this decision automatically:
 
@@ -978,6 +1115,23 @@ ctx = store.ingest("short text")
 ctx = store.ingest("A" * 2_000_000)
 # → Context backed by temp file
 ```
+
+The spill decision is made on **bytes** (`len(text.encode("utf-8"))`), matching
+the byte-addressed contract above.
+
+**The disk handle reaches the REPL worker (R1).** When the context is
+disk-backed, `REPLSandbox.start()` sends the worker a *file reference*
+(`{"kind": "file", "path": ..., "total": ...}`) instead of the text. The worker
+binds a lazy reader over the same file, so `len(context)`, `context[...]`,
+`grep()`, `chunk()` and `lines()` in a cell all read from disk, and the bytes on
+the wire stay constant no matter how large the context is. Before R1 the harness
+called `str(context)` and shipped the whole blob, so the worker held a plain
+`str` and RAM was O(context) in both processes regardless of the spill
+threshold.
+
+Ownership: `ContextStore` writes the file and `cleanup()` deletes it. The worker
+only ever reads — it does not delete or modify the file, and the file survives
+`REPLSandbox.shutdown()`.
 
 ### 10.4 List Contexts
 
@@ -1030,26 +1184,33 @@ Sixteen frozen constants, all `str.format()` templates. The most important:
 | `SUBCALL_COUNT_EXHAUSTED` | Call budget exhausted | `{used}`, `{max_subcalls}` |
 | `SUBCALL_CHAR_EXHAUSTED` | Character budget exhausted | (none — static) |
 | `SHORTCUT_WARNING` | Anti-shortcut guard triggered | `{pct}` |
+| `NUDGE_STDERR_ERROR` | Retry nudge after a cell raised | `{error_kind}`, `{errors}`, `{max_errors}` |
 | `FORCED_FINALIZATION_PROMPT` | Final forced-finalization message | (none — static) |
 | `CELL_TIMEOUT_ERROR` | Cell exceeded time limit | `{timeout}` |
 | `CELL_STDOUT_TRUNCATED` | Output truncated marker | `{cap}` |
+| `CELL_STDERR_TRUNCATED` | Middle of a long traceback elided | `{elided}` |
+| `REPL_WORKER_RESTARTED` | Two consecutive timeouts; namespace lost | (none — static) |
+| `NO_ANSWER_PRODUCED`, `FINALIZATION_FAILED` | Terminal placeholders (never return an empty answer) | (none — static) |
 
-#### 11.2.1 Vault-First Template Loading
+`tests/test_templates.py::TestTemplateDiscipline::test_no_dead_templates` walks
+the constants in this module and fails if any is not referenced by
+`src/rlm_local/` — a template that no code path can emit is a lie about what the
+harness says. `REPL_READY` and `REPL_FINAL_ANSWER` were exactly that and were
+deleted (R7).
 
-```python
-from rlm_local.templates import load_template
+#### 11.2.1 Vault-First Template Loading — REMOVED (historical)
 
-# With vault: loads from contract/templates/<name>.md
-nudge = load_template("NUDGE_NO_BLOCK", vault=vault)
-
-# Without vault: returns the hardcoded constant
-nudge = load_template("NUDGE_NO_BLOCK")
-```
-
-Each template constant maps to a vault page path under `contract/templates/`.
-The page's body is used as the template text. This is how the harness's own
-wording becomes evolvable: edit the template page, re-seed, and the next
-completion uses the new text.
+> **Historical (removed 2026-07-26, R3-D10).** An earlier revision of this
+> manual documented a `load_template(name, vault=)` helper that resolved a
+> template constant through `contract/templates/<name>.md`. **That function does
+> not exist** — it was deleted the same day this manual was written, and no
+> caller ever reached it. The template constants in §11.2 are frozen
+> package-bundled strings; they are **introspection-only** and are not loaded
+> from the vault. (The kernel manual already states this correctly.)
+>
+> What *is* live from the vault is the system prompt: `contract/repl-contract.md`,
+> `contract/how-to-work.md`, the active-helper listing, and the few-shots — see
+> §11.3.1 and §14.3. Do not reintroduce a template loader without a caller.
 
 ### 11.3 System Prompt (`prompts.py`)
 
@@ -1077,7 +1238,8 @@ system = load_system_prompt_from_vault(prompt_vars, vault=vault)
 
 The vault-first assembly order:
 1. `contract/repl-contract.md` body (rendered with `{repl_cap}` slots).
-2. One-line summaries of active helper pages from `helpers/`.
+2. One-line summaries of active helper pages from `helper/` (singular — see the
+   kernel manual §4.7).
 3. `contract/how-to-work.md` body.
 4. Falls back to the hardcoded `SYSTEM_PROMPT` if any vault page is missing.
 
@@ -1094,9 +1256,28 @@ described. The example shows:
 The example uses a **generic, synthetic query** ("What color is mentioned?") to
 avoid content interference — the model should learn the *format*, not the *answer*.
 
-With kernel integration, additional few-shots can be stored as pages in
-`fewshots/` and loaded dynamically. The K4 GEPA optimizer can evolve
-few-shots against held-out eval suites.
+**Vault few-shots are live (R8).** `load_fewshots_from_vault(vault,
+prompt_char_budget=...)` appends **at most one** active `fewshot/` page after the
+builtin example, and only if the added user/assistant pair fits within a quarter
+of the sub-prompt character budget. Two body shapes are recognised, both of which
+the repository itself writes:
+
+```markdown
+## Query
+<the user turn>
+
+## Answer
+<the assistant turn>
+```
+
+or one or more `## Example` sections, each split at a `### Assistant` (or
+`### Response` / `### Answer`) sub-heading. Anything else is ignored rather than
+guessed at; an unrecognised page degrades to the builtin example.
+
+Before R8 this function returned the hardcoded example unconditionally, so K4's
+`bootstrap_fewshots` promoted pages that could never influence a prompt.
+
+The K4 GEPA optimizer can evolve few-shots against held-out eval suites.
 
 ### 11.5 `build_messages()`
 
@@ -1262,12 +1443,12 @@ answer = rlm_local.completion(query, context, kernel_bridge=bridge)
 | REPL helpers | Hardcoded in `_WORKER_SCRIPT` | Vault helper pages + hardcoded set |
 | System prompt | Hardcoded `SYSTEM_PROMPT` | `contract/repl-contract.md` body |
 | How-to-work | Hardcoded in system prompt | `contract/how-to-work.md` body |
-| Template messages | Hardcoded constants | `contract/templates/*.md` pages |
-| Few-shots | Hardcoded example | Vault `fewshots/` pages |
+| Template messages | Hardcoded constants | **Unchanged — hardcoded constants** (vault template loading was removed, R3-D10; see §11.2.1) |
+| Few-shots | Hardcoded example | Vault `fewshot/` pages |
 | `search()` in REPL | Not available | Proxied to vault BM25 index |
 | `propose()` in REPL | Not available | Writes to `quarantine/` for gate review |
 | Core memory | None | `memory/notes/core-memory.md` summary in metadata |
-| Prompt evolvability | Requires code change | Edit contract page → re-seed → live |
+| Prompt evolvability | Requires code change | Edit `repl-contract` / `how-to-work` page → re-seed → live |
 
 ### 14.4 The Forth Dictionary Property
 
@@ -1464,20 +1645,30 @@ tests/
 ├── test_context_store.py    # In-memory context, disk spill, grep/chunk
 ├── test_subcall_manager.py  # Budgets, memoization, batched calls, exhaustion
 ├── test_repl.py             # Sandbox lifecycle, state persistence, helpers, subcall proxying
+├── test_cli.py              # CLI front-end (ask/search/get/tag/ingest/vault pass-through)
+├── test_model_check.py      # P1–P9 probe battery against good/bad stubs
 ├── test_integration.py      # Real llama-server tests (marked @pytest.mark.slow)
-└── rlm_kernel/
-    ├── conftest.py            # temp_vault fixture
-    ├── test_schema.py         # 26 tests: frontmatter validation, parsing, helper extraction
-    ├── test_vault.py          # 16 tests: CRUD, atomic writes, wikilinks, round-trip
-    ├── test_index.py          # 10 tests: build, FTS search, incremental update, rebuild
-    └── test_search.py         # 8 tests: keyword search, kind filter, card budget, edge cases
+├── evals/                   # Eval suites (regex-verified tasks) + pattern guards
+│   ├── counting.py          #   counting/aggregation (anchored numeric patterns)
+│   ├── fact_extraction.py   #   fact extraction
+│   ├── multi_hop.py         #   multi-hop reasoning
+│   ├── needle_search.py     #   needle-in-haystack
+│   ├── test_eval_patterns.py #  enforces the pattern convention (§16.5)
+│   └── *.json               #   data-only mirror of each suite (fallback)
+├── load/                    # Load-gate benchmarks (marked slow + load)
+├── rlm_kernel/
+│   ├── conftest.py            # temp_vault fixture
+│   ├── test_schema.py         # frontmatter validation, parsing, helper extraction
+│   ├── test_vault.py          # CRUD, atomic writes, wikilinks, round-trip
+│   ├── test_index.py          # build, FTS search, incremental update, rebuild
+│   └── test_search.py         # keyword search, kind filter, card budget, edge cases
 ```
 
 ### 16.2 Running Tests
 
 ```bash
-# Unit tests only (fast, no server required)
-uv run pytest tests/ -k "not slow" -v
+# Unit tests only (fast, no server required, no load-gate benchmarks)
+uv run pytest tests/ -k "not slow and not load" -v
 
 # All tests including integration (requires running llama-server)
 uv run pytest tests/ -v
@@ -1492,16 +1683,71 @@ uv run pytest tests/rlm_kernel/ -v
 uv run pytest tests/ -k "not slow and not rlm_kernel" -v
 ```
 
+Load-gate benchmarks live in `tests/load/` and carry **both** markers
+(`slow` and `load`), so they are excluded by `-k "not slow"`, by
+`-k "not load"`, and by `-m "not load"`. Select them explicitly with
+`-m load` or `uv run pytest tests/load/test_load.py -v`.
+
 ### 16.3 Test Conventions
 
 - **Unit tests** use fake backends (`FakeBackend`) and mock subcall managers
   (`MockSubcallMgr`). They run in under 2 seconds total.
 - **Kernel tests** use temporary vaults (`temp_vault` fixture) with `init_git=False`.
-- **Integration tests** use the real `llama-server` at `localhost:9010` with the
-  `LFM2.5-VL-1.6B` model. They are marked `@pytest.mark.slow` and take ~8 seconds
-  total.
+- **Integration tests** run against a real `llama-server` at the endpoint the
+  config points at — `https://localhost:9010/v1` (`Profile.root_endpoint`).
+  The shipped profiles default to the production model
+  **`Qwen3.5-4B-Abliterated`** (`config.py:PROFILES`), which is the model the
+  model-check battery rates SUITABLE; the in-repo `tests/test_integration.py`
+  still pins the older `LFM2.5-VL-1.6B` (that model was scored FAIL by the same
+  battery — few-shot imitation), so treat the integration model ID as stale
+  until it is updated. Integration tests are marked `@pytest.mark.slow` and take
+  ~8 seconds total.
 - **REPL tests** launch real subprocess workers and exercise the full TCP
   protocol, subcall proxying, and state persistence.
+
+### 16.4 Model-check probes (`model_check.py`) — known scoring weaknesses
+
+`rlm check <model>` runs the P1–P9 battery. Two probe behaviours are known,
+**documented, and deliberately not tightened** — tightening them changes score
+semantics and is an owner decision (deferred; see R15 of
+`docs/20260903-2107-remediation-plan.md`):
+
+- **P2 — escaped characters (fixed).** The paren lexer used to skip a backslash
+  without skipping the character it escapes, so a helper call containing an
+  escaped quote (`grep('… isn\'t …')`) was truncated at a `)` inside the string
+  and reported as `INVALID (unbalanced)`, costing points for correct code. Fixed:
+  the lexer now skips the escaped character too
+  (`_extract_call_text`, pinned by `tests/test_model_check.py::TestParenLexerEscape`).
+  *Residual, deliberately unchanged:* a call that is never closed extracts as the
+  empty string, and `_balanced_parens("")` is `True` — so an unterminated call
+  still counts as valid.
+- **P3 — stderr recovery (weak, NOT tightened).** P3 measures absence of failure
+  rather than recovery ability:
+  1. **No stderr ⇒ 15/15.** A model that never executes any code emits no error
+     and therefore earns full credit. Emitting nothing is scored exactly like
+     recovering.
+  2. **The recovery scan is not time-ordered.** Any balanced `grep(` call in
+     *any* assistant message counts as recovery, including one made *before* the
+     failing turn.
+  P3's 15 points are therefore not evidence of recovery ability. Both behaviours
+  are pinned by
+  `tests/test_model_check.py::TestProbeP3::test_bad_model_gets_full_credit_documented_weakness`
+  and `::test_pre_error_grep_counts_as_recovery_documented_weakness`, so any
+  future tightening is a deliberate, test-visible change.
+
+### 16.5 Needle and eval-pattern matching
+
+Answer matching is case-, hyphen-, and whitespace-insensitive — the documented
+`O-Negative` / `O Negative` evaluator bug cost 5 points for a correct answer:
+
+- **P6 (`model_check.py`)** compares `_normalize_for_match(answer)` against
+  `_normalize_for_match(needle)`: lowercase, smart quotes and dashes folded to
+  ASCII, dashes → spaces, whitespace collapsed.
+- **Eval suites (`tests/evals/*.py`)** must anchor every pattern at a token
+  boundary, because the evaluator is an unanchored `re.search`: `"35"` used to
+  pass for `"135"`. Word tokens use `\b`; numeric tokens use `(?<!\d)` /
+  `(?!\d)` so that `25.8C` still matches. The convention and the enforcing tests
+  live in `tests/evals/__init__.py` and `tests/evals/test_eval_patterns.py`.
 
 ---
 
@@ -1722,12 +1968,11 @@ def load_fewshots_from_vault(
 ### 17.10 `rlm_local.templates`
 
 All constants are `str` values, most are `.format()` templates. See §11.2 for the
-complete catalog.
-
-```python
-# Kernel-enabled vault-first loading
-def load_template(name: str, vault: object | None = None) -> str: ...
-```
+complete catalog. **Introspection-only:** there is no vault-first template
+loader. `load_template(name, vault=)` was documented here and in §11.2.1 but was
+deleted (R3-D10) before it ever had a caller — see §11.2.1 for the historical
+note. Vault-first loading applies to the system prompt, the helper listing, and
+the few-shots (`prompts.py`), not to these constants.
 
 ---
 
@@ -1785,7 +2030,7 @@ implementation locations:
 | Feature | Kernel Module | rlm_local Integration Point |
 |---|---|---|
 | Vault-first prompt loading | `prompts.py:load_system_prompt_from_vault()` | `root_loop.py:run()` |
-| Template vault loading | `templates.py:load_template()` | `root_loop.py` and callers |
+| ~~Template vault loading~~ | **removed (R3-D10)** — `templates.py:load_template()` does not exist; see §11.2.1 | — |
 | Helper injection | `repl_bridge.py:KernelBridge.get_helper_definitions()` | `repl.py:REPLSandbox.start(definitions=)` |
 | `search()` in REPL | `repl_bridge.py:KernelBridge.handle_search()` | `repl.py:REPLSandbox.execute()` |
 | `propose()` in REPL | `repl_bridge.py:KernelBridge.handle_propose()` | `repl.py:REPLSandbox.execute()` |

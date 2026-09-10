@@ -1,4 +1,9 @@
-"""Eval suite definitions — needle-in-haystack tasks (regex match)."""
+"""Eval suite definitions — needle-in-haystack tasks (anchored regex match).
+
+Patterns are anchored at token boundaries and tolerate hyphen/space/case
+variation so a correct answer is never scored wrong on punctuation alone
+(R25 item 5). See ``tests/evals/__init__.py`` for the convention.
+"""
 
 from tests.evals import EvalTask
 
@@ -15,7 +20,7 @@ TASKS = [
             + " Unrelated meteorological data filled the remaining pages with temperature readings "
               "and wind speed measurements." * CONTEXT_MULTIPLIER
         ),
-        expected_pattern="(?i)blue",
+        expected_pattern=r"(?i)\bblue\b",
     ),
     EvalTask(
         name="year_needle_1648",
@@ -28,7 +33,7 @@ TASKS = [
             + " Additional historical context filled volumes with genealogical "
               "records and territorial disputes spanning generations." * CONTEXT_MULTIPLIER
         ),
-        expected_pattern="1648",
+        expected_pattern=r"(?<!\d)1648(?!\d)",
     ),
     EvalTask(
         name="name_needle_alice",
@@ -40,7 +45,7 @@ TASKS = [
             + " Documentation continued with detailed architecture diagrams and deployment "
               "procedures spanning hundreds of pages." * CONTEXT_MULTIPLIER
         ),
-        expected_pattern="(?i)alice",
+        expected_pattern=r"(?i)\balice\b",
     ),
     EvalTask(
         name="price_needle",
@@ -53,7 +58,7 @@ TASKS = [
             + " The remainder of the catalog contained specifications for hundreds of "
               "unrelated products spanning multiple categories." * CONTEXT_MULTIPLIER
         ),
-        expected_pattern="(?i)(42\\.99|forty-two)",
+        expected_pattern=r"(?i)((?<!\d)42\.99(?!\d)|\bforty[\s-]*two\b)",
     ),
     EvalTask(
         name="email_needle",
@@ -65,7 +70,7 @@ TASKS = [
             + " The knowledge base contained thousands of articles covering every aspect "
               "of the platform from installation to advanced configuration." * CONTEXT_MULTIPLIER
         ),
-        expected_pattern="support@example\\.com",
+        expected_pattern=r"\bsupport@example\.com\b",
     ),
     EvalTask(
         name="temperature_needle",
@@ -77,7 +82,9 @@ TASKS = [
             + " Historical records dating back to 1950 contained hourly measurements "
               "across all twelve months." * CONTEXT_MULTIPLIER
         ),
-        expected_pattern="25\\.?8",
+        # "25.8C" is the recorded reading: a digit boundary, not \b, is required
+        # (there is no word boundary between "8" and "C").
+        expected_pattern=r"(?<!\d)25\.?8(?!\d)",
     ),
     EvalTask(
         name="version_needle",
@@ -89,6 +96,6 @@ TASKS = [
             + " Documentation for previous versions was archived in the legacy knowledge "
               "base with detailed changelogs." * CONTEXT_MULTIPLIER
         ),
-        expected_pattern="3\\.7\\.2",
+        expected_pattern=r"(?<!\d)3\.7\.2(?!\d)",
     ),
 ]

@@ -13,6 +13,8 @@ from rlm_local.model_backend import ModelBackend
 from rlm_local.model_check import (
     PROBES,
     WEIGHTS,
+    _extract_call_text,
+    _normalize_for_match,
     check_model,
     probe_p1_protocol_emission,
     probe_p2_helper_calls,
@@ -65,6 +67,12 @@ class GoodModelStub:
     def __init__(self) -> None:
         self._call_count = 0
         self.calls: list[dict[str, Any]] = []
+        # Close-tracking: lets TestBackendReuse prove that a caller-supplied
+        # backend is never closed by the probe battery.
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
 
     def _find_answer(self, query: str) -> str:
         query_lower = query.lower()
@@ -121,7 +129,149 @@ class GoodModelStub:
             )
 
 
+# ── Escaped-quote stub (F15 regression) ─────────────────────────────────
+
+
+class EscapedQuoteStub:
+    """Emits a helper call whose string argument contains an escaped quote.
+
+    The pattern is chosen to discriminate the F15 lexer bug: the parenthetical
+    opens *before* the escape (``Paris (the tower``) and closes *after* it
+    (``isn\\'t)``). A lexer that treats the escaped quote as the end of the
+    string sees that ``)`` as code, closes the call there, and extracts the
+    unbalanced fragment ``grep('Paris (the tower isn\\'t)``.
+    """
+
+    CALL = r"hits = grep('Paris (the tower isn\'t) far from London')"
+
+    def __init__(self) -> None:
+        self._call_count = 0
+        self.calls: list[dict[str, Any]] = []
+
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        tier: str = "root",
+        max_tokens: int = 1500,
+        temperature: float = 0.0,
+        response_schema: dict[str, Any] | None = None,
+    ) -> str:
+        if tier == "sub":
+            return "the tower is in Paris"
+
+        self._call_count += 1
+        self.calls.append({"tier": tier, "message_count": len(messages)})
+
+        if self._call_count == 1:
+            return (
+                "Let me search the context for the pattern.\n\n"
+                "```repl\n"
+                f"{self.CALL}\n"
+                "print(hits[:3])\n"
+                "```"
+            )
+        return (
+            "The tower is in Paris.\n\n"
+            "```repl\n"
+            "answer['content'] = 'Paris'\n"
+            "answer['ready'] = True\n"
+            "```"
+        )
+
+
+# ── Hyphen-variant stub (R25 item 5 regression) ─────────────────────────
+
+
+class HyphenVariantStub:
+    """Answers every P6 needle correctly, but with different punctuation.
+
+    The blood-type needle is spelled ``O-Negative`` in the context; this stub
+    answers ``O Negative``. Nothing about the answer is wrong — only its
+    hyphenation — so P6 must score it 3/3.
+    """
+
+    _ANSWERS = {
+        "secret access code": "The access code is ALPHA-42.",
+        "treaty signed": "The treaty was signed in 1748.",
+        "blood type": "The patient's blood type is O Negative.",
+    }
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        tier: str = "root",
+        max_tokens: int = 1500,
+        temperature: float = 0.0,
+        response_schema: dict[str, Any] | None = None,
+    ) -> str:
+        self.calls.append({"tier": tier, "message_count": len(messages)})
+        if tier == "sub":
+            return "not used"
+
+        query = _extract_query(messages).lower()
+        answer = "determined from context"
+        for key, value in self._ANSWERS.items():
+            if key in query:
+                answer = value
+                break
+        safe = answer.replace("\\", "\\\\").replace("'", "\\'")
+        return (
+            f"{answer}\n\n"
+            "```repl\n"
+            f"answer['content'] = '{safe}'\n"
+            "answer['ready'] = True\n"
+            "```"
+        )
+
+
 # ── Bad model stub ──────────────────────────────────────────────────────
+
+
+class ErrorAfterGrepStub:
+    """Greps once, then errors on every later turn and never recovers.
+
+    Used to pin P3's second documented weakness: the recovery check is not
+    time-ordered, so the *pre-error* grep call is counted as recovery.
+    """
+
+    def __init__(self) -> None:
+        self._call_count = 0
+        self.calls: list[dict[str, Any]] = []
+
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        tier: str = "root",
+        max_tokens: int = 1500,
+        temperature: float = 0.0,
+        response_schema: dict[str, Any] | None = None,
+    ) -> str:
+        self.calls.append({"tier": tier, "message_count": len(messages)})
+        if tier == "sub":
+            return "not used"
+
+        self._call_count += 1
+        if self._call_count == 1:
+            return (
+                "Let me grep the context first.\n\n"
+                "```repl\n"
+                "hits = grep('important')\n"
+                "print(len(hits))\n"
+                "```"
+            )
+        # Every later turn raises; nothing is ever corrected.
+        return (
+            "Let me try that again.\n\n"
+            "```repl\n"
+            "raise RuntimeError('boom')\n"
+            "```"
+        )
 
 
 class BadModelStub:
@@ -192,6 +342,73 @@ class TestProbeP2:
         assert result["score"] == 0
         assert result["passed"] is False
 
+    def test_escaped_quote_in_helper_call_is_valid(self):
+        """A call containing an escaped quote must not be scored INVALID.
+
+        Regression guard for F15: the paren lexer used to skip the backslash
+        but *not* the character it escapes, so ``'...isn\\'t...'`` flipped the
+        string state to "outside a string". The text after the escaped quote —
+        including the ``)`` that closes the string's own parenthetical — was
+        then lexed as code, the call was truncated at that ``)``, and
+        ``_balanced_parens`` reported the truncated fragment as unbalanced.
+
+        The stub's pattern deliberately contains a parenthetical *before* the
+        escaped quote (``(the tower``) closed by a ``)`` *after* it, which is
+        what makes the broken lexer extract an unbalanced fragment rather than
+        the empty string.
+        """
+        backend = EscapedQuoteStub()
+        result = probe_p2_helper_calls(backend)
+        assert result["passed"] is True, result["evidence"]
+        assert result["score"] == 15, result["evidence"]
+
+
+class TestParenLexerEscape:
+    """Unit guards for `_extract_call_text` (F15 / R15)."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # Escaped single quote inside a single-quoted pattern.
+            r"grep('it\'s (a) test')",
+            # Escaped double quote inside a double-quoted pattern.
+            r'grep("say \"hi\" (now)")',
+            # Escaped quote plus a parenthetical spanning the escape point —
+            # the exact shape that produced a false "unbalanced" verdict.
+            r"grep('Paris (the tower isn\'t) far')",
+            r"print('it\'s (fine)')",
+        ],
+    )
+    def test_escaped_characters_do_not_break_call_extraction(self, text):
+        assert _extract_call_text(text, 0) == text
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "peek(0, 100)",
+            "chunk(context, size=3000)",
+            "grep('plain (balanced) pattern')",
+            "grep('quote inside \"double\" string')",
+        ],
+    )
+    def test_unescaped_calls_still_extract_fully(self, text):
+        assert _extract_call_text(text, 0) == text
+
+    def test_extraction_starts_at_the_offset(self):
+        cell = "hits = grep('a (b) c')\nprint(hits)"
+        assert _extract_call_text(cell, cell.index("grep")) == "grep('a (b) c')"
+
+    def test_unterminated_call_yields_empty_string(self):
+        """Documented current behaviour: an unclosed call extracts as "".
+
+        NOTE: `_balanced_parens("")` is True, so an unterminated call is
+        currently scored *valid* by P2. That is a second, separate weakness of
+        the probe's scoring (not the escape bug fixed here); it is recorded
+        here so it cannot regress silently, and left as-is because tightening
+        probe scoring is an owner decision (see P3 note in the module).
+        """
+        assert _extract_call_text("grep('never closed", 0) == ""
+
 
 class TestProbeP3:
     def test_good_model_no_stderr(self, good_backend):
@@ -200,14 +417,43 @@ class TestProbeP3:
         assert result["score"] == 15
         assert result["passed"] is True
 
-    def test_bad_model_fails(self, bad_backend):
+    def test_bad_model_gets_full_credit_documented_weakness(self, bad_backend):
+        """P3 scores 15/15 for a model that never executes any code — ON PURPOSE.
+
+        This pins the *documented* P3 weakness (F15; probe docstring
+        "Known weakness", manual §16), it does not bless a bug: a model that
+        emits no ```repl block produces no stderr event at all, and P3's first
+        branch grants full credit whenever there was nothing to recover from.
+        Emitting nothing is therefore scored exactly like recovering.
+
+        Tightening this scoring changes score semantics and is an owner
+        decision, deferred (R15). The assertions below make that deferral
+        explicit: if someone tightens P3, this test goes red and the change has
+        to be deliberate.
+        """
         result = probe_p3_stderr_recovery(bad_backend)
-        # Bad model never produces ```repl blocks, so no grep call at all.
-        # No stderr events → P3 gives full credit by default.
-        # This is expected: P3 only penalizes models that produce errors
-        # without recovering.
         assert result["score"] == 15
+        assert result["max_score"] == 15
         assert result["passed"] is True
+        assert any(
+            "No stderr events" in line for line in result["evidence"]
+        ), result["evidence"]
+
+    def test_pre_error_grep_counts_as_recovery_documented_weakness(self):
+        """Second documented P3 weakness: the recovery scan is not time-ordered.
+
+        P3 searches *all* assistant messages for a balanced ``grep(`` call, so a
+        call made *before* the failing turn is credited as "recovery" the model
+        never performed (F15). This stub greps once, then errors on every
+        subsequent turn and never corrects anything — under the current
+        (documented, deferred) scoring it still reports recovery and 15/15.
+        """
+        result = probe_p3_stderr_recovery(ErrorAfterGrepStub())
+        assert result["score"] == 15, result["evidence"]
+        assert result["passed"] is True
+        assert any(
+            "Recovery" in line for line in result["evidence"]
+        ), result["evidence"]
 
 
 class TestProbeP4:
@@ -245,6 +491,43 @@ class TestProbeP6:
         result = probe_p6_needle_accuracy(bad_backend)
         assert result["score"] <= 5  # at most 1/3
         assert result["passed"] is False
+
+    def test_hyphen_and_case_variants_count_as_correct(self):
+        """R25 item 5 / F15: 'O-Negative' vs 'O Negative' must both score.
+
+        The documented evaluator bug: the context spells the needle
+        ``O-Negative``, and a model answering ``O Negative`` was scored wrong,
+        costing 5 points. Case, hyphens, and whitespace must not decide
+        correctness.
+        """
+        result = probe_p6_needle_accuracy(HyphenVariantStub())
+        assert result["score"] == 15, result["evidence"]
+        assert result["passed"] is True
+
+
+class TestNeedleNormalization:
+    """Unit guards for the needle-comparison normalizer (R25 item 5)."""
+
+    @pytest.mark.parametrize(
+        "left,right",
+        [
+            ("O-Negative", "O Negative"),
+            ("O-Negative", "o  negative"),
+            ("O\u2011Negative", "O Negative"),  # non-breaking hyphen
+            ("ALPHA-42", "alpha 42"),
+            ("  O   Negative  ", "o-negative"),
+            ("it\u2019s", "it's"),  # smart apostrophe
+        ],
+    )
+    def test_variants_normalize_identically(self, left, right):
+        assert _normalize_for_match(left) == _normalize_for_match(right)
+        assert _normalize_for_match(left) in _normalize_for_match(
+            f"The answer is {right}."
+        )
+
+    def test_distinct_needles_stay_distinct(self):
+        assert _normalize_for_match("O-Negative") != _normalize_for_match("O-Positive")
+        assert _normalize_for_match("1748") != _normalize_for_match("1749")
 
 
 class TestProbeP7:
@@ -330,21 +613,26 @@ class TestSaveReport:
 
 
 class TestBackendReuse:
-    """Probes must not close a shared backend between calls."""
+    """Probes must not close a backend they did not create.
+
+    `completion()` tracks `own_backend` and closes only a backend it built
+    itself (`__init__.py`), because a caller may share one backend across many
+    completions (and across a whole probe battery). This test used to be
+    vacuous — the tracker was never armed because `GoodModelStub` had no
+    `close()`, and the only assertion was the tautology `score >= 0`. It now
+    arms the tracker and asserts the backend is still usable afterwards.
+    """
 
     def test_check_model_does_not_close_shared_backend(self):
-        """Multiple probe calls reuse the same backend without closing it."""
         backend = GoodModelStub()
-        # Track if close() is called
-        close_called = []
-        original_close = getattr(backend, 'close', None)
-        if original_close:
-            def tracked_close():
-                close_called.append(True)
-                original_close()
-            backend.close = tracked_close
-
         result = check_model(backend, model_id="test-reuse", quick=True)
-        assert result["score"] >= 0
-        # Backend should still be usable after check_model returns
-        # (completion() should not close a backend it didn't create)
+        assert backend.close_calls == 0, (
+            "check_model closed a caller-supplied backend; the caller owns it "
+            "(completion() must only close a backend it created itself)"
+        )
+
+        # The backend must still be usable for a second battery.
+        second = check_model(backend, model_id="test-reuse", quick=True)
+        assert second["verdict"] == "SUITABLE"
+        assert second["score"] == result["score"]
+        assert backend.close_calls == 0

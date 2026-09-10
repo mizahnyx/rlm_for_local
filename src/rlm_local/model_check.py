@@ -132,6 +132,84 @@ def _count_tokens_approx(char_count: int) -> int:
     return max(1, char_count // 4)
 
 
+# Characters that read as "hyphen" in model output, including the Unicode
+# forms a chat model emits when it is trying to be typographically correct.
+_DASH_CHARS = "\u2010\u2011\u2012\u2013\u2014\u2015\u2212\u00ad-"
+
+# Smart quotes/apostrophes and the no-break space → ASCII, matching the
+# normalization the parser already applies to model output in production.
+_SMART_QUOTE_FOLD = {
+    "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",
+    "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"',
+    "\u2032": "'", "\u2033": '"',
+    "\u00a0": " ",
+}
+
+
+def _normalize_for_match(text: str) -> str:
+    """Normalize text before needle comparison (R25 item 5, F15).
+
+    Case, hyphenation, and whitespace must not decide whether a *correct*
+    answer is scored correct. The documented evaluator bug: the medical-record
+    needle is spelled ``O-Negative`` in the context, so a model answering
+    ``O Negative`` lost 5 points for a right answer.
+
+    Applies: lowercase → fold smart quotes and no-break spaces to ASCII →
+    every dash form to a space → collapse whitespace → strip.
+    """
+    folded = "".join(_SMART_QUOTE_FOLD.get(ch, ch) for ch in text.lower())
+    for ch in _DASH_CHARS:
+        folded = folded.replace(ch, " ")
+    return " ".join(folded.split())
+
+
+def _extract_call_text(content: str, start: int) -> str:
+    """Extract the text of a helper call that begins at ``start``.
+
+    Scans forward from ``start`` tracking Python string state and parenthesis
+    depth, and returns the substring up to *and including* the parenthesis that
+    closes the call. If the call never closes, returns the empty string.
+
+    Escaped characters inside a string literal are skipped as a unit: a
+    backslash consumes the character that follows it. Without that, an escaped
+    quote (``'it\\'s'``) would be read as the end of the string, the string's
+    contents would be lexed as code, and the paren depth would be mis-tracked —
+    so a perfectly valid call would be reported as "INVALID (unbalanced)"
+    (F15 / R15).
+    """
+    paren_depth = 0
+    in_str = False
+    str_char = ""
+    call_end = start
+    i = start
+    n = len(content)
+    while i < n:
+        ch = content[i]
+        if in_str:
+            if ch == "\\":
+                # Skip the backslash *and* the escaped character.
+                i += 2
+                continue
+            if ch == str_char:
+                in_str = False
+            i += 1
+            continue
+        if ch in ('"', "'"):
+            in_str = True
+            str_char = ch
+            i += 1
+            continue
+        if ch == "(":
+            paren_depth += 1
+        elif ch == ")":
+            paren_depth -= 1
+            if paren_depth == 0:
+                call_end = i + 1
+                break
+        i += 1
+    return content[start:call_end]
+
+
 # ── Probe P1: Protocol emission ──────────────────────────────────────────
 
 P1_QUERIES = [
@@ -222,32 +300,8 @@ def probe_p2_helper_calls(
             (_CHUNK_CALL_RE, "chunk"),
         ]:
             for m in pattern.finditer(content):
-                # Extract the call from match start to closing paren
-                start = m.start()
-                snippet = content[start : start + 200]
-                paren_depth = 0
-                call_end = start
-                in_str = False
-                str_char = ""
-                for j, ch in enumerate(content[start:], start=start):
-                    if in_str:
-                        if ch == "\\":
-                            continue
-                        if ch == str_char:
-                            in_str = False
-                        continue
-                    if ch in ('"', "'"):
-                        in_str = True
-                        str_char = ch
-                        continue
-                    if ch == "(":
-                        paren_depth += 1
-                    elif ch == ")":
-                        paren_depth -= 1
-                        if paren_depth == 0:
-                            call_end = j + 1
-                            break
-                call_text = content[start:call_end]
+                # Extract the call from the match start to its closing paren
+                call_text = _extract_call_text(content, m.start())
                 valid = _balanced_parens(call_text)
                 helper_calls.append((name, call_text[:80], valid))
 
@@ -285,6 +339,30 @@ def probe_p3_stderr_recovery(
     Score: 15 pts (max).  If no stderr events occur at all, model gets full
     credit (no recovery was necessary).  If stderr occurs and the next response
     corrects the issue, full credit.  If stderr occurs with no recovery, zero.
+
+    Known weakness (F15 — documented, deliberately NOT tightened)
+    -------------------------------------------------------------
+    This probe measures *absence of failure*, not recovery ability:
+
+    1. **No-stderr ⇒ 15/15.** A model that never executes any code (or whose
+       cells all succeed trivially) never emits a stderr event and therefore
+       scores full marks. Emitting nothing is scored exactly like recovering.
+    2. **Pre-error ``grep(`` calls count as recovery.** The recovery check below
+       scans *all* assistant messages for a balanced ``grep(`` call; it does not
+       require the call to come after the failing turn. A model that called
+       ``grep`` before its error is credited with "recovery" it never performed.
+
+    Consequence: P3's 15 points are not evidence that the model can recover from
+    an error, and a probe-battery score that depends on P3 should be read with
+    that in mind. Tightening the scoring (e.g. requiring a stderr event, or
+    requiring the corrected call to appear *after* the failing turn) changes
+    score semantics and is therefore an **owner decision, deferred** — see
+    R15 in ``docs/20260903-2107-remediation-plan.md`` and §16 of
+    ``docs/rlm-local-manual.md``. The behaviour is pinned by
+    ``tests/test_model_check.py::TestProbeP3::test_bad_model_gets_full_credit_documented_weakness``
+    and
+    ``::test_pre_error_grep_counts_as_recovery_documented_weakness``
+    so any future scoring change is deliberate.
     """
     query = (
         "Find lines in the context that mention 'important'. "
@@ -522,6 +600,10 @@ def probe_p6_needle_accuracy(
     """P6: Needle accuracy — 3 needle-in-haystack tasks.
 
     Score: 15 pts (max, 5 per correct).
+
+    Matching is case-, hyphen-, and whitespace-insensitive (R25 item 5): the
+    comparison runs on ``_normalize_for_match`` of both the answer and the
+    needle, so ``O Negative`` is accepted for the ``O-Negative`` needle.
     """
     correct = 0
     evidence: list[str] = []
@@ -531,11 +613,11 @@ def probe_p6_needle_accuracy(
             task["query"], task["context"], backend, profile
         )
         needle = task["needle"]
-        # Normalize comparison
-        answer_lower = answer.lower().strip()
-        needle_lower = needle.lower().strip()
+        # Normalize comparison (case/hyphen/whitespace-insensitive)
+        answer_norm = _normalize_for_match(answer)
+        needle_norm = _normalize_for_match(needle)
 
-        if needle_lower in answer_lower:
+        if needle_norm in answer_norm:
             correct += 1
             evidence.append(
                 f"Needle {i + 1}: PASS — '{needle}' found in answer '{answer[:80]}'"

@@ -162,14 +162,18 @@ uv run python -m rlm_web.app
 ## Testing
 
 ```bash
-# Unit tests (fast, no server needed)
-uv run pytest tests/ -k "not slow and not load" -v
+# Fast suite: unit + integration stubs, no server, no load-gate benchmarks
+uv run pytest tests/ -k "not slow and not load" -q
 
-# Full suite including integration (requires running llama-server)
-uv run pytest tests/ -v
+# Everything, including tests that need a running llama-server and the
+# load-gate benchmarks (the latter build a 10k-page corpus — expect minutes)
+uv run pytest tests/ -q
 ```
 
-243 unit tests, 3 integration tests, 12 load tests.
+652 tests collected: 12 marked `slow` (real llama-server integration + load),
+5 of those also marked `load` (corpus benchmarks). The integration tests read
+`RLM_TEST_ENDPOINT` / `RLM_TEST_MODEL` and skip when the endpoint is
+unreachable, defaulting to the configured model in `src/rlm_local/config.py`.
 
 ## Requirements
 
