@@ -19,7 +19,7 @@ target, reached remotely.
 
 | Claim | Result |
 |---|---|
-| Fast suite green at ≥271 tests | **641 passed, 12 deselected** (652 collected) — floor 271 exceeded, `0 failed` |
+| Fast suite green at ≥271 tests | **643 passed, 12 deselected** (655 collected) — floor 271 exceeded, `0 failed` |
 | Every guard test proven non-vacuous | **30 of 30** guard mutations went red when the guard was removed |
 | No new harness strings outside `templates.py` | enforced by `tests/test_templates.py::TestTemplateDiscipline` (fails on any unreferenced constant) |
 | Manuals updated in the same change | yes — see §6 |
@@ -130,10 +130,10 @@ R11–R14 were implemented by a delegated agent working only in `src/rlm_kernel/
 
 ```
 $ .venv/Scripts/python.exe -m pytest tests/ -k "not slow" -p no:cacheprovider -q
-641 passed, 12 deselected, 2 warnings in 336.92s (0:05:36)
+643 passed, 12 deselected, 2 warnings in 245.70s (0:04:05)
 ```
 
-`652 tests collected`; 12 are marked `slow` (real-model integration and the
+`655 tests collected`; 12 are marked `slow` (real-model integration and the
 load-gate corpus benchmarks) and 5 of those also carry the new `load` marker, so
 the README's documented `-k "not slow and not load"` command now means what it
 says.
@@ -351,10 +351,13 @@ pinning the stale, FAIL-rated `LFM2.5-VL-1.6B` model.
 
 | Document | Change |
 |---|---|
-| `docs/rlm-local-manual.md` | §4.3 prompt-variable discipline; §5.1/§5.2 backend robustness + TLS posture; §6.2 cell correlation and the file-reference init; §6.3 lazy `context`; §6.7 the real caps incl. tail-preserving stderr; §6.8 `restart_worker`; §7.5 cache-before-budget; §7.7 `cache_hits`/`cache_size`; §8.4/§8.5 stderr nudge, empty-submission nudge, `is not None` semantics; §8.6 terminal placeholders; §9.2 dead stages; §9.4–§9.7 wiring; §10.2 byte-offset contract; §10.3 spill reaching the worker; §11.2 template table; §11.3.1/§11.4 vault few-shots live; §11.2.1 `load_template` removed (historical); §16.3 model-era drift; §16.4 P2/P3; §17.10 |
-| `docs/rlm-kernel-manual.md` | §4.3.1 path containment; §4.7 directory convention + migration; §5.3 query semantics; §7.3 static-by-default validation; **new §7.3.1 trust model**; §7.4 occupancy guards; §11.3/§11.4 CLI flags; §13.2 recorded gate numbers; §9.3 evaluator lock |
-| `docs/operator-guide.md` | TLS material never committed + per-host generation; **new "TLS Verification Posture (R18)"** incl. the web console's trust model; route table corrected (`/check` removed, upload/chat routes added) |
-| `docs/load-test-report.md`, `docs/conformance/README.md` | repaired/stale content |
+| `README.md` | remote-endpoint guidance (`--endpoint`, `load_config(root_endpoint=…)`); profile table gains the enforced REPL cap and the configured production model; new **Security Posture** section; requirements corrected (`tenacity`, `litellm`, `python-multipart`); testing section rewritten with real counts and marker semantics |
+| `docs/extensibility-guide.md` | brought back in line with the code: singular `helper/` paths throughout; the gate's opt-in execution and trust model (**new §5.2.1**); `promote` occupancy/`force` rules; vault path containment and the `name` validator; vault few-shots that actually affect the prompt (**new §2.5**); byte-addressed lazy `context`; the real output caps and `cell_id` correlation; the `call_api`/`handle_api_call` "bindings pattern" explicitly marked **not implemented** with the four RPC verbs that do exist; §8's false "the sandbox blocks `import os` / no network / no secrets" claims replaced with the truth (process boundary, not a sandbox); "deprecated helpers stay callable" and "deprecated pages are excluded from search" both corrected; `search()` documented as returning a string |
+| `docs/rlm-local-manual.md` | §4.3 prompt-variable discipline; §5.1/§5.2 backend robustness + TLS posture; §6.1 **the design's restricted builtins were never implemented** — stated plainly; §6.2 cell correlation and the file-reference init; §6.3 lazy `context`; §6.7 the real caps incl. tail-preserving stderr; §6.8 `restart_worker`; §7.5 cache-before-budget; §7.7 `cache_hits`/`cache_size`; §8.4/§8.5 stderr nudge, empty-submission nudge, `is not None` semantics; §8.6 terminal placeholders; §9.2 dead stages; §9.4–§9.7 wiring; §10.2 byte-offset contract; §10.3 spill reaching the worker; §11.2 template table; §11.3.1/§11.4 vault few-shots live; §11.2.1 `load_template` removed (historical); §12 default log location + retention; §15.4/§15.5 the real error-nudge and timeout behaviour; §16.1 test tree; §16.2/§16.2.1 running tests + doc lint; §16.3 integration endpoint env vars; §17 API reference |
+| `docs/rlm-kernel-manual.md` | §3.2 frontmatter fields (incl. the `name` charset rule); §4.3 `LocalVault` containment; §4.3.1 path containment; §4.7 directory convention + migration; §5.3 query semantics; §7.3 static-by-default validation; **new §7.3.1 trust model**; §7.4 the real promotion steps (staging, not committing); §7.6 demotion does **not** hide a page from search; §10.1/§10.2 few-shots are live, templates are not; §11 CLI flags; §13.2 recorded gate numbers; §15 API reference corrected to the real signatures |
+| `docs/operator-guide.md` | TLS material never committed + per-host generation; **new "TLS Verification Posture"** incl. the web console's trust model; remote-model-server guidance; vault layout (singular kinds) + migration pointer; route table corrected (`/check` removed, upload/chat routes added); `rlm check` no longer claims to persist a report it does not write; `rlm vault review --execute` / `promote --force`; security notes section rewritten (fail-closed auth, escaped rendering, containment, trajectory-log retention) |
+| `docs/load-test-report.md` | F2 bullet completed, missing F3/F4/F5/C1 bullets restored, stray trailing fence repaired, Tier-2 duplication trimmed, and a **2026-09-10 re-run section** with the post-remediation numbers and the FTS semantics differential |
+| `docs/conformance/README.md` | "K4-real is the next milestone" replaced with the 2026-07-30 completion; timeline extended through 2026-09-10 so the remediation cycle is traceable; status section states the residuals rather than implying there are none |
 
 ---
 
@@ -384,6 +387,15 @@ pinning the stale, FAIL-rated `LFM2.5-VL-1.6B` model.
    covers the harness message layer.
 7. **P3's two scoring weaknesses** are documented, not fixed, per the plan
    ("tightening changes score semantics — owner decision, defer").
+8. **The REPL is not a sandbox.** Design §5.3's restricted builtins and `open`
+   jail were never implemented; the worker runs `exec(code, globals())` with
+   normal builtins and inherits the harness environment. The local manual §6.1
+   now says so plainly instead of describing the unimplemented design. This is a
+   pre-existing gap (it predates this wave), documented rather than silently
+   carried.
+9. **Deprecated and superseded pages still match search** — `Index.fts_search`
+   has no status predicate. The kernel manual §7.6 previously claimed otherwise
+   and now states the real behaviour.
 8. **The 100K load-gate corpus** written during §5.2 lived in `.tmp_load_corpus/`
    inside the workspace (536 MB, 100 004 files) and was deleted afterwards
    (64 s); `.tmp_*` roots are gitignored. The load-gate phase 5 `git` measurement
@@ -395,6 +407,7 @@ pinning the stale, FAIL-rated `LFM2.5-VL-1.6B` model.
 |---|---|
 | `scripts/check_guard_nonvacuity.py` | makes the "every guard test goes red when its guard is removed" claim reproducible; the mutation table is deliberately literal and point-in-time, and a mutation whose target no longer exists is reported as a problem rather than skipped |
 | `scripts/run_load_gate_index_phases.py` | re-runs the load-gate phases that are measurable on a host where the `git` phase stalls (rebuild time, search latency, index-vs-walk) and streams progress instead of buffering it |
+| `scripts/check_docs.py` | structural lint over the living docs: unbalanced fences, `§` references that resolve to nothing and name no document, dangling relative links, BOM/U+FFFD damage. Verified falsifiable against a planted instance of each of the five defect classes |
 
 ---
 

@@ -25,7 +25,7 @@
 | Helper listing (walk) | 1,634 s | 705 s | 577 s | informational |
 
 *Run 2 search measured immediately post-rebuild with un-checkpointed WAL;
-quiet-copy baseline was 117 ms (diagnosis #2 §3).
+quiet-copy baseline was 117 ms (load-gate diagnosis #2, §3).
 
 ## Root Cause of Run 1–2 Failures
 
@@ -76,3 +76,50 @@ run the two env-gated suite tests:
 ```bash
 .venv/Scripts/python.exe -m pytest tests/load/test_load.py -v -k "tier2" --timeout=7200
 ```
+
+---
+
+## Re-run after the 2026-09 remediation (R14)
+
+**Date:** 2026-09-10 · **Commit:** the R11–R14 kernel commit of that wave
+**Why:** R14 changed index/search behaviour (`fts_search` query semantics,
+`reindex_delta` keying, the quarantine-isolation check, the body-length unit), so
+the gate was re-run — it exists to catch exactly this class of regression.
+
+| Metric | Target | 2026-07-26 | **2026-09-10** |
+|---|---|---|---|
+| Pages | 100,000 | 100,000 | 100,000 |
+| Full reindex | < 7,200 s | 582 s | **166 s** |
+| Search p95 | < 300 ms | 116.9 ms | **176.5 ms** |
+| `git status` | < 2,000 ms | 38 ms | **not measured** (see below) |
+| Helper listing (index) | informational | 46 ms | **48.3 ms** |
+| Helper listing (walk) | informational | 577 s | **101.4 s** |
+
+Both measurable gates pass and nothing became quadratic: rebuild got faster and
+search latency stayed in the same order of magnitude.
+
+**The query-semantics change is visible on the same index**, which is the reason
+to re-run rather than assume:
+
+| Query form | Pages matched |
+|---|---|
+| `"system data"` (old — the whole query as an FTS5 phrase) | 10,906 |
+| `"system" OR "data"` (new — per-token OR) | **94,393** |
+| `"implementation process"` (phrase) | 3,990 |
+| `"implementation" OR "process"` (OR) | **95,244** |
+
+The old form silently dropped every page that contained the terms *separately*;
+the new form restores recall while keeping exact-token matching (each token stays
+quoted, so no FTS5 operator injection and no stemming surprises). The kernel
+manual's §5.3 documents the semantics.
+
+**Deviation — `git status` was not measured.** Phase 5 of
+`scripts/run_load_gate_100k.py` could not complete on the machine used for the
+re-run: `git add -A` over 100,000 freshly created files never finished (a `git`
+process held `.git/index.lock` at 7 s of CPU for 13 minutes with no progress),
+because every file operation is interposed by that environment's sandbox ACL
+broker. `git status` is not the regression class this gate exists to catch, so
+the index phases were measured standalone with
+`scripts/run_load_gate_index_phases.py` (committed alongside this report) rather
+than reported from a run that never reached them. The 2026-07-26 value of 38 ms
+remains the last real measurement of that metric.

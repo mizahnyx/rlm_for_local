@@ -39,13 +39,22 @@ whether your context is 1,000 or 10,000,000 characters.
   Ollama, LM Studio, `mlx_lm.server` — anything with `/v1/chat/completions`)
 
 ```bash
-# Example: start llama-server with a 4B model
+# Example: start llama-server with the configured production model
 llama-server \
-    --model qwen3-4b-instruct-2507-q4_k_m.gguf \
+    --model Qwen3.5-4B-Abliterated-Q4_K_M.gguf \
     --host 127.0.0.1 --port 9010 \
     --ctx-size 16384 --flash-attn \
     --cache-type-k q8_0 --cache-type-v q8_0 \
     --parallel 2
+```
+
+The server does not have to be on this machine. Point the harness at another
+host (another LAN box, a Tailscale peer, a llama.cpp router) with
+`--endpoint` on `rlm check`, or `root_endpoint=` on `completion()`/`load_config`:
+
+```bash
+uv run python -m rlm_local.cli check Qwen3.5-4B-Abliterated \
+    --endpoint https://lunacode:9010/v1 --quick
 ```
 
 ### Install
@@ -74,14 +83,24 @@ answer = rlm_local.completion(
 
 Three shipping profiles — pick the one that fits your machine:
 
-| Profile | RAM | Model Guidance | Max Turns | Sub-call Budget |
-|---|---|---|---|---|
-| `tiny` | 8 GB, CPU | Phi-4-mini / 1.6B Q4 | 12 | 30 calls / 1M chars |
-| `laptop` | 16–32 GB, M-series | 4B Q4_K_M | 15 | 60 calls / 4M chars |
-| `workstation` | 32+ GB, 6+ GB GPU | 8B Q4_K_M | 20 | 100 calls / 12M chars |
+| Profile | RAM | Model Guidance | Max Turns | Sub-call Budget | REPL Output Cap |
+|---|---|---|---|---|---|
+| `tiny` | 8 GB, CPU | 1.6–4B Q4 | 12 | 30 calls / 1M chars | 2 000 chars |
+| `laptop` | 16–32 GB, M-series | 4B Q4_K_M | 15 | 60 calls / 4M chars | 4 000 chars |
+| `workstation` | 32+ GB, 6+ GB GPU | 8B Q4_K_M | 20 | 100 calls / 12M chars | 8 000 chars |
 
-All capacity claims in the system prompt are **config-injected** — the model is
-never lied to about what it can handle.
+All three profiles ship configured for `Qwen3.5-4B-Abliterated` (both tiers); the
+"Model Guidance" column is what each tier is sized for. Override any value at
+call time: `load_config("tiny", root_model="…", max_turns=8)`.
+
+Two properties of the profile that matter in practice:
+
+- **The REPL cap is real.** `repl_output_char_cap` is both what the system prompt
+  advertises *and* the cap the REPL enforces, and stderr truncation keeps the head
+  **and** the tail (a traceback's last line is the useful one).
+- **The model is never lied to.** Every capacity claim in the system prompt is
+  config-injected, and `tests/test_prompts.py::TestPromptVarsDiscipline` asserts
+  that the injected variables and the prompt's placeholders agree exactly.
 
 ## Architecture
 
@@ -158,6 +177,26 @@ uv run python -m rlm_web.app
 | [RLM Kernel Manual](docs/rlm-kernel-manual.md) | Engineers — vault, gate, memory, optimizer |
 | [Extensibility Guide](docs/extensibility-guide.md) | Developers — adding tools, helpers, capabilities |
 | [Conformance History](docs/conformance/README.md) | Auditors — review and remediation trail |
+| [Load Test Report](docs/load-test-report.md) | Operators — the 100K-page index gate |
+
+## Security Posture
+
+The defaults are tuned for a single-user machine; three of them are worth
+knowing before you expose anything:
+
+- **The gate is a quality gate, not containment.** Model-authored helper code is
+  parsed and pattern-scanned by default; running it in the restricted-builtin
+  sandbox is opt-in (`rlm-kernel review --execute`, `validate(..., execute=True)`)
+  and is escapable on CPython. See the kernel manual §7.3.1.
+- **TLS verification is off for local self-signed servers.** A non-loopback
+  `https` endpoint with verification off raises a `UserWarning` rather than
+  failing silently. Certificates and keys are never committed (`*.pem`,
+  `*.crt`, `*.key` are gitignored).
+- **The web console is loopback-only without `RLM_WEB_TOKEN`.** With a token
+  set, every route — including both SSE streams — requires an authenticated
+  session; auth is a route dependency so a new route cannot forget it.
+
+Details and the reasoning: [Operator Guide](docs/operator-guide.md).
 
 ## Testing
 
@@ -170,7 +209,7 @@ uv run pytest tests/ -k "not slow and not load" -q
 uv run pytest tests/ -q
 ```
 
-652 tests collected: 12 marked `slow` (real llama-server integration + load),
+655 tests collected: 12 marked `slow` (real llama-server integration + load),
 5 of those also marked `load` (corpus benchmarks). The integration tests read
 `RLM_TEST_ENDPOINT` / `RLM_TEST_MODEL` and skip when the endpoint is
 unreachable, defaulting to the configured model in `src/rlm_local/config.py`.
@@ -178,7 +217,9 @@ unreachable, defaulting to the configured model in `src/rlm_local/config.py`.
 ## Requirements
 
 - Python ≥ 3.12
-- `httpx`, `pydantic`, `pyyaml`, `gepa`, `fastapi`, `uvicorn`, `jinja2`
+- `httpx`, `pydantic`, `pyyaml`, `tenacity` (retry/backoff)
+- `gepa`, `litellm` (offline optimization, K4)
+- `fastapi`, `uvicorn`, `jinja2`, `python-multipart` (web console)
 - An OpenAI-compatible inference server (llama.cpp, Ollama, LM Studio, MLX)
 - Git (for vault versioning)
 

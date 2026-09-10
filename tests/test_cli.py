@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
+from rlm_local.cli import build_parser
 from rlm_local.cli import main as cli_main
 
 
@@ -85,6 +86,66 @@ class TestGet:
 
 
 class TestIngest:
+    def _vault(self, prefix: str):
+        import tempfile
+
+        from rlm_kernel.index import rebuild_index
+        from rlm_kernel.seed import seed_vault
+        from rlm_kernel.vault import LocalVault
+
+        td = tempfile.TemporaryDirectory(prefix=prefix, ignore_cleanup_errors=True)
+        vault_path = Path(td.name)
+        vault = LocalVault(vault_path, init_git=False)
+        seed_vault(vault)
+        rebuild_index(vault, vault_path / ".index" / "meta.sqlite")
+        return td, vault_path, vault
+
+    def test_ingest_writes_into_the_singular_kind_directory(self):
+        """R13 — pages live in `<kind>/`, not `<kind>s/`.
+
+        `--kind definition` used to write `definitions/<name>.md`, the plural
+        convention R13 retired, so an ingested page landed beside the tree that
+        `gate.promote` and the seeded pages use.
+        """
+        td, vault_path, vault = self._vault("cli_kinddir_")
+        try:
+            md = vault_path / "a_concept.md"
+            md.write_text("# A Concept\n\nBody text.", encoding="utf-8")
+
+            rc = cli_main(["ingest", str(md), "--vault", str(vault_path),
+                           "--kind", "definition"])
+            assert rc == 0
+
+            assert vault.exists("definition/a-concept.md"), (
+                "ingest must write into the singular kind directory"
+            )
+            assert not vault.exists("definitions/a-concept.md")
+        finally:
+            td.cleanup()
+
+    def test_every_kind_choice_is_a_real_page_kind(self):
+        """A `--kind` choice the schema does not know would be a ValueError.
+
+        `--kind source` was offered but is not a `PageKind`, so choosing it
+        crashed instead of ingesting.
+        """
+        import argparse
+
+        from rlm_kernel.schema import PageKind
+
+        subparsers = next(
+            a for a in build_parser()._actions
+            if isinstance(a, argparse._SubParsersAction)
+        )
+        ingest = subparsers.choices["ingest"]
+        kind_action = next(a for a in ingest._actions if a.dest == "kind")
+
+        for choice in kind_action.choices:
+            assert choice in {k.value for k in PageKind}, (
+                f"--kind {choice!r} is not a PageKind value"
+            )
+        assert kind_action.choices, "no --kind choices declared"
+
     def test_ingest_creates_page(self, monkeypatch):
         """rlm ingest creates a vault page from a markdown file."""
         import tempfile

@@ -24,6 +24,28 @@ for the `rlm-kernel` implementation against its specification
 | 2026-07-26 15:27 | `20260726-1527-fts-quadratic-fix-validation.md` | Validation #3 — 100K gate PASSES (582 s / 117 ms / 38 ms) |
 | 2026-07-26 16:36 | `20260726-1636-implementation-agent-instructions-closeout-and-k4.md` | Close-out instructions + K4-real milestone scope |
 
+### Timeline, continued (2026-07-26 evening → 2026-09-10)
+
+| Date | Document | Role |
+|---|---|---|
+| 2026-07-26 18:09 | `20260726-1809-closeout-k4-validation.md` | Close-out validation (D-K4-1/D-K4-2, gate routing, migration, real F5) |
+| 2026-07-26 19:05 | `20260726-1905-k4-wiring-fix-validation.md` | K4 wiring fix validation |
+| 2026-07-26 19:40 | `20260726-1940-final-wiring-fix-validation.md` | Final wiring fix validation |
+| 2026-07-26 19:54 | `20260726-1954-rk41-restoration-validation.md` | RK4.1 restoration validation |
+| 2026-07-26 20:16 | `20260726-2016-gating-test-vacuity-fix-validation.md` | Gating-test vacuity fix (the incident the mutation rule comes from) |
+| 2026-07-26 21:15 | `20260726-2115-k4-acceptance-run-guide.md` | K4 acceptance run guide |
+| 2026-07-29 11:09 | `20260729-1109-k4-v5-health-check-protocol.md` | K4 v5 health-check protocol |
+| 2026-07-30 10:02 | `20260730-1002-implementation-agent-instructions-frontends-modelcheck-docs.md` | Frontends, model-check and docs milestone instructions |
+| 2026-07-30 18:43 | `20260730-1843-frontends-validation.md` | Frontends validation |
+| 2026-07-30 21:41 | `20260730-2141-implementation-agent-actionable-issues.md` | Actionable issues raised against that milestone |
+| 2026-07-30 22:21 | `20260730-2221-actionable-issues-fix-validation.md` | Those issues fixed and validated (271-test baseline) |
+| 2026-07-30 | `k4-first-run-report.md` | K4 first run: five failed attempts, then promotion (honest attempt log) |
+| standing | `load-test-report.md` | 100K-page load-gate report; extended 2026-09-10 with the post-remediation re-run |
+| 2026-09-03 21:07 | `20260903-2107-rlm-for-local-full-analysis.md` | Full-repository analysis — findings F1–F16, S1–S6 |
+| 2026-09-03 21:07 | `20260903-2107-remediation-plan.md` | The remediation plan (items R1–R25) those findings became |
+| 2026-09-03 21:07 | `20260903-2107-agent-memory-landscape-report.md`, `20260903-2107-memanto-vs-rlm-behaviour-as-content.md` | Companion research and comparison reports |
+| 2026-09-10 07:30 | `20260910-0730-remediation-validation.md` | **This cycle's validation** — waves 0–4 enacted, 641 tests green, 30/30 guards proven non-vacuous, LIVE needle + load gate + `rlm check` recorded, deviations stated |
+
 ## Status
 
 The conformance loop for review cycle July 24–26 is **closed**. All 13 defects
@@ -40,7 +62,12 @@ checkpoint rescue succeeded. Results and the honest attempt log are in
 routing, migration, real F5) is validated in
 `20260726-1809-closeout-k4-validation.md`.
 
-Remaining work after K4 is tracked in the remediation plan
-(`20260903-2107-remediation-plan.md`) and the analysis behind it
-(`20260903-2107-rlm-for-local-full-analysis.md`); the conformance loop itself
-(July 24–26 review cycle) remains closed.
+The **2026-09-03 analysis → remediation cycle is also closed**: every item
+R1–R25 was enacted, with R23 (`schema` → `schema_version`) deferred by the plan
+itself as a breaking vault-format change. Evidence — including the two claims
+that could **not** be measured on the working host and why — is in
+`20260910-0730-remediation-validation.md`. Deliberate residuals (the gate is a
+quality gate rather than containment; `answer`/`context` are not restored after
+each cell; P3's scoring weaknesses; `schema` shadowing a pydantic attribute) are
+listed in §7 of `20260910-0730-remediation-validation.md` rather than left
+implied.

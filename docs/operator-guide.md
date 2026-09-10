@@ -61,12 +61,51 @@ uv sync
 
 ```bash
 llama-server \
-    --model qwen3-4b-instruct-2507-q4_k_m.gguf \
+    --model Qwen3.5-4B-Abliterated-Q4_K_M.gguf \
     --host 127.0.0.1 --port 9010 \
     --ctx-size 16384 --flash-attn \
     --cache-type-k q8_0 --cache-type-v q8_0 \
     --parallel 2
 ```
+
+#### Pointing at a model server on another machine
+
+The three profiles all default to `https://localhost:9010/v1`. To use a server
+elsewhere — another LAN box, a Tailscale peer, or a llama.cpp **router** that
+starts models on demand — override `root_endpoint` per call:
+
+```python
+import rlm_local
+from rlm_local.config import PROFILES
+
+# Inspect what a profile ships with
+print(PROFILES["laptop"].root_endpoint)
+
+answer = rlm_local.completion(
+    "What is the archive access code?",
+    context,
+    profile="tiny",
+    root_endpoint="https://lunacode:9010/v1",   # same host for sub-calls
+    root_model="Qwen3.5-4B-Abliterated",
+)
+```
+
+Overrides are ordinary `load_config()` keyword arguments, so they also work for
+`config=load_config("tiny", root_endpoint="…")` and for any other profile value
+(`max_turns`, `cell_timeout`, `repl_output_char_cap`, …).
+
+From the CLI, `rlm check` is the one command with an explicit endpoint flag:
+
+```bash
+uv run python -m rlm_local.cli check Qwen3.5-4B-Abliterated \
+    --endpoint https://lunacode:9010/v1 --quick
+```
+
+`rlm ask` / `rlm chat` use the profile defaults; for a remote endpoint call
+`completion()` as above (or edit `PROFILES` in `src/rlm_local/config.py`).
+
+A non-loopback `https` endpoint emits a `UserWarning` because verification is off
+by default — see §4, "TLS Verification Posture".
 
 ### 2.4 Initialize the Vault
 
@@ -74,8 +113,13 @@ llama-server \
 uv run python -m rlm_kernel.cli init
 ```
 
-This creates `~/.local/share/rlm-kernel/vault/` with contract pages,
-template pages, and builtin helpers.
+This creates `~/.local/share/rlm-kernel/vault/` with contract pages, template
+pages and builtin helpers. Every page lives in a directory named for its own
+kind, **singular**: `contract/`, `helper/`, `fewshot/`, `definition/`,
+`memory/`, and `quarantine/` for proposals awaiting review.
+
+If you have a vault seeded before that convention was unified, it will contain
+`helpers/` and `fewshots/`; the kernel manual §4.7 has a one-time move snippet.
 
 ### 2.5 Build the Search Index
 
@@ -200,9 +244,20 @@ Prints the full page (frontmatter + body).
 rlm check <model-id> [--endpoint URL] [--quick] [--profile tiny]
 ```
 
-Runs the 9-probe suitability battery. `--quick` runs P1+P4+P6 only.
-Reports score, verdict, and per-probe evidence. Persists report to
-`docs/model-checks/<id>-<ts>.md`.
+Runs the 9-probe suitability battery. `--quick` runs P1+P4+P6 only (a 50-point
+scale) and takes a few minutes per probe against a local 4B model.
+
+Reports score, verdict, timing and per-probe evidence to stdout. It does **not**
+write a report file — redirect it yourself if you want to keep it:
+
+```bash
+rlm check Qwen3.5-4B-Abliterated --quick 2>&1 | tee model-check-$(date +%F).txt
+```
+
+`--endpoint` is how you check a model served elsewhere (another LAN box, a
+Tailscale peer, a llama.cpp router); the default is
+`https://localhost:9010/v1`. Checking a non-loopback `https` endpoint emits the
+R18 warning described in §4, which is expected.
 
 ### `rlm vault`
 
@@ -210,7 +265,15 @@ Reports score, verdict, and per-probe evidence. Persists report to
 rlm vault init|index|review|promote|demote [--vault PATH]
 ```
 
-Pass-through to `rlm-kernel` vault management.
+Pass-through to `rlm-kernel` vault management. Two flags matter for the trust
+model:
+
+- `rlm vault review` validates quarantined proposals **statically** (no code
+  execution) and prints `Review mode: static validation only`. Add `--execute`
+  to also run helper code in the restricted-builtin sandbox — a convenience for
+  code you already trust, never a containment boundary.
+- `rlm vault promote` refuses to overwrite a `deprecated`/`superseded` page at the
+  target path unless you pass `--force` (an `active` occupant always blocks).
 
 ### `rlm optimize`
 
@@ -406,25 +469,43 @@ uv run python -m rlm_local.cli check <model-id>
 - **<50: NOT SUITABLE** — cannot reliably operate the harness protocol. Try a different model.
 
 **Re-check cadence:** on model upgrade, on prompt change, or when you notice
-degradation. The report is persisted to `docs/model-checks/`.
+degradation. Record the run yourself — `rlm check` prints its report, it does not
+write a file (see §3).
 
 ---
 
 ## 6. Security Notes
 
 - **Token handling:** `RLM_WEB_TOKEN` via environment variable. Never commit it.
-  Change it periodically. The login form sets an HttpOnly session cookie.
+  Change it periodically. The login form sets an HttpOnly session cookie, and
+  the cookie is marked `Secure` whenever the server is started with
+  `--ssl-keyfile`/`--ssl-certfile`. Token comparison is constant-time.
+- **Fail-closed by default:** without `RLM_WEB_TOKEN` the console is reachable
+  from **loopback only**, and `POST /login` returns 400 because there is nothing
+  to compare against. Authentication is a route dependency, so every route —
+  including both SSE streams — enforces it; adding a route without it fails a test.
+  `RLM_WEB_ALLOW_TESTCLIENT=1` exists solely so the test suite's synthetic
+  non-loopback client can reach the app, and it never overrides a configured token.
 - **Tailscale scope:** the web frontend binds `0.0.0.0` but only the Tailscale
   interface is reachable from outside your LAN. Verify with `tailscale status`.
 - **Self-signed certs:** browsers and phones will warn. Either use the
   Tailscale cert path for a real certificate, or accept the warning on your
-  own devices only.
+  own devices only. TLS material is never committed: `*.pem`, `*.crt` and `*.key`
+  are gitignored — generate a pair per host (§4).
 - **No debug in production:** the web server runs without `--reload` in
   production. Set `RLM_WEB_TOKEN`.
 - **Upload caps:** 20 files / 8 MB total per request. Files larger than 1 MB
   per document are rejected.
 - **Server-escaped rendering:** all user content in the web UI is HTML-escaped
-  via Jinja2 autoescaping. No raw user input is rendered.
+  via Jinja2 autoescaping, and the vault upload result is built with
+  `textContent`/`createElement` rather than `innerHTML`, so a crafted filename
+  cannot inject markup or script.
+- **Vault paths are contained:** `LocalVault` refuses absolute paths, `..`
+  segments and anything resolving outside the vault root, and page `name` is
+  charset-validated — a proposal cannot be promoted outside the vault.
+- **Trajectory logs contain full prompts and responses.** They are written to
+  `logs/trajectories/` under the working directory (gitignored) and are not
+  deleted automatically; `TrajectoryLogger.prune(keep=N)` bounds the history.
 
 ---
 
@@ -507,14 +588,22 @@ The optimizer only promotes candidates that beat baseline on the held-out
 eval split.
 
 **Q: How do I add my own helpers?**
-A: Write a helper page in `helpers/<name>.md` with `## Signature` and
-`## Implementation` sections. Rebuild the index: `rlm vault index --rebuild`.
-The helper will be available in the next completion.
+A: Write a helper page in `helper/<name>.md` (singular — every kind directory is
+named for its kind) with `## Signature` and `## Implementation` sections.
+Rebuild the index: `rlm vault index --rebuild`. The helper will be available in
+the next completion. Authoring directly is the trusted path; model-authored
+helpers go through the gate instead (`propose` → `rlm-kernel review` →
+`rlm-kernel promote`), and `review` validates them statically unless you pass
+`--execute`.
 
 **Q: Is my data sent anywhere?**
-A: No. Everything runs locally. The model server is on localhost. The vault
-is on your filesystem. No telemetry, no cloud, no external API calls (unless
-you configure a remote model endpoint).
+A: Only to the model endpoint you configure. By default that is a llama-server
+on `localhost`, so nothing leaves the machine — the vault is on your filesystem
+and there is no telemetry, no cloud and no external API call. If you point
+`root_endpoint` at another host (a LAN box or a Tailscale peer), your context
+goes to *that* host and nowhere else. Note that `verify=False` is the default for
+local self-signed servers; a non-loopback `https` endpoint with verification off
+raises a warning naming the endpoint, because that traffic can be intercepted.
 
 **Q: Can I use this without the kernel/vault?**
 A: Yes. `rlm_local.completion()` works standalone. The kernel and web

@@ -279,7 +279,7 @@ hits = grep("blue", max_hits=3)
 | `schema` | `int` | Yes | Schema version. Currently only `1`. |
 | `id` | `str` | Auto | 26-character ULID, stable forever. Auto-generated if omitted. |
 | `kind` | `str` | Yes | One of: `contract`, `template`, `definition`, `helper`, `fewshot`, `note`, `topic`, `cache`. |
-| `name` | `str` | Yes | Machine name, unique within its kind for helpers/templates. Max 128 chars. |
+| `name` | `str` | Yes | Machine name, unique within its kind for helper and template pages. Must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` — no path separators, no leading dot or whitespace (S4/R20), because it becomes the page path on promotion. |
 | `title` | `str` | Yes | Human-readable title. Max 256 chars. |
 | `summary` | `str` | Yes | One-sentence description. Max 200 chars. Indexed in FTS5; shown in search cards. |
 | `tags` | `list[str]` | No | Zero or more tags for filtering and discovery. |
@@ -882,7 +882,7 @@ Kind-specific checks:
 | **helper** | AST parse; import allowlist (stdlib only; block `os.system`, `subprocess`, `socket`, `ctypes`, `importlib`); blocked-pattern scan; static check that the code defines a callable with the page's name; static signature match between `## Signature` and the implementation's `def`. With `execute=True` the code is additionally `exec`'d in a restricted namespace. |
 | **contract / template** | Slot variables present (`{repl_cap}` etc.). Body length within the 8192-**byte** cap (measured as UTF-8 bytes, so 3000 CJK characters = 9000 bytes does not fit). |
 | **definition / note** | Wikilinks resolve to existing pages (when vault provided). |
-| **fewshot** | Must contain example sections (`## Probe`, `## Plan`, etc.). |
+| **fewshot** | Body is non-empty. A page without an `## Example`/`## Examples` section produces a **warning**, not an error — which matters because the shape `load_fewshots_from_vault` actually accepts for a single-pair page is `## Query` / `## Answer` (R8), and such a page still gets warned about the Example section it does not need. |
 | **all** | Status must be `pending`. Must be in `quarantine/`. |
 
 #### 7.3.1 Trust model — the gate is a quality gate, not containment
@@ -919,7 +919,7 @@ from rlm_kernel.gate import promote
 
 new_path = promote(vault, page)
 # Moves from quarantine/01KYC....md to helper/extract-dates.md
-# Bumps version, updates hash, sets status: active, git commit
+# Bumps version, updates hash, sets status: active, stages the file with git add
 ```
 
 Promotion performs:
@@ -929,14 +929,18 @@ Promotion performs:
 2. Computes the target path based on kind and name (`helper/extract-dates.md`),
    or uses `target_path` verbatim when the caller supplied one.
 3. Reads the page already occupying the target path, if any, and sets
-   `version = occupant.version + 1` — **version lineage follows the page being
-   replaced**. (Proposed pages start at `version: 0`; a bare `version + 1` would
-   reset the counter to 1 on every promoted replacement, so after N optimizer
-   runs the live prompt would still claim version 1.)
+   `version = max(occupant.version, page.version) + 1` — **version lineage follows
+   the page being replaced**. (Proposed pages start at `version: 0`; a bare
+   `version + 1` reset the counter to 1 on every promoted replacement, so after N
+   optimizer runs the live prompt still claimed version 1.)
 4. Updates frontmatter: `status: active`, `hash = content_hash`, timestamps refreshed.
-5. Removes the quarantined original.
-6. Writes the promoted page to its target namespace.
-7. Returns the new path.
+5. Writes the promoted page to its target namespace.
+6. Removes the quarantined original.
+7. Stages both changes with `git add` / `git rm`. **Promotion never commits** —
+   `vault.git_commit()` (or the CLI) does, so a batch of promotions lands as one
+   history entry.
+8. Optionally runs `index.reindex_delta(vault)` when an `Index` was passed.
+9. Returns the new path.
 
 **Occupancy guards.** With no `target_path`, promotion is refused when the target
 path is occupied:
@@ -974,8 +978,15 @@ demote(vault, page, superseded_by="helper/extract-dates-v2.md")
 
 Demotion transitions `active → deprecated` or `active → superseded`. A
 superseded page carries a `superseded_by` field pointing to the replacement
-path. Deprecated/superseded pages remain in the vault and index but are
-excluded from normal search results (status filter).
+path. Deprecated and superseded pages remain in the vault and in the index.
+
+**They still match search.** `Index.fts_search` queries the full-text table with
+no status predicate (`search_vault` filters only by `kind` and `tags`), so a
+deprecated page can appear in `search()` results — and a superseded page can
+outrank its replacement. What demotion *does* control is behaviour that reads
+status explicitly: only `active` helper pages are injected into the REPL
+namespace and listed in the system prompt. Treat demotion as "stop using this",
+not "make this invisible", and read `superseded_by` when a hit looks stale.
 
 ### 7.7 Quarantine Isolation
 
@@ -1300,9 +1311,17 @@ system_prompt = load_system_prompt_from_vault(prompt_vars, vault=vault)
 
 The vault-first assembly order:
 1. `contract/repl-contract.md` body, rendered with `{repl_cap}`-style slots.
-2. One-line summaries of active helper pages (≤30 lines — progressive disclosure cap).
-3. `contract/how-to-work.md` body.
-4. Fallback: if any vault page is missing, the hardcoded `SYSTEM_PROMPT` is used.
+2. `contract/how-to-work.md` body.
+3. One-line summaries of active helper pages from `helper/` (≤30 lines —
+   progressive disclosure cap).
+4. Fallback: if the contract pages are missing, the hardcoded `SYSTEM_PROMPT` is
+   used.
+
+The **few-shot** transcript is loaded separately by
+`load_fewshots_from_vault(vault, prompt_char_budget=…)`, which `RootLoop` calls
+alongside this function: the builtin example always comes first, then at most one
+active `fewshot/` page, and only if the pair fits `sub_prompt_char_budget / 4`
+(R8 — before that, vault few-shots were inert).
 
 ### 10.2 Template Pages (Introspection-Only)
 
@@ -1313,14 +1332,21 @@ Behavior wiring — loading template text from vault pages at runtime — is
 hardcoded package-bundled template constants. The `load_template()` function
 and `_TEMPLATE_PAGE_MAP` were removed in R3-D10 to eliminate dead code.
 
+This is specifically about *template* pages. Two other vault kinds **do** affect
+behavior today: `contract/repl-contract.md` and `contract/how-to-work.md` (§10.1),
+`helper/` pages (injected into the REPL namespace and listed in the system
+prompt), and `fewshot/` pages (§10.1, R8). Template pages remain the exception
+because no code path loads them.
+
 When vault-template loading is implemented (K3b+), the GEPA optimizer will
 be able to evolve templates against held-out eval suites.
+
 ### 10.3 Byte-Stable Prefix Discipline
 
 Even with vault-first loading, the byte-stable prefix invariant is maintained:
 once loaded for a session, the system prompt and templates do not change
-mid-completion. The vault is consulted once at the start of `RootLoop.run()`.
-lcache hits remain consistent across turns.
+mid-completion. The vault is consulted once at the start of `RootLoop.run()`,
+so prefix-cache hits remain consistent across turns.
 
 ---
 
@@ -1331,12 +1357,12 @@ rlm-kernel — Evolvable RLM kernel CLI
 
 Commands:
   init                  Seed a new vault with contract, template, and helper pages
-  index --rebuild        Rebuild the full-text search index from vault pages
-  review [--execute]     List quarantined pages pending review (static by default)
-  promote PATH           Promote a quarantined page into the live namespace
-  demote PATH [--by P]   Demote an active page (optionally superseded by another)
-  search QUERY [--kind]  Search the vault by keyword
-  optimize --target T    Run GEPA optimization on a text artifact
+  index --rebuild       Rebuild the full-text search index from vault pages
+  review [--execute]    List quarantined pages pending review (static by default)
+  promote PATH [--force] Promote a quarantined page into the live namespace
+  demote PATH [--by P]  Demote an active page (optionally superseded by another)
+  search QUERY [--kind] Search the vault by keyword
+  optimize --target T   Run GEPA optimization on a text artifact
 ```
 
 ### 11.1 init
@@ -1379,8 +1405,10 @@ an opt-in convenience for trusted authors, never a containment boundary; see
 rlm-kernel promote quarantine/01KYC....md [--force] [--vault PATH]
 ```
 
-Promotes a quarantined page to its target namespace. The page must have
-passed validation (promotion does not re-validate — run validation first).
+Promotes a quarantined page to its target namespace. `promote` runs static
+validation itself and raises `ValueError` if the page does not pass, so a
+rejected page never reaches the live namespace — `review` first if you want to
+see the findings before promoting.
 
 `--force` is required to overwrite a **deprecated or superseded** page already
 at the target path; an **active** occupant always blocks promotion (demote it
@@ -1634,7 +1662,7 @@ class Frontmatter(BaseModel):
     schema: int = 1
     id: str                         # ULID, auto-generated
     kind: PageKind
-    name: str                       # 1-128 chars
+    name: str                       # ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ (S4/R20)
     title: str                      # 1-256 chars
     summary: str                    # 1-200 chars
     tags: list[str]
@@ -1644,6 +1672,8 @@ class Frontmatter(BaseModel):
     superseded_by: str | None
     created: datetime               # UTC
     updated: datetime               # UTC
+    access_count: int = 0           # memory-decay bookkeeping (R12)
+    last_access: datetime | None = None
 
     def to_yaml(self) -> str: ...
 
@@ -1685,6 +1715,8 @@ class VaultStore(Protocol):
     def resolve_wikilink(self, name: str) -> Page | None: ...
 
 class LocalVault:
+    """Every path goes through _resolve(): absolute paths, '..' segments and
+    paths resolving outside the root raise ValueError (S4/R20)."""
     def __init__(self, root: Path, init_git: bool = True) -> None: ...
     def get(self, path: str) -> Page | None: ...
     def put(self, page: Page, path: str) -> None: ...
@@ -1695,6 +1727,9 @@ class LocalVault:
     def git_commit(self, message: str = "vault: update") -> bool: ...
 ```
 
+`get`, `put`, `delete` and `exists` raise `ValueError` — not `False`/`None` — for a
+path that escapes the vault root; see §4.3.1.
+
 ### 15.3 `rlm_kernel.index`
 
 ```python
@@ -1703,7 +1738,10 @@ class Index:
     def build(self, vault: VaultStore) -> None: ...
     def reindex_delta(self, vault: VaultStore) -> None: ...
     def fts_search(self, query: str, limit: int = 40,
-                   kinds: list[str] | None = None) -> list[dict[str, Any]]: ...
+                   kinds: list[str] | None = None,
+                   tags: list[str] | None = None) -> list[dict[str, Any]]: ...
+    def list_paths(self, kind: str | None = None,
+                   status: str | None = None) -> list[str]: ...
     def page_count(self) -> int: ...
     def get_page(self, path: str) -> dict[str, Any] | None: ...
     def close(self) -> None: ...
@@ -1712,6 +1750,9 @@ class Index:
 
 def rebuild_index(vault: VaultStore, db_path: Path) -> Index: ...
 ```
+
+`fts_search` splits the query on whitespace, quotes each token and joins with
+`OR` (R14) — see §5.3 for the semantics change and why it exists.
 
 ### 15.4 `rlm_kernel.search`
 
@@ -1767,15 +1808,24 @@ class ValidationReport:
 
 def propose(vault: VaultStore, kind: PageKind, name: str,
             body: str, rationale: str = "") -> str: ...
-def validate(page: Page, vault: VaultStore | None = None) -> ValidationReport: ...
-def promote(vault: VaultStore, page: Page) -> str: ...
+def validate(page: Page, vault: VaultStore | None = None,
+             *, execute: bool = False) -> ValidationReport: ...
+def promote(vault: VaultStore, page: Page, index: Any | None = None,
+            target_path: str | None = None,
+            *, force: bool = False) -> str: ...
 def reject(vault: VaultStore, page: Page) -> None: ...
 def demote(vault: VaultStore, page: Page,
            superseded_by: str | None = None) -> None: ...
-def search_quarantine(vault: VaultStore, query: str,
-                      kinds: list[PageKind] | None = None) -> list[Page]: ...
+def search_quarantine(vault: VaultStore, query: str = "",
+                      kind: str | None = None) -> list[Page]: ...
 def verify_quarantine_isolation(vault: VaultStore, index_path: Path) -> bool: ...
 ```
+
+`ValidationReport` carries `passed`, `errors`, `warnings` and — since R19 —
+`executed`, which is `True` only when the helper sandbox actually ran.
+
+`search_quarantine` returns pages **newest first** (sorted on the ULID filename
+stem), matching its docstring; `vault.list` alone returns lexicographic order.
 
 ### 15.8 `rlm_kernel.memory`
 
@@ -1785,13 +1835,18 @@ class MemoryManager:
     def search(self, vault: VaultStore, index_path: Path,
                query: str, k: int = 5) -> list[dict[str, Any]]:
         """BM25 pool (4×k) re-ranked by decay-weighted relevance; hits are
-        recorded via access_count/last_access. Cards carry a `decay` field."""
+        recorded through vault.put as access_count/last_access. Cards carry a
+        `decay` field (R12)."""
     def note(self, vault: VaultStore, chunk: str) -> str: ...
     def forget(self, vault: VaultStore, query: str | None = None,
-               older_than: timedelta | None = None) -> int: ...
+               older_than: timedelta | None = None) -> int:
+        """Both filters are combined (AND) when both are given (R12)."""
     def write_core(self, vault: VaultStore, text: str) -> None: ...
     def compact(self, vault: VaultStore, index_path: Path,
-                similarity_threshold: float = 0.8) -> int: ...
+                similarity_threshold: float = 0.85,
+                dry_run: bool = True) -> int | list[dict[str, Any]]:
+        """Dry-run and merge share one clustering function, so the reported
+        count and the merge cannot disagree (R12)."""
 
 def decay_score(access_count: int = 0,
                 last_access: datetime | None = None,
@@ -1807,7 +1862,8 @@ class EvalTask:
     query: str
     context: str
     expected_pattern: str
-    tolerance: float = 0.0
+    # No `tolerance` field: the loader would ignore it, so numeric tasks encode
+    # their tolerance in the anchored pattern instead (R24).
 
 @dataclass
 class EvalSuite:
@@ -1819,7 +1875,10 @@ def evaluate_task(task: EvalTask, completer: Callable) -> tuple[bool, str]: ...
 def evaluate_suite(suite: EvalSuite, completer: Callable) -> dict[str, Any]: ...
 def run_optimization(vault: Any, target: str = "how-to-work",
                      max_iterations: int = 20,
-                     profile: str = "laptop") -> dict[str, Any]: ...
+                     profile: str = "laptop") -> dict[str, Any]:
+    """Terminal statuses: `promoted`, `no_improvement`, `validation_failed`
+    (a candidate the gate rejected, leaving the incumbent ACTIVE — R11), or
+    `gate_error`."""
 
 BUILTIN_SUITES: dict[str, EvalSuite]
 ```

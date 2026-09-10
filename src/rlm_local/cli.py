@@ -24,7 +24,13 @@ def _default_vault() -> Path:
     return Path.home() / ".local" / "share" / "rlm-kernel" / "vault"
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the `rlm` argument parser.
+
+    Split out of `main()` so the parser itself is testable — notably the
+    `--kind` choices, which must stay a subset of `PageKind` values and must
+    describe a directory convention that exists (R13/R16).
+    """
     parser = argparse.ArgumentParser(
         prog="rlm",
         description="RLM harness — recursive reasoning with local models",
@@ -61,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
     p_ingest.add_argument("paths", nargs="+", type=Path,
                           help="Markdown files to ingest")
     p_ingest.add_argument("--kind", default="note",
-                          choices=["note", "source", "definition"])
+                          choices=["note", "definition", "topic"])
     p_ingest.add_argument("--tags", default="",
                           help="Comma-separated tags")
     p_ingest.add_argument("--vault", type=Path, default=_default_vault())
@@ -106,7 +112,11 @@ def main(argv: list[str] | None = None) -> int:
     p_opt.add_argument("--profile", default="tiny")
     p_opt.add_argument("--max-calls", type=int, default=150)
     p_opt.add_argument("--vault", type=Path, default=_default_vault())
+    return parser
 
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     if args.command == "ask":
@@ -286,7 +296,7 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
             hash=content_hash,
         )
         page = Page(fm, content)
-        page_path = f"{kind.value}s/{name}.md" if kind.value != "note" else f"memory/notes/{name}.md"
+        page_path = f"{kind.value}/{name}.md" if kind.value != "note" else f"memory/notes/{name}.md"
         vault.put(page, page_path)
         print(f"  OK: {fpath} → {page_path}")
         ingested += 1
@@ -418,8 +428,10 @@ def _cmd_check(args: argparse.Namespace) -> int:
             for line in result["evidence_lines"][:20]:
                 print(f"  {line}")
         return 0
-    except ImportError:
-        print("Model check not yet implemented.", file=sys.stderr)
+    except ImportError as e:
+        # The battery exists; this fires only when a dependency is missing.
+        print(f"Model check unavailable: {e}", file=sys.stderr)
+        print("Install the dependencies (uv sync) and retry.", file=sys.stderr)
         return 1
 # ── vault ─────────────────────────────────────────────────────────────────
 

@@ -505,14 +505,25 @@ free-form ` ```repl ` output is never grammar-constrained — rescue parsing
 ### 6.1 Design Rationale
 
 The REPL is a **subprocess-isolated** Python interpreter, not an in-process
-`exec()`. This decision has three motivations:
+`exec()`. Two motivations:
 
 1. **Killability.** A small model emitting `while True:` must not hang the harness.
-   The subprocess can be killed on timeout.
+   The worker can be killed, restarted, and its late results discarded (§6.2, R4).
 2. **Memory isolation.** The worker's memory is bounded by the OS, not by the
    harness process.
-3. **Restricted builtins.** `input`, `eval`, `exec`, `compile`, `globals`, and
-   `locals` are blocked; `open` is restricted to the task temp directory.
+
+**It is a process boundary, not a security sandbox.** Design §5.3 called for
+restricted builtins (`input`/`eval`/`exec`/`compile`/`globals`/`locals` blocked)
+and `open` jailed to the task directory. **That was never implemented**: the
+worker runs `exec(code, globals())` with normal builtins, imports the standard
+library itself, opens the loopback socket it needs, and is launched with
+`env={**os.environ, ...}` — so it inherits the harness's environment variables.
+
+What that means in practice: run the harness against context and models you
+trust. Model-authored code is not confined by the REPL; a cell can read files the
+harness user can read. The kernel's gate (§7.3.1 of the kernel manual) is likewise
+a *quality* gate rather than containment. If you need real isolation, run the
+whole harness in a container or a dedicated user account.
 
 ### 6.2 Communication Protocol
 
@@ -683,7 +694,6 @@ SubcallManager(
     prompt_char_budget: int = 16000,
     context_total_chars: int = 0,
     shortcut_warn_fraction: float = 0.60,
-    sub_model: str = "",
 )
 ```
 
@@ -1025,7 +1035,7 @@ submission.
 ### 9.7 JSON Repair
 
 `repair_json(text, schema=None)` repairs malformed JSON from sub-call responses
-(§5.6 item 6). It strips markdown fences, finds the first `{`, balances braces,
+(design §5.6 item 6). It strips markdown fences, finds the first `{`, balances braces,
 and returns the extracted object. If no JSON is found, the text is returned
 as-is.
 
@@ -1326,7 +1336,7 @@ Each line is a JSON object with an `event` field and a `timestamp`. Event types:
 ```python
 from rlm_local import TrajectoryLogger
 
-logger = TrajectoryLogger("/tmp/traj.jsonl")
+logger = TrajectoryLogger("logs/traj.jsonl")
 
 # Pass to completion()
 answer = rlm_local.completion(
@@ -1335,16 +1345,32 @@ answer = rlm_local.completion(
 
 # Or use convenience parameter
 answer = rlm_local.completion(
-    query, context, log_path="/tmp/traj.jsonl"
+    query, context, log_path="logs/traj.jsonl"
 )
 ```
+
+**Default location and retention (R22).** With no path, a logger writes to
+`logs/trajectories/trajectory_<ns>.jsonl` **under the working directory** — not a
+shared system temp directory, which is where records used to land under a
+predictable name that nothing ever cleaned up. That directory is gitignored.
+
+Records contain full prompts and responses, so nothing deletes them implicitly.
+Retention is explicit:
+
+```python
+TrajectoryLogger.prune()                  # keep the 50 newest .jsonl files
+TrajectoryLogger.prune(keep=200)          # or pick your own bound
+```
+
+`prune()` returns the number of files removed and is a no-op for a missing
+directory, so it is safe to call unconditionally from a cron job or a wrapper.
 
 ### 12.4 Analysis Example
 
 ```python
 import json
 
-with open("/tmp/traj.jsonl") as f:
+with open("logs/traj.jsonl") as f:
     events = [json.loads(line) for line in f]
 
 # Count sub-calls
@@ -1462,14 +1488,15 @@ editing `repl.py`.
 ### 14.5 Search and Introspection
 
 With kernel integration, the root model gains a `search()` function in the
-REPL that queries the vault's BM25 index:
+REPL that queries the vault's BM25 index. It returns a **formatted string**, not
+a list, so print it rather than iterating:
 
 ```python
 # Inside a repl block:
-hits = search("how do I submit an answer", k=3)
-for h in hits:
-    print(h)
+print(search("how do I submit an answer", k=3))
 ```
+
+Each hit is one line: `[n] kind/name: title — summary`.
 
 This makes the system **self-describing** (P6): the model can read its own
 contract, discover available helpers, and find relevant definitions — all
@@ -1488,10 +1515,22 @@ path = propose("helper", "extract-dates",
 print(f"Proposed to {path}")
 ```
 
-The proposed helper goes to `quarantine/`, passes through deterministic
-validation (import allowlist, sandbox execution, signature check), and
-awaits human review before promotion. This is P8 in action: all growth
+The proposed helper goes to `quarantine/`, passes through **static** validation —
+AST parse, import allowlist, blocked-pattern scan, and a static check that the
+code defines a callable with the page's name whose signature matches the declared
+one — and awaits human review before promotion. This is P8 in action: all growth
 passes through an evaluator gate.
+
+Two things to be precise about (S3/R19 and the kernel manual's §7.3.1):
+
+- **The sandbox is opt-in.** Execution of model-authored helper code happens only
+  with `validate(..., execute=True)`, which `rlm-kernel review --execute` sets.
+  Plain `review` and `promote` never execute the code.
+- **The gate is a quality gate, not containment.** Restricted-builtin `exec` is
+  escapable on CPython — `().__class__.__bases__[0].__subclasses__()` walks past
+  the substring blocklist — and the sandbox only *defines* the function, it never
+  calls it, so a helper whose body raises passes even with `--execute`. Treat the
+  gate as a review step, not a jail.
 
 ### 14.7 Core Memory
 
@@ -1549,7 +1588,8 @@ RootLoop.run()
 
 **Frequency:** ~25% of turns on models below 4B.
 
-**Mitigation:** Rescue parse (step 3b) catches unclosed fences. If no code at all,
+**Mitigation:** Rescue parse (step 2 of the extraction pipeline, §9.2) catches
+unclosed fences. If no code at all,
 a templated nudge is appended: "You described code without emitting it..." After
 2 consecutive nudges, counted as an error.
 
@@ -1574,16 +1614,23 @@ results stay in REPL variables — the model must deliberately `print()` to see 
 
 **Symptom:** `NameError`, `SyntaxError`, `IndentationError` from model-generated code.
 
-**Mitigation:** stderr is fed back verbatim to the model on the next turn. Small
-models are surprisingly good at fixing their own code when shown the traceback.
+**Mitigation:** The traceback is fed back to the model in the next REPL-result
+message, **and** the root loop appends a templated `NUDGE_STDERR_ERROR` that names
+the exception class and the error count (§9.5). Small models are surprisingly
+good at fixing their own code when shown the traceback.
 Budget: `max_consecutive_errors` (default 3), then forced finalization.
 
 ### 15.5 Runaway Cell
 
 **Symptom:** `while True:` or huge list allocation hangs the REPL.
 
-**Mitigation:** Subprocess isolation + per-cell `cell_timeout`. The worker is
-killed on timeout and the error is reported as stderr.
+**Mitigation:** Subprocess isolation + per-cell `cell_timeout`. On timeout the
+harness returns a templated `CELL_TIMEOUT_ERROR` while **the worker keeps
+running** — it is not killed, because killing it would discard the namespace the
+model may still be relying on. The late result is then discarded by `cell_id`
+rather than being handed to the model as the next cell's output (R4). Only after
+**two consecutive timeouts** is the worker restarted, and the model is told its
+variables were lost.
 
 ### 15.6 Sub-Call Quality Collapse
 
@@ -1626,9 +1673,10 @@ for basic harness operation.
 
 **Symptom:** `search()` in the REPL takes too long on large vaults.
 
-**Mitigation:** FTS5 BM25 search over 500K pages is designed to stay under
-300 ms p95. The search call is bounded by the per-cell timeout (default 60 s).
-If the index is missing or corrupted, `search_vault` returns an empty list.
+**Mitigation:** FTS5 BM25 search over 100K pages is measured at 176 ms p95
+(load-test report), an order of magnitude inside the 300 ms target. The search
+call is bounded by the per-cell timeout (default 60 s). If the index is missing
+the search returns no results and the CLI tells you to rebuild it.
 
 ---
 
@@ -1636,33 +1684,57 @@ If the index is missing or corrupted, `search_vault` returns an empty list.
 
 ### 16.1 Test Suite Structure
 
+655 tests collected; 12 marked `slow` (real-model integration + load corpus).
+
 ```
 tests/
-├── conftest.py              # Shared fixtures (tiny_config, laptop_config)
-├── test_config.py           # Profile loading, overrides, prompt_vars
-├── test_parser.py           # Block extraction, rescue parsing, nudges, JSON repair
-├── test_prompts.py          # System prompt injection, few-shot validation, templates
-├── test_context_store.py    # In-memory context, disk spill, grep/chunk
-├── test_subcall_manager.py  # Budgets, memoization, batched calls, exhaustion
-├── test_repl.py             # Sandbox lifecycle, state persistence, helpers, subcall proxying
-├── test_cli.py              # CLI front-end (ask/search/get/tag/ingest/vault pass-through)
-├── test_model_check.py      # P1–P9 probe battery against good/bad stubs
-├── test_integration.py      # Real llama-server tests (marked @pytest.mark.slow)
-├── evals/                   # Eval suites (regex-verified tasks) + pattern guards
-│   ├── counting.py          #   counting/aggregation (anchored numeric patterns)
-│   ├── fact_extraction.py   #   fact extraction
-│   ├── multi_hop.py         #   multi-hop reasoning
-│   ├── needle_search.py     #   needle-in-haystack
-│   ├── test_eval_patterns.py #  enforces the pattern convention (§16.5)
-│   └── *.json               #   data-only mirror of each suite (fallback)
-├── load/                    # Load-gate benchmarks (marked slow + load)
-├── rlm_kernel/
-│   ├── conftest.py            # temp_vault fixture
-│   ├── test_schema.py         # frontmatter validation, parsing, helper extraction
-│   ├── test_vault.py          # CRUD, atomic writes, wikilinks, round-trip
-│   ├── test_index.py          # build, FTS search, incremental update, rebuild
-│   └── test_search.py         # keyword search, kind filter, card budget, edge cases
+├── conftest.py                    # Shared fixtures (tiny_config, laptop_config)
+├── test_config.py                 # Profile loading, overrides, prompt_vars
+├── test_parser.py                 # Block extraction, rescue parsing, nudges, stderr, JSON repair
+├── test_prompts.py                # System prompt injection, few-shot validation, vault few-shots
+├── test_templates.py              # R4.1 discipline: no dead templates, no inline harness strings
+├── test_context_store.py          # Byte-offset contract, disk spill, grep/chunk/lines
+├── test_subcall_manager.py        # Budgets, memoization order, batched calls, exhaustion
+├── test_repl.py                   # Sandbox, cell correlation, caps, lazy disk context, subcalls
+├── test_root_loop_integration.py  # Turn loop, guardrail wiring, cap promise, nudge budgets
+├── test_model_backend.py          # Endpoint normalization, guarded extraction, retry, TLS warning
+├── test_logger.py                 # JSONL records, thread safety, default location, prune
+├── test_chat.py                   # Interactive session commands and wiring
+├── test_cli.py                    # CLI front-end (ask/search/get/tag/ingest/vault pass-through)
+├── test_model_check.py            # P1–P9 probe battery against good/bad stubs
+├── test_web.py                    # Routes, auth coverage, SSE auth, escaping, bounded stores
+├── test_integration.py            # Real llama-server tests (marked slow, skips if unreachable)
+├── evals/                         # Eval suites (regex-verified tasks) + pattern guards
+│   ├── counting.py                #   counting/aggregation (anchored numeric patterns)
+│   ├── fact_extraction.py         #   fact extraction
+│   ├── multi_hop.py               #   multi-hop reasoning
+│   ├── needle_search.py           #   needle-in-haystack
+│   ├── test_eval_patterns.py      #   enforces the pattern convention (§16.5)
+│   └── *.json                     #   data-only mirror of each suite (fallback loader)
+├── load/                          # Load-gate benchmarks (marked slow + load)
+└── rlm_kernel/
+    ├── conftest.py                    # temp_vault fixture (singular kind dirs)
+    ├── test_schema.py                 # frontmatter validation, parsing, helper extraction
+    ├── test_vault.py                  # CRUD, atomic writes, wikilinks, round-trip
+    ├── test_containment.py            # S4/R20 path containment + name validator
+    ├── test_index.py                  # build, FTS search, incremental update, rebuild
+    ├── test_search.py                 # keyword search, kind filter, card budget, edge cases
+    ├── test_migration.py              # PRAGMA user_version migrations
+    ├── test_gate.py                   # propose/validate/promote/demote state machine
+    ├── test_gate_execution_policy.py  # R19: static by default, opt-in sandbox, trust model
+    ├── test_promote_occupancy.py      # R16 occupancy guards, newest-first quarantine order
+    ├── test_memory.py                 # decay-ordered search, forget filters, compaction
+    ├── test_optimize.py               # GEPA promotion state hazards (R11)
+    ├── test_optimize_tls.py           # R18: no process-global litellm ssl_verify
+    ├── test_seed.py                   # seed idempotency and singular directories
+    ├── test_repl_bridge.py            # helper definitions, search/propose proxying
+    └── test_kernel_cli.py             # rlm-kernel init/index/review/promote/demote/search
 ```
+
+`tests/rlm_kernel/` was five files before the 2026-09 remediation and is fifteen
+after; the additions are what make each fixed defect falsifiable, including
+`test_containment.py` and `test_gate_execution_policy.py` for the two security
+findings (S4/R20 and S3/R19).
 
 ### 16.2 Running Tests
 
@@ -1688,22 +1760,49 @@ Load-gate benchmarks live in `tests/load/` and carry **both** markers
 `-k "not load"`, and by `-m "not load"`. Select them explicitly with
 `-m load` or `uv run pytest tests/load/test_load.py -v`.
 
+### 16.2.1 Documentation checks
+
+```bash
+# Structural lint over the living docs (fast, no dependencies)
+uv run python scripts/check_docs.py
+```
+
+It flags the defect class R25 had to repair by hand: unbalanced ``` fences (a
+stray trailing fence), a `§x.y` reference that resolves to no heading and names
+no document, a relative link whose target is missing, and UTF-8 damage (a stray
+BOM or U+FFFD — what a careless PowerShell round-trip leaves behind on
+Windows). Only the *living* documents are checked; `docs/2026*.md` are
+point-in-time records, so stale claims in them are history rather than defects.
+
 ### 16.3 Test Conventions
 
-- **Unit tests** use fake backends (`FakeBackend`) and mock subcall managers
-  (`MockSubcallMgr`). They run in under 2 seconds total.
+- **Unit tests** use fake backends (`FakeBackend`/`StubBackend`) and mock subcall
+  managers (`MockSubcallMgr`). Individual modules run in well under a second; the
+  whole fast suite is around five minutes because the root-loop and REPL tests
+  run the real turn loop against a stub model.
 - **Kernel tests** use temporary vaults (`temp_vault` fixture) with `init_git=False`.
-- **Integration tests** run against a real `llama-server` at the endpoint the
-  config points at — `https://localhost:9010/v1` (`Profile.root_endpoint`).
-  The shipped profiles default to the production model
-  **`Qwen3.5-4B-Abliterated`** (`config.py:PROFILES`), which is the model the
-  model-check battery rates SUITABLE; the in-repo `tests/test_integration.py`
-  still pins the older `LFM2.5-VL-1.6B` (that model was scored FAIL by the same
-  battery — few-shot imitation), so treat the integration model ID as stale
-  until it is updated. Integration tests are marked `@pytest.mark.slow` and take
-  ~8 seconds total.
+- **Integration tests** (`tests/test_integration.py`) run against a real
+  `llama-server`, and resolve their target from the environment:
+
+  | Variable | Default |
+  |---|---|
+  | `RLM_TEST_ENDPOINT` | `Profile.root_endpoint` — `https://localhost:9010/v1` |
+  | `RLM_TEST_MODEL` | `Profile.root_model` — `Qwen3.5-4B-Abliterated` |
+
+  They skip (rather than fail) when the endpoint is unreachable, so a machine
+  without a model server still gets a clean fast-suite-minus-`slow` run. To point
+  them at a server elsewhere:
+
+  ```bash
+  RLM_TEST_ENDPOINT=https://lunacode:9010/v1 \
+  RLM_TEST_MODEL=Qwen3.5-4B-Abliterated \
+  uv run pytest tests/test_integration.py -m slow -q
+  ```
+
+  They are marked `@pytest.mark.slow` and take about eight seconds against a
+  warm server.
 - **REPL tests** launch real subprocess workers and exercise the full TCP
-  protocol, subcall proxying, and state persistence.
+  protocol, cell-id correlation, subcall proxying, and state persistence.
 
 ### 16.4 Model-check probes (`model_check.py`) — known scoring weaknesses
 
@@ -1834,10 +1933,14 @@ class HTTPModelBackend:
         sub_model: str = "",
         verify: bool = False,
         timeout: float = 300.0,
+        headers: dict[str, str] | None = None,
     ) -> None: ...
     def chat(self, messages, *, tier, max_tokens, temperature, response_schema) -> str: ...
     def close(self) -> None: ...
 ```
+
+`normalize_endpoint(url)` and `ModelBackendError` are part of this module's public
+surface (R9).
 
 ### 17.4 `rlm_local.repl`
 
@@ -1850,12 +1953,19 @@ class REPLResult:
     warnings: list[str]
 
 class REPLSandbox:
-    def __init__(self, cell_timeout: float = 60.0, stdout_cap: int = 256 * 1024) -> None: ...
+    def __init__(self, cell_timeout: float = 60.0,
+                 stdout_cap: int = 256 * 1024,
+                 restart_after_consecutive_timeouts: int = 2) -> None: ...
     def start(self, context: Any, subcall_manager: Any,
               definitions: list[dict[str, str]] | None = None) -> None: ...
     def execute(self, code: str) -> REPLResult: ...
+    def restart_worker(self) -> None: ...
     def shutdown(self) -> None: ...
 ```
+
+`RootLoop` constructs this with `stdout_cap=config.repl_output_char_cap`, so the
+2 000/4 000/8 000-char profile cap is what the prompt advertises *and* what is
+enforced (R10).
 
 ### 17.5 `rlm_local.subcall_manager`
 
@@ -1871,7 +1981,6 @@ class SubcallManager:
         prompt_char_budget: int = 16000,
         context_total_chars: int = 0,
         shortcut_warn_fraction: float = 0.60,
-        sub_model: str = "",
     ) -> None: ...
     def llm_query(self, prompt: str, *, schema: dict[str, Any] | None = None) -> str: ...
     def llm_query_batched(self, prompts: list[str], *, schema: dict[str, Any] | None = None) -> list[str]: ...
@@ -1900,31 +2009,44 @@ class ParseResult:
 class Parser:
     def __init__(self, max_consecutive_nudges: int = 2, max_consecutive_errors: int = 3) -> None: ...
     def parse(self, text: str, *, turn: int = 0) -> ParseResult: ...
+    def parse_stderr(self, text: str, stderr_text: str) -> ParseResult | None: ...
     def check_answer_in_block(self, block: str) -> tuple[str | None, bool]: ...
     @property
     def consecutive_nudges(self) -> int: ...
     @property
     def consecutive_errors(self) -> int: ...
     def reset(self) -> None: ...
+    def reset_errors(self) -> None: ...
 
 def repair_json(text: str, schema: dict[str, Any] | None = None) -> str: ...
 ```
+
+`parse_stderr()` is the design §5.6 stage-4 entry point the root loop calls after
+a cell produced a traceback; `reset_errors()` is called after a clean cell.
+`parse()` deliberately does **not** reset the error streak (R5).
 
 ### 17.7 `rlm_local.context_store`
 
 ```python
 class Context:
-    def __len__(self) -> int: ...
-    def __getitem__(self, key: int | slice) -> str: ...
+    """Disk-backed, byte-addressed lazy handle (R1/R2)."""
+    def __init__(self, path: Path, total_bytes: int,
+                 line_offsets: list[int] | None = None) -> None: ...
+    def __len__(self) -> int: ...            # UTF-8 byte count
+    def __getitem__(self, key: int | slice) -> str: ...   # byte offsets
     def __iter__(self) -> Iterator[str]: ...
     def __str__(self) -> str: ...
     def lines(self, start: int = 0, count: int | None = None) -> Iterator[str]: ...
     def grep(self, pattern: str, max_hits: int = 50) -> list[str]: ...
     def chunk(self, size: int | None = None, by: str | None = None) -> list[str]: ...
 
+class _InMemoryContext:
+    """Same API and the same byte-addressing contract, for inputs below the
+    spill threshold."""
+
 class ContextStore:
     def __init__(self, spill_threshold: int = 1_000_000, temp_dir: str | None = None) -> None: ...
-    def ingest(self, context: str | list[str] | Sequence[str]) -> Context: ...
+    def ingest(self, context: str | list[str] | Sequence[str]) -> Context | _InMemoryContext: ...
     def cleanup(self) -> None: ...
 ```
 
@@ -1932,7 +2054,13 @@ class ContextStore:
 
 ```python
 class TrajectoryLogger:
+    """Thread-safe JSONL logger. Default path is logs/trajectories/ under the
+    working directory; retention is explicit via prune()."""
     def __init__(self, path: str | Path | None = None) -> None: ...
+    @property
+    def path(self) -> Path: ...
+    @staticmethod
+    def prune(directory: str | Path = DEFAULT_LOG_DIR, keep: int = 50) -> int: ...
     def log_start(self, query: str, context_len: int, config: dict[str, Any]) -> None: ...
     def log_turn_start(self, turn: int, max_turns: int) -> None: ...
     def log_root_message(self, role: str, content: str) -> None: ...
@@ -1949,7 +2077,11 @@ class TrajectoryLogger:
 
 ```python
 SYSTEM_PROMPT: str                          # .format() template
-FEWSHOT_EXAMPLE: list[tuple[str, str]]      # (role, content) pairs
+FEWSHOT_EXAMPLE: list[tuple[str, str]]      # (role, content) pairs: the builtin
+                                            # needle-search example plus the R25.6
+                                            # voluntary-submission example
+EXAMPLE_2_HEADER: str
+FEWSHOT_SUBMISSION_EXAMPLE: list[tuple[str, str]]
 
 def build_system_prompt(prompt_vars: dict) -> str: ...
 def build_messages(
@@ -1960,8 +2092,10 @@ def build_messages(
 def load_system_prompt_from_vault(
     prompt_vars: dict, vault: object | None = None,
 ) -> str: ...
+def parse_fewshot_body(body: str) -> list[tuple[str, str]]: ...
 def load_fewshots_from_vault(
     vault: object | None = None,
+    prompt_char_budget: int | None = None,
 ) -> list[tuple[str, str]]: ...
 ```
 
