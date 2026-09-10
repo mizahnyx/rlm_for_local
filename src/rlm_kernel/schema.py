@@ -47,6 +47,12 @@ SHA256_PATTERN = re.compile(r"^sha256:[a-f0-9]{64}$")
 
 VALID_SCHEMA_VERSIONS = {1}
 
+# S4/R20: `name` is model-controlled and is used to build page paths
+# (`promote` defaults to `f"{kind}/{name}.md"`), so it must not be able to
+# carry a separator, a traversal segment, or leading whitespace/dot. The
+# charset is deliberately narrow; legitimate names like `my.helper-v2` pass.
+NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
 
 class Frontmatter(BaseModel):
     """Validated frontmatter for a wiki page (§3.2)."""
@@ -64,6 +70,12 @@ class Frontmatter(BaseModel):
     superseded_by: str | None = Field(default=None)
     created: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    # R12: memory-decay bookkeeping. Optional and defaulted, so pages written
+    # before these fields existed parse unchanged (backward compatible), and
+    # they are deliberately excluded from `content_hash` — a search hit must
+    # not look like a content change to the index's delta pass.
+    access_count: int = Field(default=0, ge=0)
+    last_access: datetime | None = Field(default=None)
 
     model_config = {"use_enum_values": False}
 
@@ -81,6 +93,17 @@ class Frontmatter(BaseModel):
             raise ValueError(f"hash must match pattern sha256:<64-hex-chars>, got: {v}")
         return v
 
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str) -> str:
+        """Reject names that could escape the vault when turned into a path (S4)."""
+        if not NAME_PATTERN.match(v):
+            raise ValueError(
+                "name must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ "
+                f"(no separators, traversal, leading dot or whitespace), got: {v!r}"
+            )
+        return v
+
     def to_yaml(self) -> str:
         """Serialize frontmatter to YAML block (without body)."""
         import yaml
@@ -91,7 +114,7 @@ class Frontmatter(BaseModel):
         for key in [
             "schema", "id", "kind", "name", "title", "summary",
             "tags", "version", "hash", "status", "superseded_by",
-            "created", "updated",
+            "created", "updated", "access_count", "last_access",
         ]:
             if key in d and d[key] is not None:
                 val = d[key]

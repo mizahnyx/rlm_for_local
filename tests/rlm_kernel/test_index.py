@@ -150,6 +150,159 @@ class TestRebuildIndex:
         assert idx.page_count() == 5
 
 
+class TestFtsQuerySemantics:
+    """R14: a multi-word query must recall pages where the terms are not adjacent."""
+
+    @staticmethod
+    def _vault_with_scattered_page(temp_vault):
+        vault = LocalVault(temp_vault, init_git=False)
+        fm = Frontmatter(
+            schema=1, kind="definition", name="scattered", title="Scattered Notes",
+            summary="Two terms far apart in one body.",
+        )
+        body = (
+            "# Scattered Notes\n\n"
+            "The alpha reading appears at the very start of this page, and "
+            "after several intervening sentences the beta reading appears near "
+            "the end of the body."
+        )
+        vault.put(Page(fm, body), "definitions/scattered.md")
+        return vault
+
+    def test_multi_word_query_matches_non_adjacent_terms(self, temp_vault):
+        """Quoting the whole query turned it into an FTS5 *phrase* query."""
+        vault = self._vault_with_scattered_page(temp_vault)
+        idx_path = temp_vault / ".index" / "meta.sqlite"
+        idx = Index(idx_path)
+        idx.build(vault)
+        try:
+            results = idx.fts_search("alpha beta")
+        finally:
+            idx.close()
+
+        assert any(r["name"] == "scattered" for r in results), (
+            "multi-word query lost recall: terms are present but not adjacent"
+        )
+
+    def test_single_term_query_still_matches(self, temp_vault):
+        """Control: OR-expansion must not break the single-token case."""
+        vault = self._vault_with_scattered_page(temp_vault)
+        idx_path = temp_vault / ".index" / "meta.sqlite"
+        idx = Index(idx_path)
+        idx.build(vault)
+        try:
+            assert any(r["name"] == "scattered" for r in idx.fts_search("alpha"))
+        finally:
+            idx.close()
+
+    def test_absent_term_still_excluded(self, temp_vault):
+        """OR-expansion must not turn into match-anything."""
+        vault = self._vault_with_scattered_page(temp_vault)
+        idx_path = temp_vault / ".index" / "meta.sqlite"
+        idx = Index(idx_path)
+        idx.build(vault)
+        try:
+            assert idx.fts_search("xyzzynotpresent") == []
+        finally:
+            idx.close()
+
+    def test_empty_and_whitespace_queries_return_empty(self, temp_vault):
+        vault = self._vault_with_scattered_page(temp_vault)
+        idx_path = temp_vault / ".index" / "meta.sqlite"
+        idx = Index(idx_path)
+        idx.build(vault)
+        try:
+            assert idx.fts_search("") == []
+            assert idx.fts_search("   ") == []
+        finally:
+            idx.close()
+
+
+class TestReindexDeltaIdentity:
+    """R14: the delta key must include the page id, not just the content hash."""
+
+    def test_id_change_is_reindexed_and_tags_do_not_orphan(self, temp_vault):
+        vault = LocalVault(temp_vault, init_git=False)
+        index_path = temp_vault / ".index" / "meta.sqlite"
+        path = "definitions/identity.md"
+
+        fm = Frontmatter(
+            schema=1, kind="definition", name="identity", title="Identity",
+            summary="Identical content.", tags=["alpha", "beta"],
+        )
+        body = "# Identity\n\nBody that does not change."
+        vault.put(Page(fm, body), path)
+        old_id = fm.id
+
+        idx = Index(index_path)
+        idx.build(vault)
+        assert idx.get_page(path)["id"] == old_id
+
+        # Rewrite the same content under a NEW ULID (e.g. page regenerated).
+        replacement = Frontmatter(
+            schema=1, kind="definition", name="identity", title="Identity",
+            summary="Identical content.", tags=["alpha", "beta"],
+        )
+        assert replacement.id != old_id
+        # Precondition that makes this a real regression test: the content hash
+        # is id-independent, so a hash-only delta key cannot see the change.
+        assert (Page(replacement, body).content_hash
+                == Page(fm, body).content_hash)
+        vault.put(Page(replacement, body), path)
+
+        idx.reindex_delta(vault)
+
+        row = idx.get_page(path)
+        assert row["id"] == replacement.id, "index kept the stale ULID"
+        orphan_rows = idx.conn.execute(
+            "SELECT COUNT(*) FROM tags WHERE page_id = ?", (old_id,)
+        ).fetchone()[0]
+        assert orphan_rows == 0, "tags stayed keyed to the old ULID"
+        new_rows = idx.conn.execute(
+            "SELECT COUNT(*) FROM tags WHERE page_id = ?", (replacement.id,)
+        ).fetchone()[0]
+        assert new_rows == 2
+        idx.close()
+
+    def test_rebuild_equals_delta_after_id_rewrite(self, temp_vault):
+        """Same invariant, stated as rebuild/delta equivalence."""
+        vault = LocalVault(temp_vault, init_git=False)
+        index_path = temp_vault / ".index" / "meta.sqlite"
+        path = "definitions/identity.md"
+
+        fm = Frontmatter(schema=1, kind="definition", name="identity",
+                         title="Identity", summary="Same.", tags=["t1"])
+        body = "# Identity\n\nBody."
+        vault.put(Page(fm, body), path)
+
+        idx = Index(index_path)
+        idx.build(vault)
+        replacement = Frontmatter(schema=1, kind="definition", name="identity",
+                                  title="Identity", summary="Same.", tags=["t1"])
+        vault.put(Page(replacement, body), path)
+        idx.reindex_delta(vault)
+        delta_tags = sorted(
+            tuple(r) for r in idx.conn.execute("SELECT page_id, tag FROM tags")
+        )
+        delta_pages = sorted(
+            tuple(r) for r in idx.conn.execute("SELECT id, path FROM pages")
+        )
+        idx.close()
+
+        idx2 = Index(index_path)
+        idx2.build(vault)
+        rebuild_tags = sorted(
+            tuple(r) for r in idx2.conn.execute("SELECT page_id, tag FROM tags")
+        )
+        rebuild_pages = sorted(
+            tuple(r) for r in idx2.conn.execute("SELECT id, path FROM pages")
+        )
+        idx2.close()
+
+        assert delta_pages == rebuild_pages
+        assert delta_tags == rebuild_tags
+
+
 class TestPropertyRebuildDeltaEquivalence:
     """rebuild and reindex_delta must produce identical index state."""
 

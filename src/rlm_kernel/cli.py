@@ -3,7 +3,7 @@
 Commands:
   rlm-kernel init [--vault PATH]       Seed a new vault
   rlm-kernel index [--rebuild]          Rebuild the search index
-  rlm-kernel review                     List quarantined proposals
+  rlm-kernel review [--execute]         Review quarantined proposals (static by default)
   rlm-kernel promote PATH               Promote a quarantined page
   rlm-kernel demote PATH [--by PATH]    Demote an active page
   rlm-kernel search QUERY [--kind ...]  Search the vault
@@ -42,11 +42,21 @@ def main(argv: list[str] | None = None) -> int:
     # review
     p_review = sub.add_parser("review", help="List quarantined proposals")
     p_review.add_argument("--vault", type=Path, default=_default_vault())
+    p_review.add_argument(
+        "--execute",
+        action="store_true",
+        help="Also run helper code in the sandbox (opt-in; not containment)",
+    )
 
     # promote
     p_promote = sub.add_parser("promote", help="Promote a quarantined page")
     p_promote.add_argument("path", help="Page path within vault")
     p_promote.add_argument("--vault", type=Path, default=_default_vault())
+    p_promote.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite a deprecated/superseded page at the target path",
+    )
 
     # demote
     p_demote = sub.add_parser("demote", help="Demote an active page")
@@ -120,8 +130,18 @@ def _cmd_index(args: argparse.Namespace) -> int:
 
 
 def _cmd_review(args: argparse.Namespace) -> int:
+    """Review quarantined proposals.
+
+    Static validation by default (S3/R19). `--execute` additionally runs helper
+    code in the restricted-builtin sandbox — an opt-in convenience for trusted
+    authors, never a containment boundary.
+    """
     from rlm_kernel.gate import validate
     from rlm_kernel.vault import LocalVault
+
+    execute = bool(getattr(args, "execute", False))
+    mode = "executing sandbox" if execute else "static validation only"
+    print(f"Review mode: {mode}")
 
     vault = LocalVault(args.vault, init_git=False)
     pending = vault.list(prefix="quarantine")
@@ -129,7 +149,7 @@ def _cmd_review(args: argparse.Namespace) -> int:
         print("No pending proposals.")
         return 0
     for p in pending:
-        report = validate(p, vault=vault)
+        report = validate(p, vault=vault, execute=execute)
         status = "PASS" if report.passed else "FAIL"
         print(f"  {p.path} — {p.frontmatter.title} [{status}]")
         print(f"    kind={p.frontmatter.kind.value} name={p.name}")
@@ -153,7 +173,7 @@ def _cmd_promote(args: argparse.Namespace) -> int:
     if page is None:
         print(f"Page not found: {args.path}", file=sys.stderr)
         return 1
-    new_path = promote(vault, page)
+    new_path = promote(vault, page, force=bool(getattr(args, "force", False)))
     print(f"Promoted: {args.path} -> {new_path}")
     return 0
 

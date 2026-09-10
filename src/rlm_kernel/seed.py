@@ -254,7 +254,7 @@ def _seed_templates(vault: VaultStore) -> None:
 
 
 def _seed_helpers(vault: VaultStore) -> None:
-    """Seed builtin helper pages under helpers/."""
+    """Seed builtin helper pages under ``helper/`` (singular — gate.promote's convention)."""
 
     helpers: list[tuple[str, str, str, str, str, str]] = [
         (
@@ -311,7 +311,7 @@ def _seed_helpers(vault: VaultStore) -> None:
                 body=body,
                 tags=["builtin"],
             ),
-            f"helpers/{name}.md",
+            f"helper/{name}.md",
         )
 
 
@@ -517,5 +517,5 @@ def _seed_fewshots(vault: VaultStore) -> None:
             body=_FEWSHOT_EXAMPLE_BODY,
             tags=["fewshot", "example"],
         ),
-        "fewshots/example.md",
+        "fewshot/example.md",
     )

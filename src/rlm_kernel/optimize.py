@@ -17,7 +17,9 @@ from __future__ import annotations
 import json
 import re
 import sys
+import threading
 import time
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -28,8 +30,8 @@ TARGET_MAP: dict[str, tuple[str, str]] = {
     "prologue": ("contract/templates/prologue.md", "Decomposition prologue"),
     "how-to-work": ("contract/how-to-work.md", "How to work orchestrator addendum"),
     "nudges": ("contract/templates/nudge-no-block.md", "Nudge template for missing code blocks"),
-    "fewshots": ("fewshots/example.md", "Few-shot transcript example"),
-    "helper-docs": ("helpers/grep.md", "Helper documentation template"),
+    "fewshots": ("fewshot/example.md", "Few-shot transcript example"),
+    "helper-docs": ("helper/grep.md", "Helper documentation template"),
 }
 
 
@@ -49,6 +51,16 @@ def _get_target_text(vault: Any, target: str) -> str | None:
 
 
 # ── Evaluator wrapper (D2) ─────────────────────────────────────────────────
+
+# R11-4: the evaluator mutates the *live* vault (it writes the candidate into
+# the target page so rlm_local reads it), evaluates, then restores. GEPA may
+# evaluate candidates in parallel (EngineConfig.max_workers), so that
+# mutate/eval/restore window is a critical section: without this lock a second
+# worker injects its candidate while the first is still evaluating, and the
+# first one silently measures the wrong text. Correctness beats throughput —
+# evaluation is serialized on purpose.
+_EVALUATOR_LOCK = threading.Lock()
+
 
 @dataclass
 class EvalResult:
@@ -203,31 +215,36 @@ def make_gepa_evaluator(
     bridge = _make_bridge(vault)
 
     def evaluator(candidate: str) -> tuple[float, dict[str, Any]]:
-        # Inject candidate into vault for evaluation
-        try:
-            page = vault.get(target_path)
-            if page is not None:
-                page.body = candidate
-                vault.put(page, target_path)
-        except Exception:
-            pass
-
-        # Evaluate
-        result = evaluate_candidate(
-            candidate, suite_name, eval_dir,
-            profile=profile, max_turns=max_turns, split=split,
-            kernel_bridge=bridge,
-        )
-
-        # Restore original
-        if original is not None:
+        # R11-4: the whole mutate → evaluate → restore window is one critical
+        # section (see _EVALUATOR_LOCK) and is restored in a `finally`, so an
+        # exception from load_suite/completion can never leave candidate text
+        # in the production vault.
+        with _EVALUATOR_LOCK:
             try:
-                page = vault.get(target_path)
-                if page is not None:
-                    page.body = original
-                    vault.put(page, target_path)
-            except Exception:
-                pass
+                # Inject candidate into vault for evaluation
+                try:
+                    page = vault.get(target_path)
+                    if page is not None:
+                        page.body = candidate
+                        vault.put(page, target_path)
+                except Exception:
+                    pass
+
+                result = evaluate_candidate(
+                    candidate, suite_name, eval_dir,
+                    profile=profile, max_turns=max_turns, split=split,
+                    kernel_bridge=bridge,
+                )
+            finally:
+                # Restore original — always, including on exception/timeout.
+                if original is not None:
+                    try:
+                        page = vault.get(target_path)
+                        if page is not None:
+                            page.body = original
+                            vault.put(page, target_path)
+                    except Exception:
+                        pass
 
         side_info = {
             "passed": result.passed,
@@ -347,10 +364,33 @@ def run_optimization(
     # Reflection model = the harness's root tier, reached via litellm's
     # openai/ provider (any OpenAI-compatible local server).
     import litellm  # noqa: F401 — required at runtime by gepa.lm.LM
-    litellm.ssl_verify = False  # local self-signed certs (module-level setting)
 
     from rlm_local.config import load_config
+    from rlm_local.model_backend import _is_loopback
     harness_cfg = load_config(profile)
+
+    # R18: this used to be `litellm.ssl_verify = False`, a **process-global**
+    # switch that would silently disable certificate verification for every
+    # litellm call made anywhere in the process, including a later remote one.
+    # litellm accepts `ssl_verify` per call, so pass it as a reflection-model
+    # kwarg instead — as narrow as litellm allows.
+    reflection_kwargs: dict[str, Any] = {
+        "api_base": harness_cfg.root_endpoint,
+        "api_key": "local",
+        "ssl_verify": False,
+    }
+    if (
+        str(harness_cfg.root_endpoint).startswith("https://")
+        and not _is_loopback(str(harness_cfg.root_endpoint))
+    ):
+        warnings.warn(
+            f"GEPA reflection calls to {harness_cfg.root_endpoint!r} run with "
+            f"TLS verification disabled (self-signed local server). The "
+            f"setting is scoped to this call, not the process.",
+            UserWarning,
+            stacklevel=2,
+        )
+
     engine_kwargs: dict[str, Any] = {"max_metric_calls": max_metric_calls}
     if max_workers is not None:
         engine_kwargs["max_workers"] = max_workers
@@ -361,10 +401,7 @@ def run_optimization(
         engine=EngineConfig(**engine_kwargs),
         reflection=ReflectionConfig(
             reflection_lm=f"openai/{harness_cfg.root_model}",
-            reflection_lm_kwargs={
-                "api_base": harness_cfg.root_endpoint,
-                "api_key": "local",
-            },
+            reflection_lm_kwargs=reflection_kwargs,
         ),
     )
 
@@ -412,18 +449,26 @@ def run_optimization(
     if best_score > baseline_result.score and held_out_result is not None and held_out_result.score >= baseline_result.score:
         try:
             from rlm_kernel.gate import propose, validate, promote, demote
-            from rlm_kernel.schema import PageStatus
+            from rlm_kernel.schema import PageKind, PageStatus
             run_id = f"gepa-run-{int(time.time())}"
             target_path, _ = TARGET_MAP[target]
 
-            # Archive the incumbent via demote (superseded_by the optimized version)
+            # R11-1/2/3: the incumbent is read first (kind + version lineage)
+            # and is NOT touched until the candidate has passed validation.
+            # Order is strictly: propose → validate → (pass?) demote → promote,
+            # so a rejected candidate leaves the live page exactly as it was.
             incumbent = vault.get(target_path)
-            if incumbent is not None and incumbent.frontmatter.status == PageStatus.ACTIVE:
-                demote(vault, incumbent, superseded_by=target_path)
+            incumbent_kind = (
+                incumbent.frontmatter.kind
+                if incumbent is not None
+                else PageKind.CONTRACT
+            )
 
-            # Propose the candidate through quarantine
+            # Propose the candidate through quarantine, as a page of the
+            # incumbent's kind (optimizing fewshots/nudges must not mint
+            # contract pages).
             qpath = propose(
-                vault, "contract", f"optimized-{target}",
+                vault, incumbent_kind, f"optimized-{target}",
                 str(best_text),
                 f"GEPA optimization of {target} — {best_score:.1%} vs baseline {baseline_result.score:.1%}",
             )
@@ -435,13 +480,22 @@ def run_optimization(
                     # Add lineage to body before promotion
                     qpage.body = f"<!-- optimized_by: {run_id} -->\n{qpage.body}"
                     qpage.frontmatter.tags = list(qpage.frontmatter.tags) + ["gepa-optimized"]
-                    # Promote directly into the target path (replaces incumbent)
+                    # Archive the incumbent via demote (superseded_by the
+                    # optimized version) — only now that the candidate is known
+                    # promotable.
+                    if incumbent is not None and incumbent.frontmatter.status == PageStatus.ACTIVE:
+                        demote(vault, incumbent, superseded_by=target_path)
+                    # Promote directly into the target path (replaces incumbent).
+                    # promote() derives version from the occupant (R11-2).
                     promote(vault, qpage, target_path=target_path)
                     vault.git_commit(
                         f"kernel: GEPA optimize {target} ({run_id}) — "
                         f"{best_score:.1%} vs baseline {baseline_result.score:.1%}"
                     )
                     status = "promoted"
+                else:
+                    # Candidate rejected: incumbent untouched, reason surfaced.
+                    status = "validation_failed"
         except Exception:
             status = "gate_error"
     # G-K4-1: Write run-state to JSONL log for checkpoint/resume

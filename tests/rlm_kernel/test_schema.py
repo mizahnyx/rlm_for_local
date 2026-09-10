@@ -69,6 +69,62 @@ class TestFrontmatter:
                          summary=".", id="01JZK4ABCDEFGHIJKLMNOPQRST")
         assert fm.id == "01JZK4ABCDEFGHIJKLMNOPQRST"
 
+    # ── R12: optional access bookkeeping fields ────────────────────────────
+
+    def test_access_fields_default_when_absent(self):
+        """R12: old pages (no access fields on disk) still parse."""
+        legacy = (
+            "---\n"
+            "schema: 1\n"
+            "id: 01JZK4ABCDEFGHIJKLMNOPQRST\n"
+            "kind: note\n"
+            "name: legacy-note\n"
+            'title: "Legacy Note"\n'
+            'summary: "Written before access tracking existed."\n'
+            "tags: [memory]\n"
+            "version: 3\n"
+            "status: active\n"
+            "created: 2026-07-01T00:00:00+00:00\n"
+            "updated: 2026-07-01T00:00:00+00:00\n"
+            "---\n"
+            "Body of a legacy note.\n"
+        )
+        page = parse_page(legacy, "memory/notes/legacy-note.md")
+
+        assert page.frontmatter.access_count == 0
+        assert page.frontmatter.last_access is None
+
+    def test_access_fields_round_trip(self):
+        from datetime import datetime, timezone
+
+        now = datetime(2026, 8, 1, 12, 0, 0, tzinfo=timezone.utc)
+        fm = Frontmatter(
+            schema=1, kind="note", name="hot-note", title="Hot Note",
+            summary="Frequently recalled.", access_count=11, last_access=now,
+        )
+        page = Page(frontmatter=fm, body="body")
+
+        reparsed = parse_page(page.to_markdown(), "memory/notes/hot-note.md")
+        assert reparsed.frontmatter.access_count == 11
+        assert reparsed.frontmatter.last_access == now
+
+    def test_access_fields_excluded_from_content_hash(self):
+        """A search hit must not look like a content change to the index."""
+        fm = Frontmatter(schema=1, kind="note", name="n", title="N", summary="s.")
+        before = Page(frontmatter=fm, body="body").content_hash
+
+        from datetime import datetime, timezone
+        fm.access_count = 42
+        fm.last_access = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        after = Page(frontmatter=fm, body="body").content_hash
+
+        assert before == after
+
+    def test_negative_access_count_rejected(self):
+        with pytest.raises(ValidationError):
+            Frontmatter(schema=1, kind="note", name="n", title="N", summary="s.",
+                        access_count=-1)
+
     def test_summary_max_length(self):
         long_summary = "x" * 201
         with pytest.raises(ValidationError):

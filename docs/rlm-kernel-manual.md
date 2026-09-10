@@ -289,6 +289,8 @@ hits = grep("blue", max_hits=3)
 | `superseded_by` | `str` | No | Page path of the replacement (P3 anti-rot). |
 | `created` | `datetime` | Auto | ISO 8601 creation timestamp (UTC). |
 | `updated` | `datetime` | Auto | ISO 8601 last-modified timestamp (UTC). |
+| `access_count` | `int` | No | Memory-decay bookkeeping: number of search hits. Default `0`; absent on pages written before schema 1 gained the field (R12). |
+| `last_access` | `datetime` | No | Memory-decay bookkeeping: timestamp of the last search hit. Default `null`; when null, decay falls back to `created`. Both access fields are excluded from `content_hash`, so a search hit never looks like a content change to the index. |
 
 ### 3.3 Page Kinds and Their Roles
 
@@ -396,13 +398,13 @@ $VAULT_ROOT/                          # default: ~/.local/share/rlm-kernel/vault
 │       └── ...
 ├── definitions/                      # Ontology: concept pages
 │   └── <slug>.md
-├── helpers/                          # Capabilities: executable Python
+├── helper/                           # Capabilities: executable Python
 │   ├── peek.md
 │   ├── grep.md
 │   ├── chunk.md
 │   ├── map_query.md
 │   └── show_vars.md
-├── fewshots/                         # Worked transcripts
+├── fewshot/                          # Worked transcripts
 │   └── <slug>.md
 ├── memory/
 │   ├── notes/                        # Atomic knowledge notes
@@ -443,8 +445,8 @@ from rlm_kernel.vault import LocalVault
 vault = LocalVault(Path.home() / ".local" / "share" / "rlm-kernel" / "vault")
 
 # CRUD
-page = vault.get("helpers/grep.md")
-vault.put(page, "helpers/grep.md")
+page = vault.get("helper/grep.md")
+vault.put(page, "helper/grep.md")
 vault.delete("definitions/obsolete.md")
 exists = vault.exists("contract/repl-contract.md")
 
@@ -455,6 +457,39 @@ definitions = vault.list(prefix="definitions/")
 # Wikilinks (case-insensitive)
 target = vault.resolve_wikilink("blue-widget")
 ```
+
+#### 4.3.1 Path containment (S4/R20)
+
+Every path handed to `get`, `put`, `delete` and `exists` goes through
+`LocalVault._resolve()`, which:
+
+1. rejects an empty or non-string path;
+2. rejects **absolute** paths (POSIX `/…`, Windows `C:\…` / `C:/…`, UNC);
+3. rejects any `..` segment after normalization;
+4. confirms the resolved path is still inside the resolved vault root
+   (`is_relative_to`) — the same containment pattern the web `/docs` route uses.
+
+A violation raises `ValueError`. `exists()` raises too rather than returning
+`False`: a traversal attempt is an error, not a "no".
+
+```python
+vault.get("../escape.md")   # ValueError
+vault.put(page, "/etc/x")   # ValueError
+vault.exists("a/../../x")   # ValueError
+
+vault.get("helper/my.helper-v2.md")   # fine — dotted names are legitimate
+```
+
+Page **names** are constrained independently by
+`schema.NAME_PATTERN` (`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`), so
+`promote`'s default `f"{kind}/{name}.md"` target cannot escape by construction —
+`name` is model-controlled, and a validator is the right place to stop it.
+Leading dots, separators, whitespace and traversal sequences are rejected at
+parse time, which means a page carrying `name: ../../foo` cannot even be read
+into a `Page`.
+
+Before R20 neither check existed: paths were computed with a bare
+`root / path`, and `name` was only length-limited.
 
 ### 4.4 Atomic Writes
 
@@ -498,6 +533,41 @@ matching by filename stem:
 # (case-insensitive)
 page = vault.resolve_wikilink("target-page")
 ```
+
+### 4.7 Directory Convention (and the One-Time Migration)
+
+**Every page lives in a directory named for its own kind, in the singular** —
+`helper/<name>.md`, `fewshot/<name>.md`, `definition/<name>.md`,
+`contract/<name>.md`. This is not decoration: it is exactly what
+`gate.promote` computes for a page with no explicit `target_path`
+(`f"{page.kind.value}/{page.name}.md"`), so a proposed page and a seeded page
+of the same kind land side by side instead of in two competing trees. (The
+template pages are the one deliberate exception: they sit under
+`contract/templates/` because they are contract-layer text — see §10.2.)
+
+**Pre-R13 vaults are not migrated automatically.** Vaults seeded before the
+convention was unified contain `helpers/` and `fewshots/`. Re-seeding will not
+move them (`seed_vault` skips paths that already exist, and the new singular
+paths are different paths — you would get a duplicate copy of every builtin).
+Move them once, by hand, before your next index rebuild:
+
+```bash
+# One-time migration: plural kind dirs → singular (run at the vault root).
+cd "$VAULT_ROOT"                      # e.g. ~/.local/share/rlm-kernel/vault
+for pair in helpers:helper fewshots:fewshot; do
+  old="${pair%%:*}"; new="${pair##*:}"
+  [ -d "$old" ] || continue
+  mkdir -p "$new"
+  git mv "$old"/*.md "$new"/ 2>/dev/null || mv "$old"/*.md "$new"/
+  rmdir "$old" 2>/dev/null || true
+done
+rm -rf .index                          # derived — rebuilt from markdown
+```
+
+Then rebuild the index (`rlm-kernel index --rebuild`) and confirm the pages are
+visible under their kind (`rlm-kernel search "regex" --kind helper`). Nothing in
+the page content refers to the old directories — wikilinks resolve by filename
+stem (§4.6), not by path — so the move is content-preserving.
 
 ---
 
@@ -563,9 +633,13 @@ idx.reindex_delta(vault)
 ```
 
 **Rebuild** clears all tables and re-indexes every page from the vault.
-**Incremental update** (`reindex_delta`) walks the vault, compares content
-hashes against indexed entries, and only modifies pages that have been
-added, changed, or deleted.
+**Incremental update** (`reindex_delta`) walks the vault, compares each page
+against its indexed entry, and only modifies pages that have been added,
+changed, or deleted. The comparison key is **content hash *and* page ULID**
+(R14): `content_hash` intentionally excludes the identity fields, so a page
+rewritten with a fresh ULID but identical content compares hash-equal — keying
+on the hash alone skipped that page and left the index (plus every `tags` row,
+which is keyed by `page_id`) pointing at a ULID that no longer existed.
 
 ### 5.3 Full-Text Search
 
@@ -581,6 +655,28 @@ idx.close()
 
 The FTS5 query uses BM25 ranking. Results are ordered by relevance score.
 The optional `kinds` parameter filters to specific page kinds.
+
+**Query semantics (changed in R14).** The query string is split on whitespace
+and every token is individually quoted and OR-ed together, so `regex search`
+becomes `"regex" OR "search"`:
+
+| Query | FTS5 expression | Meaning |
+|---|---|---|
+| `regex` | `"regex"` | pages containing the token `regex` |
+| `regex search` | `"regex" OR "search"` | pages containing *either* token; BM25 ranks pages containing both highest |
+| `blue widget` | `"blue" OR "widget"` | as above |
+
+Quoting each token keeps the original exact-match intent — no FTS5 operator
+injection (`NOT`, `NEAR`, `*`), no prefix or stemming surprises, and embedded
+double quotes are escaped by doubling. What changed is the *joining* operator.
+The previous implementation wrapped the entire query in one pair of quotes
+(`"regex search"`), which FTS5 parses as a **phrase** query: it matched only
+adjacent tokens. Every multi-word search therefore lost recall — a page holding
+"regex" and "search" in different sentences was silently invisible — while
+still *looking* like it worked, because single-word queries were unaffected.
+OR-expansion restores multi-word recall; relevance ordering is still BM25, so
+a page containing more of the tokens outranks one containing fewer. A query
+with no tokens (empty or whitespace-only) returns no results.
 
 ### 5.4 The Search API
 
@@ -769,11 +865,13 @@ The `propose` function:
 from rlm_kernel.gate import validate, ValidationReport
 
 page = vault.get("quarantine/01KYC....md")
-report = validate(page, vault=vault)
+report = validate(page, vault=vault)              # static validation only
+report_exec = validate(page, vault=vault, execute=True)  # also run the sandbox
 
-print(report.passed)   # True if no errors
-print(report.errors)   # Fatal issues blocking promotion
-print(report.warnings) # Advisory issues
+print(report.passed)    # True if no errors
+print(report.errors)    # Fatal issues blocking promotion
+print(report.warnings)  # Advisory issues
+print(report.executed)  # False → the verdict came from static checks only
 ```
 
 Validation is **deterministic and model-free** — no LLM involved.
@@ -781,11 +879,38 @@ Kind-specific checks:
 
 | Kind | Validation Rules |
 |---|---|
-| **helper** | Import allowlist (stdlib only; block `os.system`, `subprocess`, `socket`, `ctypes`, `importlib`). Sandbox execution: run in restricted namespace, verify no exceptions, no network access. Signature match: declared signature must correspond to actual callable. |
-| **contract / template** | Slot variables present (`{repl_cap}` etc.). Body length within 8192-byte cap. |
+| **helper** | AST parse; import allowlist (stdlib only; block `os.system`, `subprocess`, `socket`, `ctypes`, `importlib`); blocked-pattern scan; static check that the code defines a callable with the page's name; static signature match between `## Signature` and the implementation's `def`. With `execute=True` the code is additionally `exec`'d in a restricted namespace. |
+| **contract / template** | Slot variables present (`{repl_cap}` etc.). Body length within the 8192-**byte** cap (measured as UTF-8 bytes, so 3000 CJK characters = 9000 bytes does not fit). |
 | **definition / note** | Wikilinks resolve to existing pages (when vault provided). |
 | **fewshot** | Must contain example sections (`## Probe`, `## Plan`, etc.). |
 | **all** | Status must be `pending`. Must be in `quarantine/`. |
+
+#### 7.3.1 Trust model — the gate is a quality gate, not containment
+
+**Execution is opt-in.** `validate()` is static by default (`execute=False`);
+`rlm-kernel review` prints `Review mode: static validation only` and only runs
+the sandbox when `--execute` is passed.
+
+The reason is that the sandbox is **not a security boundary**. It is restricted
+builtins plus a substring blocklist, and:
+
+- restricted-builtin `exec` is escapable on CPython — a
+  `().__class__.__bases__[0].__subclasses__()` chain reaches arbitrary classes
+  and the substring blocklist has no entry for it. Static validation *passes*
+  such a helper, and the report says so rather than showing a silent green;
+- `exec` only **defines** the function. It never calls it, so a helper whose body
+  raises is not caught even with `execute=True`. Only definition-time failures
+  (bad decorators, module-level raises, imports) are visible;
+- the import allowlist and pattern scan are tripwires for the obvious cases, not
+  a policy engine.
+
+What the gate *is* good for: keeping malformed, mis-signed, or obviously hostile
+content out of the live prompt, and forcing every model-authored page through a
+review step. Treat `--execute` as a convenience for code you already trust, and
+never as a sandbox you can point at untrusted input.
+
+`tests/rlm_kernel/test_gate_execution_policy.py` pins all of this, including the
+two limitations above.
 
 ### 7.4 Promote
 
@@ -793,17 +918,38 @@ Kind-specific checks:
 from rlm_kernel.gate import promote
 
 new_path = promote(vault, page)
-# Moves from quarantine/01KYC....md to helpers/extract-dates.md
+# Moves from quarantine/01KYC....md to helper/extract-dates.md
 # Bumps version, updates hash, sets status: active, git commit
 ```
 
 Promotion performs:
-1. Computes the target path based on kind and name (`helpers/extract-dates.md`).
-2. Conflict handling: if a page already exists at the target, increments version.
-3. Updates frontmatter: `status: active`, `version += 1`, `hash = content_hash`, timestamps refreshed.
-4. Removes the quarantined original.
-5. Writes the promoted page to its target namespace.
-6. Returns the new path.
+1. Validates the page (again) and raises `ValueError` if it does not pass — a
+   rejected page never reaches the live namespace. Validation here is the
+   **static** mode (§7.3.1): promotion never executes model-authored code.
+2. Computes the target path based on kind and name (`helper/extract-dates.md`),
+   or uses `target_path` verbatim when the caller supplied one.
+3. Reads the page already occupying the target path, if any, and sets
+   `version = occupant.version + 1` — **version lineage follows the page being
+   replaced**. (Proposed pages start at `version: 0`; a bare `version + 1` would
+   reset the counter to 1 on every promoted replacement, so after N optimizer
+   runs the live prompt would still claim version 1.)
+4. Updates frontmatter: `status: active`, `hash = content_hash`, timestamps refreshed.
+5. Removes the quarantined original.
+6. Writes the promoted page to its target namespace.
+7. Returns the new path.
+
+**Occupancy guards.** With no `target_path`, promotion is refused when the target
+path is occupied:
+
+| Occupant status | Result |
+|---|---|
+| `active` | `ValueError` — demote it first or choose a different name |
+| `deprecated` / `superseded` | `ValueError` — pass `force=True` (CLI: `--force`) to overwrite. Silently replacing a page that records "this was replaced by X" destroys the provenance chain, so it takes an explicit decision. |
+| none | promoted |
+
+An explicit `target_path` means the caller takes responsibility for the
+replacement — that is how the optimizer replaces an incumbent in place (D-K4-1a),
+and the occupancy guard does not apply.
 
 ### 7.5 Reject
 
@@ -823,7 +969,7 @@ from rlm_kernel.gate import demote
 demote(vault, page)
 
 # Demote to superseded, linking to replacement
-demote(vault, page, superseded_by="helpers/extract-dates-v2.md")
+demote(vault, page, superseded_by="helper/extract-dates-v2.md")
 ```
 
 Demotion transitions `active → deprecated` or `active → superseded`. A
@@ -841,6 +987,23 @@ from rlm_kernel.gate import verify_quarantine_isolation
 # Verify no quarantine pages leak into normal search
 assert verify_quarantine_isolation(vault, index_path)
 ```
+
+`verify_quarantine_isolation` compares the **index against a fresh walk of the
+vault** (R14) and returns `False` if any of these hold:
+
+1. A path under `quarantine/` appears in the index's `pages` table.
+2. An indexed path has no corresponding file in the vault walk — an orphan row
+   left behind by a deleted or moved page (the index was never reconciled).
+3. A quarantine file found by the vault walk also appears in the index.
+
+The second check is the substantive one. Before R14 it compared
+`search_quarantine(vault)` against `vault.list(prefix="quarantine")` — the same
+call twice, under a different name — so the function could only ever detect a
+quarantine path that was *also* caught by the first check, and could not detect
+index drift at all. Run `rlm-kernel index --rebuild` to repair a vault that
+fails this check.
+
+Related guarantees:
 
 - **Normal search** (`search_vault` with `include_quarantine=False`): excludes `quarantine/`.
 - **Quarantine-aware search** (`include_quarantine=True`): merges quarantined results at the end.
@@ -882,11 +1045,26 @@ rule-based, keeping memory operations fast and deterministic.
 # Hybrid search over notes/topics/caches
 results = mgr.search(vault, index_path, "blue widget", k=5)
 for r in results:
-    print(f"{r['name']}: {r['summary']}")
+    print(f"{r['name']}: {r['summary']} (decay={r['decay']})")
 ```
 
-Memory search filters to `kind: note|topic|cache` and applies decay-weighted
-scoring (see §8.5).
+Memory search filters to `kind: note|topic|cache`, retrieves a BM25 pool four
+times wider than `k`, then re-ranks that pool by **decay-weighted relevance**
+(see §8.5) before trimming to `k`:
+
+$$\text{combined} = \frac{1}{1 + |\text{bm25 rank}|} \times \text{decay\_score}$$
+
+Each returned card carries the `decay` value it was ranked by, so ranking is
+inspectable rather than implicit. Retrieving the wider pool first is what makes
+the decay term load-bearing: a plain `k`-limited BM25 cut would already have
+discarded the freshly-accessed notes before decay saw them.
+
+Returning a hit **records the hit**: `access_count += 1` and
+`last_access = now` are written back through the same atomic `vault.put` path
+as every other page mutation. This is what gives `decay_score` real inputs —
+before R12 those fields existed nowhere, so the decay curve always ran on
+synthetic defaults. Only the notes actually returned are touched; the rest of
+the corpus is left alone.
 
 ### 8.4 Core Memory
 
@@ -915,14 +1093,21 @@ The page is protected from `forget()` — it cannot be accidentally deleted.
 count = mgr.forget(vault, query="obsolete widget")
 
 # Forget by age
-count = mgr.forget(vault, older_than=30)  # days
+count = mgr.forget(vault, older_than=timedelta(days=30))
+
+# Both filters combine with AND: old notes that ALSO match the query
+count = mgr.forget(vault, query="obsolete widget", older_than=timedelta(days=30))
 
 # Forget all non-core notes
 count = mgr.forget(vault)
 ```
 
 The `forget` method removes or deprecates notes matching the criteria.
-Core memory is never targeted.
+Core memory is never targeted. `older_than` takes a `timedelta` (not a bare
+day count), and when both `query` and `older_than` are supplied a note must
+satisfy **both** — a query match alone is not enough, and age alone is not
+enough. This matches the docstring; before R12 the code silently let `query`
+win and ignored `older_than` whenever a query was given.
 
 ### 8.6 Decay Arithmetic
 
@@ -950,14 +1135,28 @@ memory search ranking.
 ### 8.7 Compaction
 
 ```python
+# Preview: exactly the notes a merge would absorb
+candidates = mgr.compact(vault, index_path, similarity_threshold=0.8, dry_run=True)
+print(f"{len(candidates)} note(s) would be absorbed")
+
 # Merge near-duplicate notes by title similarity
-merge_count = mgr.compact(vault, index_path, similarity_threshold=0.8)
+merge_count = mgr.compact(vault, index_path, similarity_threshold=0.8, dry_run=False)
+assert merge_count == len(candidates)  # same clustering, by construction
 ```
 
-Compaction finds pairs of notes with similar titles (Jaccard similarity
-on word sets) and merges them: the newer note absorbs the older one's
-body content, and the older one is deleted. This prevents unbounded
-note accumulation ("image rot") without requiring LLM judgment.
+Compaction clusters notes under `memory/notes/` by title similarity
+(`SequenceMatcher` ratio ≥ threshold, greedy single-linkage from the newest
+note) and merges each cluster: the newest note absorbs the others' bodies
+under a `<!-- merged from <path> -->` marker, and the older ones are marked
+`superseded` with `superseded_by` pointing at the keeper. This prevents
+unbounded note accumulation ("image rot") without requiring LLM judgment.
+
+Dry-run and merge call the **same** `_cluster_notes()` function (R12), so the
+dry-run count is the number of notes a merge would absorb — the two paths
+cannot disagree, and one candidate row is emitted per absorbed note
+(`title_a` = keeper, `title_b` = absorbed, `similarity`). The previous
+implementation ran two different grouping loops and carried a `merged` set
+that was never populated.
 
 ---
 
@@ -1034,9 +1233,31 @@ The optimizer:
 3. GEPA's reflection LM proposes improved candidates.
 4. Each candidate is evaluated against the train split.
 5. The best candidate is validated on the held-out split.
-6. If held-out score ≥ baseline, the candidate is promoted through the gate
-   with `optimized_by: gepa-run-<id>` lineage in frontmatter.
+6. If held-out score ≥ baseline and train score > baseline, the candidate is
+   promoted through the gate with `optimized_by: gepa-run-<id>` lineage in the
+   body and the `gepa-optimized` tag in frontmatter.
 7. Instant rollback via git if needed.
+
+**Promotion order is load-bearing (R11).** The sequence is strictly
+`propose → validate → (pass?) demote incumbent → promote(target_path)`:
+
+- The candidate is proposed into quarantine as a page of the **incumbent's
+  kind** (read from the incumbent), not a hardcoded `contract` — optimizing
+  the `fewshots` or `nudges` target must not mint a contract page.
+- Validation runs **before** the incumbent is demoted. A candidate that fails
+  validation (over-long body, broken slot variables) leaves the incumbent
+  `active` and the run reports `validation_failed`. The earlier ordering
+  demoted first, so a rejected candidate could leave the live prompt
+  `deprecated` with nothing promoted — a broken system and an opaque
+  `gate_error`.
+- The promoted page's `version` is `incumbent.version + 1`, so lineage keeps
+  counting across successive optimizations instead of resetting to 1.
+- The GEPA evaluator mutates the live target page to inject a candidate, then
+  restores it. That mutate → evaluate → restore window runs under a
+  module-level `threading.Lock` and restores in a `finally`, so parallel
+  evaluations (`EngineConfig.max_workers > 1`) cannot measure each other's
+  candidate text and an evaluator exception cannot leave candidate text in the
+  production vault. Evaluation is therefore serialized by design.
 
 **Target options**: `prologue`, `how-to-work`, `nudges`, `fewshots`, `helper-docs`.
 
@@ -1053,7 +1274,7 @@ transcripts = bootstrap_fewshots(
 
 Replays the train split, keeps trajectories that reach verified-correct
 answers, and selects 2–3 canonical transcripts. Selected few-shots are
-stored through the gate as `fewshots/bootstrap-<task>.md` pages.
+stored through the gate as `fewshot/bootstrap-<task>.md` pages.
 
 ### 9.5 Local Feasibility
 
@@ -1111,7 +1332,7 @@ rlm-kernel — Evolvable RLM kernel CLI
 Commands:
   init                  Seed a new vault with contract, template, and helper pages
   index --rebuild        Rebuild the full-text search index from vault pages
-  review                 List all quarantined pages pending review
+  review [--execute]     List quarantined pages pending review (static by default)
   promote PATH           Promote a quarantined page into the live namespace
   demote PATH [--by P]   Demote an active page (optionally superseded by another)
   search QUERY [--kind]  Search the vault by keyword
@@ -1124,9 +1345,9 @@ Commands:
 rlm-kernel init [--vault PATH]
 ```
 
-Creates the vault directory tree, seeds 15 canonical pages (2 contracts,
-8 templates, 5 builtin helpers), and initializes a git repository.
-Idempotent — existing pages are never overwritten.
+Creates the vault directory tree, seeds 17 canonical pages (2 contracts,
+9 templates, 5 builtin helpers, 1 few-shot transcript), and initializes a git
+repository. Idempotent — existing pages are never overwritten.
 
 ### 11.2 index
 
@@ -1140,25 +1361,35 @@ manual edits or after `git pull` to reconcile.
 ### 11.3 review
 
 ```bash
-rlm-kernel review [--vault PATH]
+rlm-kernel review [--execute] [--vault PATH]
 ```
 
-Lists all pages in `quarantine/` with their kind, name, and summary.
-Human reviews these before running `promote`.
+Lists all pages in `quarantine/` with their kind, name, and summary, validating
+each one. Human reviews these before running `promote`.
+
+**Static by default (S3/R19).** The command prints
+`Review mode: static validation only` and performs no code execution. Pass
+`--execute` to additionally run helper code in the restricted-builtin sandbox —
+an opt-in convenience for trusted authors, never a containment boundary; see
+§7.3.1 for the trust model and its two known limitations.
 
 ### 11.4 promote
 
 ```bash
-rlm-kernel promote quarantine/01KYC....md [--vault PATH]
+rlm-kernel promote quarantine/01KYC....md [--force] [--vault PATH]
 ```
 
 Promotes a quarantined page to its target namespace. The page must have
 passed validation (promotion does not re-validate — run validation first).
 
+`--force` is required to overwrite a **deprecated or superseded** page already
+at the target path; an **active** occupant always blocks promotion (demote it
+first). See §7.4.
+
 ### 11.5 demote
 
 ```bash
-rlm-kernel demote helpers/old-helper.md [--by helpers/new-helper.md] [--vault PATH]
+rlm-kernel demote helper/old-helper.md [--by helper/new-helper.md] [--vault PATH]
 ```
 
 Marks a page as deprecated or superseded.
@@ -1262,12 +1493,25 @@ All kernel features are opt-in. Without a `kernel_bridge`:
 tests/
 ├── rlm_kernel/
 │   ├── conftest.py            # temp_vault fixture
-│   ├── test_schema.py         # 26 tests: frontmatter validation, parsing, helper extraction
-│   ├── test_vault.py          # 16 tests: CRUD, atomic writes, wikilinks, round-trip
-│   ├── test_index.py          # 10 tests: build, FTS search, incremental update, rebuild
-│   └── test_search.py         # 8 tests: keyword search, kind filter, card budget, edge cases
-└── (rlm_local tests)          # 72 tests: unchanged, verifying fallback parity
+│   ├── test_schema.py         # frontmatter validation, parsing, helper extraction,
+│   │                          #   R12 access-field backward compatibility
+│   ├── test_vault.py          # CRUD, atomic writes, wikilinks, round-trip
+│   ├── test_index.py          # build, FTS query semantics (R14), incremental
+│   │                          #   update + id-change delta, rebuild
+│   ├── test_search.py         # keyword search, kind filter, card budget, edge cases
+│   ├── test_gate.py           # propose/validate/promote/demote, quarantine
+│   │                          #   isolation (R14), body-length units
+│   ├── test_memory.py         # add/note/forget/compact, decay ordering (R12)
+│   ├── test_optimize.py       # eval suites, evaluator, promotion state hazards (R11)
+│   ├── test_seed.py           # seed layout convention (R13), idempotency
+│   ├── test_repl_bridge.py    # helper payload + search/propose proxy handlers
+│   ├── test_kernel_cli.py     # the rlm-kernel command surface
+│   └── test_migration.py      # index migrations
+└── (rlm_local tests)          # unchanged, verifying fallback parity
 ```
+
+Run the kernel suite alone with `uv run pytest tests/rlm_kernel/ -q`. Counts drift;
+prefer the suite itself over any number written down here.
 
 ### 13.2 Test Conventions
 
@@ -1275,8 +1519,21 @@ tests/
   to avoid git dependency. All are deterministic — no real LLM, network, or clock.
 - **Property tests** (future): job state machine, dedup, frontmatter round-trip
   via hypothesis.
-- **Load tests** (future): 100K synthetic pages → index rebuild < 2 h, search
-  p95 < 300 ms on target hardware.
+- **Load tests**: the 100K-page gate is **implemented and passing** — it is not
+  a future item. Recorded result (2026-07-26, `scripts/run_load_gate_100k.py`
+  on the target laptop; see `docs/20260726-1527-fts-quadratic-fix-validation.md`):
+
+  | Metric | Budget | Recorded | Verdict |
+  |---|---|---|---|
+  | Full reindex, 100K pages | < 7,200 s | **582 s** (9.7 min) | PASS (12× under budget) |
+  | FTS search p95 | < 300 ms | **116.9 ms** | PASS |
+  | `git status` | < 2,000 ms | **38 ms** | PASS |
+
+  The same gate previously recorded 12,680 s / 13,090 s for the rebuild — an
+  FTS5 full-scan quadratic in the update path (F1/F2 in the validation doc).
+  **Re-run this gate after any change to `index.py`**: it exists to catch
+  exactly that class of regression, and it is the only test that runs at
+  realistic corpus size.
 
 ### 13.3 Running Tests
 
@@ -1311,8 +1568,11 @@ Git versioning provides rollback. The `parse_page` function raises clear
 **Symptom:** Search returns stale results after manual page edits.
 
 **Mitigation:** `rlm-kernel index --rebuild` reconstructs the index from
-markdown. `reindex_delta()` uses content hash comparison for incremental
-repair. The index is always rebuildable — markdown is truth.
+markdown. `reindex_delta()` reconciles incrementally — it compares content
+hash **and page id**, so an id rewrite cannot slip past it, and it removes rows
+whose pages have vanished. `verify_quarantine_isolation()` compares the index
+against a vault walk and fails on orphan rows (§7.7). The index is always
+rebuildable — markdown is truth.
 
 ### 14.3 Gate Bypass
 
@@ -1523,10 +1783,12 @@ def verify_quarantine_isolation(vault: VaultStore, index_path: Path) -> bool: ..
 class MemoryManager:
     def add(self, vault: VaultStore, text: str, tags: list[str] | None = None) -> str: ...
     def search(self, vault: VaultStore, index_path: Path,
-               query: str, k: int = 5) -> list[dict[str, Any]]: ...
+               query: str, k: int = 5) -> list[dict[str, Any]]:
+        """BM25 pool (4×k) re-ranked by decay-weighted relevance; hits are
+        recorded via access_count/last_access. Cards carry a `decay` field."""
     def note(self, vault: VaultStore, chunk: str) -> str: ...
     def forget(self, vault: VaultStore, query: str | None = None,
-               older_than: int | None = None) -> int: ...
+               older_than: timedelta | None = None) -> int: ...
     def write_core(self, vault: VaultStore, text: str) -> None: ...
     def compact(self, vault: VaultStore, index_path: Path,
                 similarity_threshold: float = 0.8) -> int: ...

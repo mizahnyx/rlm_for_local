@@ -444,3 +444,218 @@ class TestLiveWiringGuards:
         import importlib
         for mod in ("litellm", "tenacity"):
             importlib.import_module(mod)
+
+
+# ── R11: promotion state hazards ──────────────────────────────────────────
+
+def _seeded_vault(prefix: str):
+    """Fresh git-less vault with the canonical pages seeded."""
+    import tempfile
+    from rlm_kernel.seed import seed_vault
+    from rlm_kernel.vault import LocalVault
+
+    td = tempfile.TemporaryDirectory(prefix=prefix, ignore_cleanup_errors=True)
+    vault = LocalVault(Path(td.name), init_git=False)
+    seed_vault(vault)
+    return td, vault
+
+
+def _patch_gepa(monkeypatch, candidate: str, score: float = 0.9):
+    """Make optimize_anything return *candidate* as an immediate winner."""
+    class FakeResult:
+        best_candidate = candidate
+        best_score = score
+        metric_calls = 1
+
+    import gepa.optimize_anything as gepa_oa
+    monkeypatch.setattr(gepa_oa, "optimize_anything", lambda **kw: FakeResult())
+
+
+def _patch_completion(monkeypatch):
+    """Stub rlm_local.completion: baseline below the mocked 0.9 winner."""
+    import rlm_local
+    monkeypatch.setattr(
+        rlm_local, "completion", lambda q, c, **kw: "The answer is blue."
+    )
+
+
+class TestPromotionStateHazards:
+    """R11 — a rejected candidate must never damage the live incumbent."""
+
+    def test_validation_failure_leaves_incumbent_active(self, monkeypatch):
+        """Ordering guard: propose → validate → demote → promote.
+
+        Pre-R11 the incumbent was demoted *before* the candidate was
+        validated, so a candidate that fails validation (here: a body over
+        the 8192-byte contract/template cap) left the live page DEPRECATED
+        with nothing promoted.
+        """
+        from rlm_kernel.optimize import TARGET_MAP, run_optimization
+        from rlm_kernel.schema import PageStatus
+
+        td, vault = _seeded_vault("k4_r11_order_")
+        target = "nudges"
+        target_path, _ = TARGET_MAP[target]
+        incumbent = vault.get(target_path)
+        assert incumbent is not None
+        assert incumbent.frontmatter.status == PageStatus.ACTIVE
+        original_body = incumbent.body
+        original_version = incumbent.frontmatter.version
+
+        # 9000 chars > MAX_BODY_LENGTH (8192) → gate validation must reject it.
+        _patch_gepa(monkeypatch, "X" * 9000)
+        _patch_completion(monkeypatch)
+
+        result = run_optimization(
+            vault, target=target, suite_name="needle_search",
+            profile="tiny", max_metric_calls=1, max_turns_per_task=2,
+        )
+
+        assert result["status"] == "validation_failed", (
+            f"expected an explicit rejection status, got {result['status']!r}"
+        )
+        reloaded = vault.get(target_path)
+        assert reloaded is not None
+        assert reloaded.frontmatter.status == PageStatus.ACTIVE, (
+            "validation failure left the incumbent demoted — live prompt broken"
+        )
+        assert reloaded.body == original_body, "incumbent body was modified"
+        assert reloaded.frontmatter.version == original_version
+        td.cleanup()
+
+    def test_two_sequential_promotions_increment_version(self, monkeypatch):
+        """R11-2: version lineage follows the incumbent through target_path."""
+        from rlm_kernel.optimize import TARGET_MAP, run_optimization
+
+        td, vault = _seeded_vault("k4_r11_version_")
+        target = "nudges"
+        target_path, _ = TARGET_MAP[target]
+        start_version = vault.get(target_path).frontmatter.version
+
+        _patch_completion(monkeypatch)
+        _patch_gepa(monkeypatch, "OPTIMIZED-ONE: emit a repl block.")
+        first = run_optimization(
+            vault, target=target, suite_name="needle_search",
+            profile="tiny", max_metric_calls=1, max_turns_per_task=2,
+        )
+        assert first["status"] == "promoted"
+        v1 = vault.get(target_path).frontmatter.version
+
+        _patch_gepa(monkeypatch, "OPTIMIZED-TWO: emit a repl block now.")
+        second = run_optimization(
+            vault, target=target, suite_name="needle_search",
+            profile="tiny", max_metric_calls=1, max_turns_per_task=2,
+        )
+        assert second["status"] == "promoted"
+        v2 = vault.get(target_path).frontmatter.version
+
+        assert v1 == start_version + 1, f"first promotion: {start_version} → {v1}"
+        assert v2 == v1 + 1, f"second promotion did not advance lineage: {v1} → {v2}"
+        td.cleanup()
+
+    def test_fewshot_target_promotes_with_fewshot_kind(self, monkeypatch):
+        """R11-3: kind comes from the incumbent, not a hardcoded 'contract'."""
+        from rlm_kernel.optimize import TARGET_MAP, run_optimization
+        from rlm_kernel.schema import PageKind
+
+        td, vault = _seeded_vault("k4_r11_kind_")
+        target = "fewshots"
+        target_path, _ = TARGET_MAP[target]
+        assert vault.get(target_path).frontmatter.kind == PageKind.FEWSHOT
+
+        candidate = (
+            "# Few-Shot: needle search\n\n"
+            "## Example\n\n```repl\nanswer['content'] = 'blue'\n"
+            "answer['ready'] = True\n```\n"
+        )
+        _patch_completion(monkeypatch)
+        _patch_gepa(monkeypatch, candidate)
+
+        result = run_optimization(
+            vault, target=target, suite_name="needle_search",
+            profile="tiny", max_metric_calls=1, max_turns_per_task=2,
+        )
+
+        assert result["status"] == "promoted"
+        promoted = vault.get(target_path)
+        assert promoted is not None
+        assert promoted.frontmatter.kind == PageKind.FEWSHOT, (
+            f"few-shot target promoted as kind={promoted.frontmatter.kind.value}"
+        )
+        assert candidate.splitlines()[-2] in promoted.body
+        td.cleanup()
+
+    def test_evaluator_restores_body_when_evaluation_raises(self, monkeypatch):
+        """R11-4: mutate/eval/restore must be wrapped in try/finally."""
+        from rlm_kernel.optimize import TARGET_MAP, make_gepa_evaluator
+
+        td, vault = _seeded_vault("k4_r11_restore_")
+        target = "how-to-work"
+        target_path, _ = TARGET_MAP[target]
+        original = vault.get(target_path).body
+
+        def exploding_evaluate(*args, **kwargs):
+            raise RuntimeError("load_suite failed mid-run")
+
+        monkeypatch.setattr(
+            "rlm_kernel.optimize.evaluate_candidate", exploding_evaluate
+        )
+
+        evaluator = make_gepa_evaluator(
+            "needle_search", None, target, vault,
+            profile="tiny", max_turns=2, split="train",
+        )
+
+        with pytest.raises(RuntimeError, match="load_suite failed"):
+            evaluator("CANDIDATE-TEXT-THAT-MUST-NOT-PERSIST")
+
+        assert vault.get(target_path).body == original, (
+            "candidate text was left in the live vault after an evaluator exception"
+        )
+        td.cleanup()
+
+    def test_parallel_evaluators_do_not_cross_contaminate(self, monkeypatch):
+        """R11-4: the mutate/eval/restore section is serialized by a lock.
+
+        Two evaluators run concurrently against one live vault. Without the
+        lock, the second injection lands while the first is mid-evaluation and
+        the first one observes the wrong candidate text.
+        """
+        import threading
+        import time
+
+        from rlm_kernel.optimize import EvalResult, TARGET_MAP, make_gepa_evaluator
+
+        td, vault = _seeded_vault("k4_r11_lock_")
+        target = "how-to-work"
+        target_path, _ = TARGET_MAP[target]
+
+        observed: dict[str, str] = {}
+
+        def slow_evaluate(candidate_text, *args, **kwargs):
+            time.sleep(0.3)  # a model call: long enough to interleave badly
+            observed[candidate_text] = vault.get(target_path).body
+            return EvalResult(score=0.5, passed=0, total=1, feedback="")
+
+        monkeypatch.setattr("rlm_kernel.optimize.evaluate_candidate", slow_evaluate)
+
+        ev_one = make_gepa_evaluator("needle_search", None, target, vault,
+                                     profile="tiny", max_turns=1, split="train")
+        ev_two = make_gepa_evaluator("needle_search", None, target, vault,
+                                     profile="tiny", max_turns=1, split="train")
+
+        t1 = threading.Thread(target=ev_one, args=("CAND-ONE",))
+        t2 = threading.Thread(target=ev_two, args=("CAND-TWO",))
+        t1.start()
+        time.sleep(0.05)  # let thread 1 get into the critical section
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        assert observed.get("CAND-ONE") == "CAND-ONE", (
+            f"evaluator saw the other thread's candidate: {observed}"
+        )
+        assert observed.get("CAND-TWO") == "CAND-TWO", (
+            f"evaluator saw the other thread's candidate: {observed}"
+        )
+        td.cleanup()

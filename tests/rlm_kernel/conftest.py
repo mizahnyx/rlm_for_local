@@ -19,8 +19,8 @@ def temp_vault() -> Path:
         prefix="rlm_kernel_vault_", ignore_cleanup_errors=True,
     )
     vault = Path(td.name)
-    # Create subdirs
-    for sub in ["contract", "definitions", "helpers", "fewshots",
+    # Create subdirs — singular <kind>/ is the convention (gate.promote, seed)
+    for sub in ["contract", "definitions", "helper", "fewshot",
                  "memory/notes", "memory/topics", "memory/caches",
                  "quarantine", ".index"]:
         (vault / sub).mkdir(parents=True, exist_ok=True)

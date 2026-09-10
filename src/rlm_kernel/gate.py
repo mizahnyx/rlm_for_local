@@ -77,11 +77,14 @@ class ValidationReport:
         passed: True if no errors.
         errors: Fatal issues that block promotion.
         warnings: Advisory issues that do not block promotion.
+        executed: True if the helper sandbox actually ran (R19). False means
+            the verdict came from static checks only.
     """
 
     passed: bool
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    executed: bool = False
 
 
 # ── Propose ──────────────────────────────────────────────────────────────────
@@ -135,19 +138,42 @@ def propose(
 # ── Validate ─────────────────────────────────────────────────────────────────
 
 
-def validate(page: Page, vault: VaultStore | None = None) -> ValidationReport:
+def validate(
+    page: Page,
+    vault: VaultStore | None = None,
+    *,
+    execute: bool = False,
+) -> ValidationReport:
     """Validate a proposed page against kind-specific rules.
+
+    Trust model (S3/R19): this is a **quality gate, not containment**. By
+    default it is purely static — AST parse, import allowlist, blocked-pattern
+    scan, and a static signature check. The restricted-builtin sandbox `exec`
+    is an opt-in convenience for trusted authors (`execute=True`) and must
+    never be relied on to contain hostile code: restricted-builtin `exec` is
+    escapable on CPython.
 
     Args:
         page: The page to validate.
         vault: Optional vault for wikilink resolution checks
                (required for definition/note pages).
+        execute: Run helper code in the sandbox namespace. Off by default;
+            `rlm-kernel review` enables it only with `--execute`.
 
     Returns:
-        ValidationReport with passed/errors/warnings.
+        ValidationReport with passed/errors/warnings and an `executed` flag
+        telling the caller which mode produced the verdict.
     """
     errors: list[str] = []
     warnings: list[str] = []
+
+    if not execute:
+        warnings.append(
+            "Static validation only — helper code was parsed, not executed. "
+            "Pass execute=True (CLI: --execute) to run the sandbox check; "
+            "note that the sandbox is a quality check, not a containment "
+            "boundary."
+        )
 
     # 1. Status sanity
     if page.frontmatter.status != PageStatus.PENDING:
@@ -163,7 +189,7 @@ def validate(page: Page, vault: VaultStore | None = None) -> ValidationReport:
     kind = page.kind
 
     if kind == PageKind.HELPER:
-        _validate_helper(page, errors, warnings)
+        _validate_helper(page, errors, warnings, execute=execute)
     elif kind in (PageKind.CONTRACT, PageKind.TEMPLATE):
         _validate_contract_or_template(page, errors, warnings)
     elif kind in (PageKind.DEFINITION, PageKind.NOTE):
@@ -176,6 +202,7 @@ def validate(page: Page, vault: VaultStore | None = None) -> ValidationReport:
         passed=len(errors) == 0,
         errors=errors,
         warnings=warnings,
+        executed=execute and kind == PageKind.HELPER,
     )
 
 
@@ -183,9 +210,16 @@ def validate(page: Page, vault: VaultStore | None = None) -> ValidationReport:
 
 
 def _validate_helper(
-    page: Page, errors: list[str], warnings: list[str]
+    page: Page,
+    errors: list[str],
+    warnings: list[str],
+    *,
+    execute: bool = False,
 ) -> None:
-    """Validate a helper page: import allowlist, syntax, sandbox execution."""
+    """Validate a helper page: syntax, import allowlist, blocked patterns.
+
+    The sandbox execution stage runs only when `execute=True` (R19).
+    """
 
     # Extract helper definition
     try:
@@ -226,13 +260,84 @@ def _validate_helper(
                     )
 
     # --- 2c. Blocked patterns ---
+    # A substring blocklist is a tripwire for the obvious cases, NOT a security
+    # control: `().__class__.__bases__[0].__subclasses__()` walks straight past
+    # it. See the module docstring for the trust model.
     code_lower = code.lower()
     for pattern in BLOCKED_PATTERNS:
         if pattern.lower() in code_lower:
             errors.append(f"Blocked pattern detected: '{pattern}'")
 
-    # --- 2d. Sandbox execution ---
-    _sandbox_test(code, helper.name, helper.signature, errors, warnings)
+    # --- 2d. Sandbox execution (opt-in, R19) ---
+    if execute:
+        _sandbox_test(code, helper.name, helper.signature, errors, warnings)
+    else:
+        # Static equivalents of the sandbox's two structural checks: the code
+        # must define a callable with the page's name, and its `def` line must
+        # agree with the declared `## Signature`.
+        _static_define_check(tree, helper.name, errors)
+        _static_signature_check(code, helper.name, helper.signature, warnings)
+
+
+def _static_define_check(tree: ast.AST, name: str, errors: list[str]) -> None:
+    """Error if the parsed helper code defines nothing callable named `name`."""
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == name:
+                    return
+    errors.append(f"Helper code does not define a callable named '{name}'")
+
+
+def _static_signature_check(
+    code: str,
+    name: str,
+    signature: str | None,
+    warnings: list[str],
+) -> None:
+    """Warn when a helper's declared `## Signature` disagrees with its code.
+
+    The static counterpart of :func:`_check_signature_match`, used when the
+    sandbox is not run (R19).
+    """
+    if signature is None:
+        return
+
+    try:
+        sig_tree = ast.parse(signature)
+    except SyntaxError:
+        warnings.append(f"Signature is not valid Python: {signature}")
+        return
+
+    declared_params: list[str] | None = None
+    for node in ast.walk(sig_tree):
+        if isinstance(node, ast.FunctionDef):
+            declared_params = [arg.arg for arg in node.args.args]
+            break
+    if declared_params is None:
+        warnings.append("Signature block does not contain a function definition")
+        return
+
+    try:
+        impl_tree = ast.parse(code)
+    except SyntaxError:
+        return  # already reported as an error
+
+    actual_params: list[str] | None = None
+    for node in ast.walk(impl_tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            actual_params = [arg.arg for arg in node.args.args]
+            break
+    if actual_params is None:
+        return  # "does not define a callable named ..." is reported elsewhere
+
+    if declared_params != actual_params:
+        warnings.append(
+            f"Signature mismatch: declared {declared_params}, "
+            f"actual {actual_params}"
+        )
 
 
 def _sandbox_test(
@@ -362,10 +467,13 @@ def _validate_contract_or_template(
     """Validate contract/template pages: slot variables, length cap."""
     body = page.body
 
-    # Length cap
-    if len(body) > MAX_BODY_LENGTH:
+    # Length cap — measured in UTF-8 bytes, matching this constant's contract
+    # (R14). Counting characters let a page of 3000 CJK characters — 9000 bytes
+    # on disk — pass an "8192-byte" cap.
+    body_bytes = len(body.encode("utf-8"))
+    if body_bytes > MAX_BODY_LENGTH:
         errors.append(
-            f"Body length {len(body)} exceeds max {MAX_BODY_LENGTH} characters"
+            f"Body length {body_bytes} bytes exceeds max {MAX_BODY_LENGTH} bytes"
         )
 
     # Slot variables
@@ -440,13 +548,16 @@ def promote(
     page: Page,
     index: Any | None = None,
     target_path: str | None = None,
+    *,
+    force: bool = False,
 ) -> str:
     """Promote a quarantined page into the live vault namespace.
 
     Moves from ``quarantine/<ulid>.md`` to ``<kind>/<name>.md`` (or
-    ``target_path`` if provided), bumps the version, sets status to
-    ``active``, computes the content hash, deletes the quarantine copy,
-    and optionally triggers a delta reindex.
+    ``target_path`` if provided), bumps the version **relative to any page
+    already occupying that path**, sets status to ``active``, computes the
+    content hash, deletes the quarantine copy, and optionally triggers a delta
+    reindex.
 
     Args:
         vault: The vault store.
@@ -456,12 +567,16 @@ def promote(
             the page is written to this exact path instead of the default
             ``<kind>/<name>.md``. Used by the optimizer to replace
             incumbent pages without changing their path (D-K4-1a).
+        force: Overwrite a **non-active** occupant (deprecated/superseded) at
+            the default target path. Has no effect when `target_path` is given:
+            an explicit target is the caller taking responsibility (R16).
 
     Returns:
         The path the page was written to.
 
     Raises:
-        ValueError: If validation fails or the page is not promotable.
+        ValueError: If validation fails, the page is not promotable, or the
+            target path is occupied and `force` was not given.
     """
     if not page.path.startswith(QUARANTINE_PREFIX):
         raise ValueError(
@@ -483,18 +598,35 @@ def promote(
     # Compute target path — override when replacing an incumbent (D-K4-1a)
     final_path = target_path if target_path is not None else f"{page.kind.value}/{page.name}.md"
 
-    # Name-conflict guard (skipped when target_path is explicit — caller takes responsibility)
+    # Name-conflict guard (skipped when target_path is explicit — caller takes
+    # responsibility). R16: this used to protect ACTIVE occupants only, so a
+    # deprecated or superseded page at the target path was silently
+    # overwritten, destroying the page that said "this was replaced by X".
     if target_path is None and vault.exists(final_path):
         existing = vault.get(final_path)
-        if existing is not None and existing.frontmatter.status == PageStatus.ACTIVE:
-            raise ValueError(
-                f"Active page already exists at {final_path!r}. "
-                f"Demote it first or choose a different name."
-            )
+        if existing is not None:
+            status = existing.frontmatter.status
+            if status == PageStatus.ACTIVE:
+                raise ValueError(
+                    f"Active page already exists at {final_path!r}. "
+                    f"Demote it first or choose a different name."
+                )
+            if not force:
+                raise ValueError(
+                    f"A {status.value} page already occupies {final_path!r}. "
+                    f"Pass force=True (CLI: --force) to overwrite it."
+                )
     # Mutate frontmatter for promotion (model_copy avoids caller side-effects)
     fm = page.frontmatter.model_copy()
     fm.status = PageStatus.ACTIVE
-    fm.version = max(fm.version or 0, 0) + 1
+    # R11-2: version lineage follows the page being replaced. Proposed pages
+    # always start at version 0, so a naive `version + 1` reset the counter to
+    # 1 on every optimized promotion into an existing target path — after N
+    # optimizations the live page still claimed version 1. Derive the new
+    # version from the occupant instead.
+    occupant = vault.get(final_path)
+    prior_version = occupant.frontmatter.version if occupant is not None else 0
+    fm.version = max(prior_version, fm.version or 0) + 1
     fm.updated = datetime.now(timezone.utc)
 
     promoted = Page(frontmatter=fm, body=page.body, path=final_path)
@@ -591,15 +723,20 @@ def search_quarantine(
         List of quarantined ``Page`` objects, newest first.
     """
     pages = vault.list(prefix=QUARANTINE_PREFIX, kind=kind)
-    if not query:
-        return pages
+    if query:
+        q = query.lower()
+        pages = [
+            p
+            for p in pages
+            if q in p.name.lower() or q in p.body.lower()
+        ]
 
-    q = query.lower()
-    return [
-        p
-        for p in pages
-        if q in p.name.lower() or q in p.body.lower()
-    ]
+    # R16: the docstring always promised newest-first, but `vault.list` returns
+    # lexicographic order and ULID filenames sort oldest-first. Sort explicitly
+    # on the ULID prefix so the promise is true (and reviewers see the latest
+    # proposals at the top).
+    pages.sort(key=lambda p: Path(p.path).stem, reverse=True)
+    return pages
 
 
 def verify_quarantine_isolation(
@@ -608,9 +745,16 @@ def verify_quarantine_isolation(
 ) -> bool:
     """Assert that no quarantined pages leak into normal search results.
 
-    Performs a path-prefix scan on the index pages table and verifies:
-    1. No quarantined paths appear in the indexed pages table.
-    2. The count from search_quarantine matches (no orphaned quarantine files).
+    Compares the index against a fresh walk of the vault (R14):
+
+    1. No quarantined path may appear in the indexed ``pages`` table.
+    2. Every indexed path must exist as a file in the vault walk — this is the
+       falsifiable half. The previous second check compared
+       ``search_quarantine(vault)`` with ``vault.list(prefix="quarantine")``,
+       i.e. the same call twice, so it could never detect anything; an index
+       row left behind for a page that no longer exists is exactly the leak
+       this function claims to catch.
+    3. Quarantine files found by the vault walk must not be in the index.
 
     Args:
         vault: The vault store.
@@ -623,26 +767,31 @@ def verify_quarantine_isolation(
 
     idx = Index(index_path)
     try:
-        # Check indexed pages for quarantine paths
-        rows = idx.conn.execute(
-            "SELECT COUNT(*) AS cnt FROM pages WHERE path LIKE ?",
-            ("quarantine/%",),
-        ).fetchone()
-        indexed_quarantine_count = rows["cnt"]
+        index_paths = {
+            row["path"]
+            for row in idx.conn.execute("SELECT path FROM pages").fetchall()
+        }
     finally:
         idx.close()
 
-    # Quarantine pages must NOT be indexed
-    if indexed_quarantine_count > 0:
+    # 1. Quarantine pages must NOT be indexed
+    indexed_quarantine = {
+        path for path in index_paths
+        if path == QUARANTINE_PREFIX or path.startswith(QUARANTINE_PREFIX + "/")
+    }
+    if indexed_quarantine:
         return False
 
-    # Verify quarantine file count matches what search_quarantine returns
-    q_pages = search_quarantine(vault)
-    vault_q_count = len(q_pages)
+    # 2. Index rows must correspond to real vault pages (no orphan rows).
+    #    `vault.list()` never returns quarantine/ pages, so this is a check
+    #    against the live namespace only.
+    vault_paths = {page.path for page in vault.list()}
+    if not index_paths <= vault_paths:
+        return False
 
-    # Filesystem-level count of quarantine files
-    all_q_paths = vault.list(prefix=QUARANTINE_PREFIX)
-    if len(all_q_paths) != vault_q_count:
+    # 3. Quarantine files exist on disk but must not be indexed.
+    quarantine_paths = {page.path for page in vault.list(prefix=QUARANTINE_PREFIX)}
+    if quarantine_paths & index_paths:
         return False
 
     return True

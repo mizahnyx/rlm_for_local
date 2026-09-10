@@ -90,8 +90,10 @@ else:
         info("No iteration lines found")
 
     # Terminal status check
+    # `validation_failed` (R11) is a terminal status too: the candidate was
+    # proposed but the gate rejected it, leaving the incumbent in place.
     status_found = False
-    for pat in ["promoted", "no_improvement", "gate_error"]:
+    for pat in ["promoted", "no_improvement", "gate_error", "validation_failed"]:
         if f'"status": "{pat}"' in content or f'"status":"{pat}"' in content:
             status_found = True
             info(f"Terminal status: {pat}")
@@ -204,7 +206,7 @@ circular = content.count("did not propose a new candidate") >= 3
 # Check for completion
 completed = any(
     f'"status": "{s}"' in content or f'"status":"{s}"' in content
-    for s in ["promoted", "no_improvement", "error", "gate_error"]
+    for s in ["promoted", "no_improvement", "error", "gate_error", "validation_failed"]
 )
 
 if crash:

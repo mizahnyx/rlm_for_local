@@ -230,12 +230,29 @@ class Index:
     def fts_search(self, query: str, limit: int = 40,
                    kinds: list[str] | None = None,
                    tags: list[str] | None = None) -> list[dict[str, Any]]:
-        """BM25-ranked FTS5 search with optional kind and tag filters."""
-        if not query.strip():
+        """BM25-ranked FTS5 search with optional kind and tag filters.
+
+        Query semantics (R14): the query is split on whitespace and every token
+        is individually quoted and OR-ed together — ``alpha beta`` becomes
+        ``"alpha" OR "beta"``. Quoting each token keeps the exact-match intent
+        of the old ``"alpha beta"`` form (no FTS5 operator injection, no
+        prefix/stemming surprises), but OR-ing restores multi-word *recall*:
+        the old whole-query quoting made every multi-word query an FTS5
+        *phrase* query, which only matched adjacent tokens and silently
+        dropped pages that contained all the terms separately. BM25 ranking
+        still prefers pages containing more of the terms.
+        """
+        # Split into tokens and quote each one (doubling embedded quotes).
+        tokens: list[str] = []
+        for token in query.split():
+            escaped = token.replace('"', '""')
+            if escaped.strip('"'):
+                tokens.append(f'"{escaped}"')
+
+        if not tokens:
             return []
 
-        safe = query.replace('"', '""')
-        fts_query = f'"{safe}"'
+        fts_query = " OR ".join(tokens)
 
         conditions = []
         params: list[Any] = [fts_query]
@@ -296,11 +313,16 @@ class Index:
             else:
                 self.conn.execute("DELETE FROM fts_pages WHERE path = ?", (path,))
 
-        # Add new / update changed — use for_update=True (F1)
+        # Add new / update changed — use for_update=True (F1).
+        # R14: the delta key is (content hash, id). The content hash deliberately
+        # excludes the ULID, so a page rewritten with a fresh id but identical
+        # content compared equal and was skipped — leaving the index (and every
+        # `tags` row keyed by page_id) pointing at a ULID that no longer exists.
         for path, page in vault_pages.items():
             if path not in indexed:
                 self._index_page(page, for_update=True)
-            elif page.content_hash != (indexed[path].get("idx_hash") or ""):
+            elif (page.content_hash != (indexed[path].get("idx_hash") or "")
+                  or page.frontmatter.id != indexed[path].get("id")):
                 self._index_page(page, for_update=True)
 
         self.conn.commit()

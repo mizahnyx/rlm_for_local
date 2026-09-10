@@ -34,6 +34,11 @@ _MEMORY_PREFIX = "memory/notes"
 _CORE_MEMORY_PATH = f"{_MEMORY_PREFIX}/core-memory.md"
 _MEMORY_KINDS = ["note", "topic", "cache"]
 
+# R12: search fetches a wider BM25 pool than it returns, then re-orders it by
+# decay — otherwise a k-limited BM25 cut would already have discarded the
+# freshly-accessed notes before decay ever saw them.
+_SEARCH_POOL_MULTIPLIER = 4
+
 _SENTENCE_RE = re.compile(r"([^.!?\n]+[.!?]?)")
 _WORD_RE = re.compile(r"\b[A-Z][a-z]{2,}\b")
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -173,18 +178,57 @@ def _extract_via_llm(llm: Any, text: str) -> tuple[str, list[str]]:
 
 # ── Core memory ──────────────────────────────────────────────────────────────
 
-def _ensure_core_memory_dir(vault: VaultStore) -> None:
-    """Ensure the memory/notes directory exists (side-effect via put)."""
-    # Vault put creates parents; we just need a sentinel write if the dir is empty.
-    # We piggyback on the first core-memory write or similar.
-
-
 def _get_core_memory_summary(vault: VaultStore) -> str | None:
     """Read core-memory.md and return its summary, or None."""
     page = vault.get(_CORE_MEMORY_PATH)
     if page is None:
         return None
     return page.frontmatter.summary
+
+
+# ── Compaction clustering ────────────────────────────────────────────────────
+
+def _cluster_notes(
+    notes: list[Page], similarity_threshold: float
+) -> list[list[Page]]:
+    """Cluster notes by title similarity, newest anchor first.
+
+    Single shared implementation for both the dry-run report and the merge
+    (R12): the two paths cannot disagree about what would be merged because
+    they consume the same groups. Each group is ordered newest-first, so
+    ``group[0]`` is the keeper and every later member is absorbed.
+
+    Args:
+        notes: candidate note pages (core memory already excluded).
+        similarity_threshold: minimum SequenceMatcher ratio for a merge.
+
+    Returns:
+        List of groups; groups of length 1 are non-merging singletons.
+    """
+    ordered = sorted(notes, key=lambda p: p.frontmatter.updated, reverse=True)
+    groups: list[list[Page]] = []
+
+    for note in ordered:
+        for group in groups:
+            ratio = SequenceMatcher(
+                None,
+                group[0].frontmatter.title.lower(),
+                note.frontmatter.title.lower(),
+            ).ratio()
+            if ratio >= similarity_threshold:
+                group.append(note)
+                break
+        else:
+            groups.append([note])
+
+    return groups
+
+
+def _title_similarity(a: Page, b: Page) -> float:
+    """SequenceMatcher ratio of two pages' titles (lowercased)."""
+    return SequenceMatcher(
+        None, a.frontmatter.title.lower(), b.frontmatter.title.lower()
+    ).ratio()
 
 
 # ── MemoryManager ────────────────────────────────────────────────────────────
@@ -277,6 +321,13 @@ class MemoryManager:
     ) -> list[dict[str, Any]]:
         """Search memory notes, topics, and caches.
 
+        Results are BM25-retrieved over a widened pool, then re-ranked by
+        ``decay_score`` multiplied into the relevance term (R12): the decay
+        curve only means something if it can actually reorder what search
+        returns. Each returned hit records the access (``access_count += 1``,
+        ``last_access = now``) through the same atomic ``vault.put`` path used
+        by every other write, so the next search has real inputs.
+
         Args:
             vault: vault store.
             index_path: path to the index database.
@@ -284,7 +335,8 @@ class MemoryManager:
             k: max results.
 
         Returns:
-            List of result cards with core-memory summary injected
+            List of result cards (with a ``decay`` field) ordered by
+            decay-weighted relevance, with the core-memory summary injected
             in the first result's metadata when available.
         """
         v = vault if vault is not None else self._vault
@@ -292,14 +344,47 @@ class MemoryManager:
         if v is None or ip is None:
             raise ValueError("vault and index_path are required")
 
-        results = search_vault(v, ip, query, k=k, kinds=_MEMORY_KINDS)
+        results = search_vault(
+            v, ip, query, k=max(k * _SEARCH_POOL_MULTIPLIER, k), kinds=_MEMORY_KINDS,
+        )
+
+        # Re-rank the BM25 pool by decay-weighted relevance.
+        now = datetime.now(timezone.utc)
+        scored: list[tuple[float, float, dict[str, Any], Page]] = []
+        for r in results:
+            page = v.get(r.get("path", ""))
+            if page is None:
+                continue
+            fm = page.frontmatter
+            d = decay_score(
+                fm.access_count, last_access=fm.last_access, created=fm.created,
+            )
+            rank = float(r.get("score") or 0.0)
+            relevance = 1.0 / (1.0 + abs(rank))  # BM25 rank: more negative = better
+            scored.append((relevance * d, d, r, page))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+
+        ordered: list[dict[str, Any]] = []
+        for _, d, r, page in scored[:k]:
+            card = dict(r)
+            card["decay"] = round(d, 6)
+            ordered.append(card)
+            # Hit bookkeeping — same atomic write path as every other mutation.
+            try:
+                page.frontmatter.access_count = (page.frontmatter.access_count or 0) + 1
+                page.frontmatter.last_access = now
+                v.put(page, page.path)
+            except Exception:
+                # A read-only or vanished page must not break search.
+                pass
 
         # Inject core-memory summary as metadata on first result
         core_summary = _get_core_memory_summary(v)
-        if core_summary and results:
-            results[0]["core_memory"] = core_summary
+        if core_summary and ordered:
+            ordered[0]["core_memory"] = core_summary
 
-        return results
+        return ordered
 
     # ── note (A-MEM gisting) ──────────────────────────────────────────────
 
@@ -356,10 +441,10 @@ class MemoryManager:
     ) -> int:
         """Forget memories: delete or mark deprecated.
 
-        If *query* is given, search memory notes and deprecate matches.
-        If *older_than* is given, deprecate notes whose updated timestamp
-        is older than the delta.
-        Both filters can be combined.
+        If *query* is given, only notes matching the query text are eligible.
+        If *older_than* is given, only notes whose updated timestamp is older
+        than the delta are eligible. When both are given they are **combined
+        with AND** — a note must match the query *and* be old enough.
 
         Args:
             vault: vault store.
@@ -375,14 +460,20 @@ class MemoryManager:
 
         candidates: list[Page] = []
 
-        if query:
-            # Collect matching notes via vault listing + text match
-            # (lightweight; avoids requiring an index for forget)
-            all_notes = v.list(prefix=_MEMORY_PREFIX, kind="note")
-            q_lower = query.lower()
-            for page in all_notes:
-                if page.path == _CORE_MEMORY_PATH:
-                    continue  # never forget core memory
+        # Collect matching notes via vault listing + text match
+        # (lightweight; avoids requiring an index for forget)
+        q_lower = query.lower() if query else None
+        cutoff = (
+            datetime.now(timezone.utc) - older_than
+            if older_than is not None
+            else None
+        )
+
+        for page in v.list(prefix=_MEMORY_PREFIX, kind="note"):
+            if page.path == _CORE_MEMORY_PATH:
+                continue  # never forget core memory
+
+            if q_lower is not None:
                 haystack = (
                     page.frontmatter.title
                     + " "
@@ -390,23 +481,13 @@ class MemoryManager:
                     + " "
                     + page.body
                 ).lower()
-                if q_lower in haystack:
-                    candidates.append(page)
-        elif older_than is not None:
-            all_notes = v.list(prefix=_MEMORY_PREFIX, kind="note")
-            cutoff = datetime.now(timezone.utc) - older_than
-            for page in all_notes:
-                if page.path == _CORE_MEMORY_PATH:
+                if q_lower not in haystack:
                     continue
-                if page.frontmatter.updated <= cutoff:
-                    candidates.append(page)
-        else:
-            # No criteria → deprecate all memory notes except core
-            all_notes = v.list(prefix=_MEMORY_PREFIX, kind="note")
-            for page in all_notes:
-                if page.path == _CORE_MEMORY_PATH:
-                    continue
-                candidates.append(page)
+
+            if cutoff is not None and page.frontmatter.updated > cutoff:
+                continue
+
+            candidates.append(page)
 
         affected = 0
         for page in candidates:
@@ -477,6 +558,10 @@ class MemoryManager:
         The newest note absorbs content from older ones; older ones
         are marked superseded.
 
+        Dry-run and merge share ``_cluster_notes`` (R12), so a dry run reports
+        exactly the notes a merge would absorb: ``len(compact(dry_run=True))``
+        equals ``compact(dry_run=False)`` by construction.
+
         Args:
             vault: vault store.
             index_path: path to index (rebuilt after compaction).
@@ -487,8 +572,9 @@ class MemoryManager:
 
         Returns:
             When *dry_run* is True: list of candidate dicts with keys
-            ``title_a``, ``title_b``, ``similarity``.
-            When *dry_run* is False: number of notes merged.
+            ``title_a`` (keeper), ``title_b`` (absorbed note), ``similarity``.
+            When *dry_run* is False: number of notes merged (== the dry-run
+            list length for the same vault state and threshold).
         """
         v = vault if vault is not None else self._vault
         if v is None:
@@ -500,58 +586,25 @@ class MemoryManager:
         if len(notes) < 2:
             return [] if dry_run else 0
 
-        # Build candidate pairs
-        candidates: list[dict[str, Any]] = []
-        for i, a in enumerate(notes):
-            for b in notes[i + 1:]:
-                ratio = SequenceMatcher(
-                    None,
-                    a.frontmatter.title.lower(),
-                    b.frontmatter.title.lower(),
-                ).ratio()
-                if ratio >= similarity_threshold:
-                    candidates.append({
-                        "title_a": a.frontmatter.title,
-                        "title_b": b.frontmatter.title,
-                        "similarity": round(ratio, 4),
-                    })
+        groups = _cluster_notes(notes, similarity_threshold)
+        merge_groups = [g for g in groups if len(g) >= 2]
 
         if dry_run:
+            candidates: list[dict[str, Any]] = []
+            for group in merge_groups:
+                keeper = group[0]
+                for dup in group[1:]:
+                    candidates.append({
+                        "title_a": keeper.frontmatter.title,
+                        "title_b": dup.frontmatter.title,
+                        "similarity": round(_title_similarity(keeper, dup), 4),
+                    })
             return candidates
 
-        # Group by title similarity
-        merged: set[str] = set()
-        groups: list[list[Page]] = []
-
-        remaining = list(notes)
-        while remaining:
-            anchor = remaining.pop(0)
-            if anchor.path in merged:
-                continue
-            group = [anchor]
-            for other in list(remaining):
-                if other.path in merged:
-                    remaining.remove(other)
-                    continue
-                ratio = SequenceMatcher(
-                    None,
-                    anchor.frontmatter.title.lower(),
-                    other.frontmatter.title.lower(),
-                ).ratio()
-                if ratio >= similarity_threshold:
-                    group.append(other)
-                    remaining.remove(other)
-            groups.append(group)
-
-        # Merge each group
+        # Merge each cluster: newest note keeps the page, older ones are absorbed.
         merge_count = 0
-        for group in groups:
-            if len(group) < 2:
-                continue
-
-            # Sort by updated descending (newest first)
-            group.sort(key=lambda p: p.frontmatter.updated, reverse=True)
-            keeper = group[0]
+        for group in merge_groups:
+            keeper = group[0]  # _cluster_notes orders newest-first
 
             # Absorb bodies from superseded notes
             absorbed: list[str] = [keeper.body]

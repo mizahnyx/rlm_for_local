@@ -13,8 +13,11 @@ from rlm_kernel.vault import LocalVault, VaultStore
 # ── VaultStore protocol ────────────────────────────────────────────────────
 
 class TestVaultProtocol:
-    def test_local_vault_implements_protocol(self):
-        vault = LocalVault(Path("/tmp/test"))
+    def test_local_vault_implements_protocol(self, temp_vault):
+        # R24: this used to instantiate `LocalVault(Path("/tmp/test"))` with the
+        # default `init_git=True`, creating a real directory and a real git
+        # repository as a test side effect.
+        vault = LocalVault(temp_vault, init_git=False)
         assert isinstance(vault, VaultStore)
 
 

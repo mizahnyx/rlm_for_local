@@ -258,6 +258,114 @@ class TestQuarantineIsolation:
         assert len(results) == 1
         assert results[0].name == "alpha"
 
+    # ── R14: the isolation guard must be falsifiable ───────────────────────
+
+    @staticmethod
+    def _inject_index_row(idx_path: Path, path: str, kind: str = "definition") -> None:
+        """Write a page row straight into the index, bypassing the vault."""
+        idx = Index(idx_path)
+        try:
+            idx.conn.execute(
+                "INSERT OR REPLACE INTO pages "
+                "(id, path, kind, name, title, summary, hash, idx_hash, "
+                " fts_rowid, version, status, updated) "
+                "VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 1, 'active', NULL)",
+                ("01ZZZZZZZZZZZZZZZZZZZZZZZZ", path, kind,
+                 Path(path).stem, "Injected", "Injected row."),
+            )
+            idx.conn.commit()
+        finally:
+            idx.close()
+
+    def test_isolation_true_for_a_clean_index(self, temp_vault):
+        """Positive control — the guard must not be false-negative by default."""
+        vault = LocalVault(temp_vault, init_git=False)
+        idx_path = temp_vault / ".index" / "meta.sqlite"
+        body = _make_helper("clean", "def clean():\n    return 1\n")
+        path = propose(vault, PageKind.HELPER, "clean", body)
+        page = vault.get(path)
+        promote(vault, page)
+        rebuild_index(vault, idx_path)
+
+        assert verify_quarantine_isolation(vault, idx_path) is True
+
+    def test_isolation_detects_orphan_row_not_backed_by_vault(self, temp_vault):
+        """An indexed path with no vault file must fail the comparison.
+
+        This is the check that replaced the tautology: pre-R14 the second
+        verification compared `search_quarantine(vault)` against the same
+        `vault.list(...)` result, so an orphan index row was invisible.
+        """
+        vault = LocalVault(temp_vault, init_git=False)
+        idx_path = temp_vault / ".index" / "meta.sqlite"
+        rebuild_index(vault, idx_path)
+        assert verify_quarantine_isolation(vault, idx_path) is True
+
+        self._inject_index_row(idx_path, "definitions/ghost.md")
+
+        assert verify_quarantine_isolation(vault, idx_path) is False
+
+    def test_isolation_detects_indexed_quarantine_row(self, temp_vault):
+        """A quarantined path that reached the index must fail."""
+        vault = LocalVault(temp_vault, init_git=False)
+        idx_path = temp_vault / ".index" / "meta.sqlite"
+        body = _make_helper("leaky", "def leaky():\n    return 1\n")
+        propose(vault, PageKind.HELPER, "leaky", body)
+        rebuild_index(vault, idx_path)
+        assert verify_quarantine_isolation(vault, idx_path) is True
+
+        self._inject_index_row(idx_path, "quarantine/01ZZZZZZZZZZZZZZZZZZZZZZZZ.md")
+
+        assert verify_quarantine_isolation(vault, idx_path) is False
+
+    def test_isolation_still_true_with_pending_quarantine_pages(self, temp_vault):
+        """Quarantine files on disk are fine — only index leakage is not."""
+        vault = LocalVault(temp_vault, init_git=False)
+        idx_path = temp_vault / ".index" / "meta.sqlite"
+        body = _make_helper("pending", "def pending():\n    return 1\n")
+        propose(vault, PageKind.HELPER, "pending", body)
+        rebuild_index(vault, idx_path)
+
+        assert verify_quarantine_isolation(vault, idx_path) is True
+
+
+# ── R14: body-length cap is measured in UTF-8 bytes ─────────────────────────
+
+class TestBodyLengthCapUnits:
+    @staticmethod
+    def _template_page(body: str) -> Page:
+        fm = Frontmatter(
+            schema=1, kind=PageKind.TEMPLATE, name="capped", title="Capped",
+            summary="Slot-bearing template.", status=PageStatus.PENDING,
+        )
+        return Page(frontmatter=fm, body=body, path="quarantine/capped.md")
+
+    def test_multibyte_body_over_cap_is_rejected(self, temp_vault):
+        """3000 CJK characters = 9000 UTF-8 bytes, but only 3000 characters.
+
+        The comment on MAX_BODY_LENGTH says bytes; counting characters let this
+        page through.
+        """
+        vault = LocalVault(temp_vault, init_git=False)
+        body = "{{slot}}" + "漢" * 3000  # 8 + 9000 = 9008 bytes, 3008 chars
+        assert len(body) < 8192, "precondition: character count is under the cap"
+        assert len(body.encode("utf-8")) > 8192
+
+        report = validate(self._template_page(body), vault=vault)
+
+        assert not report.passed
+        assert any("bytes" in e for e in report.errors), report.errors
+
+    def test_multibyte_body_under_cap_is_accepted(self, temp_vault):
+        """Control: the cap must not become stricter than 8192 bytes."""
+        vault = LocalVault(temp_vault, init_git=False)
+        body = "{{slot}}" + "漢" * 2700  # 8 + 8100 = 8108 bytes
+        assert len(body.encode("utf-8")) <= 8192
+
+        report = validate(self._template_page(body), vault=vault)
+
+        assert report.passed, report.errors
+
 
 # ── ValidationReport ─────────────────────────────────────────────────────────
 
