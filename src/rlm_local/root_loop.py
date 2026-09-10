@@ -7,18 +7,22 @@ message layout with byte-stable prefix for prompt caching.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from rlm_local.config import Config
-from rlm_local.context_store import Context, ContextStore, _InMemoryContext
+from rlm_local.context_store import ContextStore
 from rlm_local.logger import TrajectoryLogger
 from rlm_local.model_backend import ModelBackend
-from rlm_local.parser import ParseResult, Parser
+from rlm_local.parser import FINAL_LINE_RE, Parser
 from rlm_local.prompts import build_messages
-from rlm_local.repl import REPLResult, REPLSandbox
+from rlm_local.repl import REPLSandbox
 from rlm_local.subcall_manager import SubcallManager
 from rlm_local.templates import (
+    FINALIZATION_FAILED,
     FORCED_FINALIZATION_PROMPT,
+    NO_ANSWER_PRODUCED,
+    NUDGE_EMPTY_ANSWER,
     REPL_BLOCK_LABEL,
     REPL_RESULT_TEMPLATE,
     TURN_HEADER,
@@ -66,6 +70,12 @@ class RootLoop:
         # ── Setup ─────────────────────────────────────────────────────────
         prompt_vars = self._config.prompt_vars()
         profile = self._config.profile
+        # Every operating value is read through the Config, not the frozen
+        # Profile: `Config.__getattr__` layers caller overrides over the
+        # profile, and the prompt is built from `prompt_vars()` which does the
+        # same. Reading `profile.X` here would let an override change what the
+        # model is told while the harness kept the default (R10).
+        cfg = self._config
 
         # Determine context type and length
         if isinstance(context, list):
@@ -83,30 +93,34 @@ class RootLoop:
 
         # Ingest context
         self._context_store = ContextStore(
-            spill_threshold=profile.context_spill_threshold,
+            spill_threshold=cfg.context_spill_threshold,
         )
         ctx_handle = self._context_store.ingest(context)
 
         # Subcall manager
         self._subcall_mgr = SubcallManager(
             self._backend,
-            max_concurrent=profile.max_concurrent_subcalls,
-            max_calls=profile.max_subcalls,
-            max_chars=profile.max_subcall_chars,
-            prompt_char_budget=profile.sub_prompt_char_budget,
+            max_concurrent=cfg.max_concurrent_subcalls,
+            max_calls=cfg.max_subcalls,
+            max_chars=cfg.max_subcall_chars,
+            prompt_char_budget=cfg.sub_prompt_char_budget,
             context_total_chars=context_len,
-            shortcut_warn_fraction=profile.shortcut_warn_fraction,
+            shortcut_warn_fraction=cfg.shortcut_warn_fraction,
         )
 
         # Parser (D1: restored — was accidentally deleted in kernel edit)
         self._parser = Parser(
-            max_consecutive_nudges=profile.max_consecutive_nudges,
-            max_consecutive_errors=profile.max_consecutive_errors,
+            max_consecutive_nudges=cfg.max_consecutive_nudges,
+            max_consecutive_errors=cfg.max_consecutive_errors,
         )
 
         # REPL
+        # R10: the cap passed here is exactly the `{repl_cap}` the prompt
+        # promises — both come from the same Config attribute, so template text
+        # and behaviour cannot drift apart.
         self._repl = REPLSandbox(
-            cell_timeout=profile.cell_timeout,
+            cell_timeout=cfg.cell_timeout,
+            stdout_cap=cfg.repl_output_char_cap,
         )
 
         # K1: Get helper definitions and core-memory from kernel bridge
@@ -128,7 +142,10 @@ class RootLoop:
         if self._kernel_bridge:
             from rlm_local.prompts import load_system_prompt_from_vault, load_fewshots_from_vault
             _system_prompt = load_system_prompt_from_vault(prompt_vars, self._kernel_bridge.vault, bridge=self._kernel_bridge)
-            _fewshots = load_fewshots_from_vault(self._kernel_bridge.vault)
+            _fewshots = load_fewshots_from_vault(
+                self._kernel_bridge.vault,
+                prompt_char_budget=cfg.sub_prompt_char_budget,
+            )
 
         messages = build_messages(
             query, context_len, _context_type, prompt_vars,
@@ -141,8 +158,13 @@ class RootLoop:
 
         # ── Main loop ─────────────────────────────────────────────────────
         final_answer: str | None = None
-        max_turns = profile.max_turns
+        max_turns = cfg.max_turns
         turn: int = -1  # 0-indexed internally; displayed as turn 1..N
+        # R6: an empty submission is a mistake, not an answer. It is nudged at
+        # most `max_consecutive_nudges` times before forced finalization takes
+        # over, so a model stuck in a submit-empty loop cannot burn the turn
+        # budget in silence.
+        empty_answer_nudges = 0
 
         for turn in range(max_turns):
             display_turn = turn + 1
@@ -200,9 +222,14 @@ class RootLoop:
                 # If we got here, the parser is out of nudges; forced finalize
                 break
 
+            stderr_nudge: str | None = None
+            empty_submission = False
+
             for bi, block in enumerate(result.blocks):
-                # Check for answer-in-block (parser detects answer dict usage)
-                content, ready = self._parser.check_answer_in_block(block)
+                # Static read of the block: does it *declare* a submission, and
+                # what literal content does it carry? Advisory only — the
+                # runtime value is authoritative (e.g. `answer['content'] = x`).
+                static_content, declares_ready = self._parser.check_answer_in_block(block)
 
                 repl_result = self._repl.execute(block)
 
@@ -215,8 +242,35 @@ class RootLoop:
                         repl_result.warnings,
                     )
 
-                # Check for answer['ready'] = True from REPL state
+                # ── §5.6 stage 4: stderr self-correction (R5) ─────────────
+                if repl_result.stderr and repl_result.stderr.strip():
+                    err_result = self._parser.parse_stderr(root_text, repl_result.stderr)
+                    if err_result is not None and err_result.nudge:
+                        stderr_nudge = err_result.nudge
+                    if self._logger:
+                        self._logger.log_guardrail(
+                            display_turn, "stderr",
+                            f"consecutive_errors={self._parser.consecutive_errors} "
+                            f"nudge={stderr_nudge is not None}",
+                        )
+                else:
+                    self._parser.reset_errors()
+
+                # ── Termination: answer['ready'] = True (R6) ──────────────
+                # `is not None`, never truthiness: an empty string is a
+                # *submission*, and it is handled as its own case below.
                 if repl_result.final_answer is not None:
+                    if repl_result.final_answer.strip() == "":
+                        empty_submission = True
+                        empty_answer_nudges += 1
+                        if self._logger:
+                            self._logger.log_guardrail(
+                                display_turn, "empty_answer",
+                                f"block={bi + 1} declares_ready={declares_ready} "
+                                f"static_content={static_content!r} "
+                                f"nudges={empty_answer_nudges}/{cfg.max_consecutive_nudges}",
+                            )
+                        break
                     final_answer = repl_result.final_answer
                     break
 
@@ -235,11 +289,28 @@ class RootLoop:
                 if self._logger:
                     self._logger.log_root_message("user", repl_msg)
 
-            if final_answer:
+            if final_answer is not None:
                 break
 
+            # R6: tell the model its submission was empty instead of silently
+            # spinning. Counted against max_consecutive_nudges.
+            if empty_submission:
+                if empty_answer_nudges <= cfg.max_consecutive_nudges:
+                    messages.append({"role": "user", "content": NUDGE_EMPTY_ANSWER})
+                    if self._logger:
+                        self._logger.log_root_message("user", NUDGE_EMPTY_ANSWER)
+                    continue
+                # Nudge budget exhausted — fall through to forced finalization.
+                break
+
+            # R5: hand the model the traceback-derived correction nudge.
+            if stderr_nudge:
+                messages.append({"role": "user", "content": stderr_nudge})
+                if self._logger:
+                    self._logger.log_root_message("user", stderr_nudge)
+
             # ── Error budget exceeded? ────────────────────────────────────
-            if self._parser.consecutive_errors > profile.max_consecutive_errors:
+            if self._parser.consecutive_errors > cfg.max_consecutive_errors:
                 break
 
         # ── Forced finalization ────────────────────────────────────────────
@@ -260,17 +331,17 @@ class RootLoop:
                     self._logger.log_root_message("assistant", final_text)
 
                 # Try one last courtesy FINAL: parse
-                final_match = __import__('re').search(r"^FINAL:\s*(.+)$", final_text, __import__('re').MULTILINE)
+                final_match = FINAL_LINE_RE.search(final_text)
                 if final_match:
                     final_answer = final_match.group(1).strip()
                 else:
                     final_answer = final_text.strip()
             except Exception:
-                final_answer = "(No answer produced — forced finalization failed)"
+                final_answer = FINALIZATION_FAILED
 
             if self._logger:
                 self._logger.log_end(
-                    final_answer or "",
+                    final_answer if final_answer is not None else "",
                     turn + 1,
                     self._subcall_mgr.calls_used if self._subcall_mgr else 0,
                     forced=True,
@@ -284,7 +355,9 @@ class RootLoop:
                     forced=False,
                 )
 
-        return final_answer or "(No answer produced)"
+        if final_answer is None or final_answer == "":
+            return NO_ANSWER_PRODUCED
+        return final_answer
 
     def shutdown(self) -> None:
         """Clean up all resources."""

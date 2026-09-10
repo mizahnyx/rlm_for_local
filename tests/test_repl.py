@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 from rlm_local.repl import REPLSandbox
+from rlm_local.templates import (
+    CELL_STDERR_TRUNCATED,
+    CELL_STDOUT_TRUNCATED,
+    CELL_TIMEOUT_ERROR,
+    REPL_WORKER_RESTARTED,
+)
 
 
 class MockSubcallMgr:
@@ -131,3 +137,269 @@ class TestREPLSandbox:
         repl.shutdown()
         # Should not raise if called again
         repl.shutdown()
+
+
+class TestCellTimeoutCorrelation:
+    """R4 — a timed-out cell must not have its late output misattributed.
+
+    Before the fix there were no cell ids: `execute()` sent `exec`, and if it
+    timed out the worker kept running. The *next* `execute()` then read the
+    previous cell's `result` message and reported it as the current cell's
+    output — silent, wrong evidence handed to the model.
+    """
+
+    def test_late_result_is_not_misattributed(self):
+        repl = REPLSandbox(cell_timeout=1.0)
+        mgr = MockSubcallMgr()
+        repl.start("data", mgr)
+        try:
+            # The cell outlives its window by ~0.3s, so its late result lands
+            # inside the *next* cell's window — exactly the race that used to
+            # hand cell 1's output to cell 2.
+            first = repl.execute("import time; time.sleep(1.3); print('CELL_ONE')")
+            assert CELL_TIMEOUT_ERROR.format(timeout=1.0) in first.stderr
+
+            second = repl.execute("print('CELL_TWO')")
+            assert REPL_WORKER_RESTARTED not in second.stderr, second
+            assert "CELL_TWO" in second.stdout, second
+            assert "CELL_ONE" not in second.stdout, (
+                "the previous cell's output leaked into this cell's result"
+            )
+        finally:
+            repl.shutdown()
+
+    def test_second_consecutive_timeout_restarts_the_worker(self):
+        repl = REPLSandbox(cell_timeout=1.0)
+        mgr = MockSubcallMgr()
+        repl.start("data", mgr)
+        try:
+            # 1st: times out; worker is still busy.
+            r1 = repl.execute("import time; time.sleep(4.0); print('SLOW_A')")
+            assert CELL_TIMEOUT_ERROR.format(timeout=1.0) in r1.stderr
+            assert REPL_WORKER_RESTARTED not in r1.stderr
+
+            # 2nd: drains the stale result, then times out again → restart.
+            r2 = repl.execute("import time; time.sleep(4.0); print('SLOW_B')")
+            assert REPL_WORKER_RESTARTED in r2.stderr, r2
+
+            # The loop continues on a fresh worker.
+            r3 = repl.execute("print('ALIVE')")
+            assert "ALIVE" in r3.stdout, r3
+            assert r3.stderr == ""
+        finally:
+            repl.shutdown()
+
+    def test_worker_can_be_restarted_explicitly(self):
+        repl = REPLSandbox(cell_timeout=5.0)
+        mgr = MockSubcallMgr()
+        repl.start("data", mgr)
+        try:
+            repl.execute("carried = 7")
+            assert "7" in repl.execute("print(carried)").stdout
+            repl.restart_worker()
+            result = repl.execute("print(carried)")
+            assert "NameError" in result.stderr
+        finally:
+            repl.shutdown()
+
+
+class TestOutputCapHonesty:
+    """R10 — the cap the prompt advertises is the cap that is enforced."""
+
+    def test_stdout_is_capped_at_the_configured_value(self):
+        cap = 64
+        repl = REPLSandbox(cell_timeout=10.0, stdout_cap=cap)
+        mgr = MockSubcallMgr()
+        repl.start("data", mgr)
+        try:
+            result = repl.execute("print('x' * 10000)")
+            marker = CELL_STDOUT_TRUNCATED.format(cap=cap)
+            assert result.stdout == "x" * cap + marker, len(result.stdout)
+        finally:
+            repl.shutdown()
+
+    def test_stdout_under_the_cap_is_untouched(self):
+        repl = REPLSandbox(cell_timeout=10.0, stdout_cap=4096)
+        mgr = MockSubcallMgr()
+        repl.start("data", mgr)
+        try:
+            result = repl.execute("print('short')")
+            assert result.stdout == "short\n"
+        finally:
+            repl.shutdown()
+
+    def test_stderr_truncation_preserves_head_and_tail(self):
+        """§5.5 — a traceback's last line is the useful one."""
+        cap = 200
+        repl = REPLSandbox(cell_timeout=10.0, stdout_cap=cap)
+        mgr = MockSubcallMgr()
+        repl.start("data", mgr)
+        try:
+            # Bulk in the *middle* of the traceback (a chained cause), short
+            # and useful last line — the shape real failures have.
+            code = "\n".join([
+                "try:",
+                "    raise RuntimeError('y' * 4000)",
+                "except RuntimeError as e:",
+                "    raise ValueError('SHORT_TAIL') from e",
+            ])
+            result = repl.execute(code)
+
+            # Head survives: the first traceback preamble is intact.
+            assert result.stderr.startswith("Traceback (most recent call last):")
+            # Tail survives: with head-only truncation the exception line — the
+            # entire point of showing stderr — would have been thrown away.
+            assert "ValueError: SHORT_TAIL" in result.stderr, "tail must survive"
+            assert "stderr elided" in result.stderr
+            # The bulk really was elided rather than silently kept.
+            assert "y" * 500 not in result.stderr
+            assert len(result.stderr) < 1000
+        finally:
+            repl.shutdown()
+
+    def test_stdout_cap_property_is_exposed(self):
+        assert REPLSandbox(stdout_cap=1234).stdout_cap == 1234
+
+
+class TestDiskBackedContextInWorker:
+    """R1 — the spill contract must survive the socket boundary.
+
+    Before the fix `start()` did `str(context)`, shipping the entire blob to the
+    worker and leaving it a plain `str`, so `hasattr(context, 'grep')` was
+    always False and RAM was O(context) in both processes.
+    """
+
+    def _disk_context(self, text: str):
+        from rlm_local.context_store import ContextStore
+
+        store = ContextStore(spill_threshold=1)
+        return store, store.ingest(text)
+
+    def test_init_payload_carries_a_reference_not_the_text(self):
+        import rlm_local.repl as repl_mod
+
+        big = "abcdefghij" * 200_000  # 2M chars — well past any spill threshold
+        store, ctx = self._disk_context(big)
+        sent: list[dict] = []
+        real_send = repl_mod._send_msg
+
+        def spy(sock, msg):
+            sent.append(msg)
+            return real_send(sock, msg)
+
+        repl = REPLSandbox(cell_timeout=20.0)
+        mgr = MockSubcallMgr()
+        repl_mod._send_msg = spy
+        try:
+            repl.start(ctx, mgr)
+            init = sent[0]
+            assert init["cmd"] == "init"
+            spec = init["context"]
+            assert isinstance(spec, dict) and spec["kind"] == "file", spec
+            assert spec["total"] == len(ctx)
+            # The whole init message must be tiny compared to the context.
+            import json
+            assert len(json.dumps(init)) < 2000
+        finally:
+            repl_mod._send_msg = real_send
+            repl.shutdown()
+            store.cleanup()
+
+    def test_worker_reads_the_spilled_file_lazily(self):
+        text = ("日本語のテキスト\n" * 5000) + "needle: café 🎉\n"
+        store, ctx = self._disk_context(text)
+        repl = REPLSandbox(cell_timeout=20.0)
+        mgr = MockSubcallMgr()
+        try:
+            repl.start(ctx, mgr)
+            # len() is a byte count, and the worker agrees with the handle.
+            out = repl.execute("print(len(context))").stdout.strip()
+            assert int(out) == len(text.encode("utf-8"))
+
+            # Lazy methods exist on the worker-side handle.
+            assert repl.execute("print(hasattr(context, 'grep'))").stdout.strip() == "True"
+            assert repl.execute("print(hasattr(context, 'chunk'))").stdout.strip() == "True"
+
+            # grep and chunk work on non-ASCII content, streamed from disk.
+            hits = repl.execute("hits = grep('café'); print(len(hits)); print(hits[0])")
+            assert "1" in hits.stdout
+            assert "needle: café 🎉" in hits.stdout
+
+            chunks = repl.execute("cs = chunk(size=100); print(len(cs))")
+            assert int(chunks.stdout.strip().splitlines()[-1]) > 100
+
+            # lines(start) uses the worker's own byte index.
+            lines = repl.execute("print(list(context.lines(start=2, count=1)))")
+            assert "日本語のテキスト" in lines.stdout
+        finally:
+            repl.shutdown()
+
+    def test_worker_does_not_delete_or_modify_the_context_file(self):
+        store, ctx = self._disk_context("x" * 100_000)
+        path = ctx._path
+        before = path.stat()
+        repl = REPLSandbox(cell_timeout=20.0)
+        mgr = MockSubcallMgr()
+        try:
+            repl.start(ctx, mgr)
+            repl.execute("print(len(context)); grep('x', max_hits=1); chunk(size=50)")
+            repl.shutdown()
+            # ContextStore.cleanup() keeps ownership: the file survives shutdown.
+            assert path.exists()
+            after = path.stat()
+            assert after.st_size == before.st_size
+            assert after.st_mtime_ns == before.st_mtime_ns
+        finally:
+            store.cleanup()
+        assert not path.exists(), "the store still owns cleanup"
+
+    def test_in_memory_context_still_works(self):
+        repl = REPLSandbox(cell_timeout=10.0)
+        mgr = MockSubcallMgr()
+        repl.start("plain text", mgr)
+        try:
+            assert repl.execute("print(context)").stdout.strip() == "plain text"
+            assert repl.execute("print(len(context))").stdout.strip() == "10"
+        finally:
+            repl.shutdown()
+
+    def test_needle_in_the_middle_of_a_large_spilled_context(self):
+        """The realistic shape: a 600K-char spilled context, needle mid-file.
+
+        Exercises the whole lazy path at scale — the byte-offset addressing, the
+        streaming `grep`, and `str()` — rather than a handful of characters at
+        the end of a small file.
+        """
+        filler = ("The committee reviewed the quarterly logistics report and "
+                  "noted that no anomalies were observed.\n")
+        needle = "The archive access code is ZQ-7741."
+        parts: list[str] = []
+        total = 0
+        i = 0
+        placed = False
+        target = 300_000
+        while total < target:
+            i += 1
+            if not placed and total >= target // 2:
+                placed = True
+                line = f"[{i:06d}] {needle}\n"
+            else:
+                line = f"[{i:06d}] {filler}"
+            parts.append(line)
+            total += len(line)
+        text = "".join(parts)
+        assert needle in text, "fixture bug: needle not inserted"
+
+        store, ctx = self._disk_context(text)
+        assert len(ctx) > 300_000
+        repl = REPLSandbox(cell_timeout=30.0, stdout_cap=200_000)
+        mgr = MockSubcallMgr()
+        try:
+            repl.start(ctx, mgr)
+            hits = repl.execute("hits = grep('ZQ-7741'); print(len(hits))")
+            assert hits.stdout.strip().splitlines()[-1] == "1", hits.stdout
+            assert needle in hits.stdout
+            assert repl.execute("print('ZQ-7741' in str(context))").stdout.strip() == "True"
+        finally:
+            repl.shutdown()
+            store.cleanup()

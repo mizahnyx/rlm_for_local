@@ -9,9 +9,22 @@ wheels/
 # Virtual environments
 .venv
 .pytest_cache/
+
+# TLS material — never commit private keys or certs (S1/R17).
+# Generate a per-host pair instead; see the operator guide, "HTTPS Setup".
+*.pem
+*.crt
+*.key
+
+# Trajectory logs and run artifacts (R22)
 *.jsonl
 rlm_repl_*/
 docs/*.pdf
 k4-acceptance-run.txt
 k4_prog3_candidate.txt
 logs/k4-gepa-checkpoints/
+logs/trajectories/
+
+# Sandbox temp roots
+.tmp_pytest/
+.tmp_rt/

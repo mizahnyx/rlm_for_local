@@ -12,6 +12,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 from rlm_local.model_backend import ModelBackend
+from rlm_local.parser import repair_json
 from rlm_local.templates import (
     SUBCALL_CHAR_EXHAUSTED,
     SUBCALL_COUNT_EXHAUSTED,
@@ -32,7 +33,6 @@ class SubcallManager:
         prompt_char_budget: int = 16000,
         context_total_chars: int = 0,
         shortcut_warn_fraction: float = 0.60,
-        sub_model: str = "",
     ) -> None:
         self._backend = backend
         self._max_concurrent = max_concurrent
@@ -49,6 +49,8 @@ class SubcallManager:
 
         # Memoization cache: prompt_hash -> response
         self._cache: dict[str, str] = {}
+        self._cache_hits = 0
+        self._cache_lock = threading.Lock()
 
         # Thread pool for concurrent sub-calls
         self._executor = ThreadPoolExecutor(max_workers=max_concurrent)
@@ -84,8 +86,20 @@ class SubcallManager:
     # ── Internals ─────────────────────────────────────────────────────────
 
     def _do_call(self, prompt: str, schema: dict[str, Any] | None) -> str:
-        """Execute one sub-call with budget checks, memoization, and sizing warnings."""
+        """Execute one sub-call with memoization, budget checks, and sizing warnings.
+
+        Order matters (R3): the memoization cache is consulted **before** the
+        budget is charged. Memoization exists to relieve budget pressure under
+        repeated prompts, so charging a cache hit would defeat its purpose.
+        """
         prompt_len = len(prompt)
+
+        # Memoization check — free, and must precede the budget charge.
+        cache_key = hashlib.sha256(prompt.encode()).hexdigest()
+        with self._cache_lock:
+            if cache_key in self._cache:
+                self._cache_hits += 1
+                return self._cache[cache_key]
 
         # Budget check
         with self._lock:
@@ -97,11 +111,6 @@ class SubcallManager:
                 return SUBCALL_CHAR_EXHAUSTED
             self._calls_used += 1
             self._chars_used += prompt_len
-
-        # Memoization check
-        cache_key = hashlib.sha256(prompt.encode()).hexdigest()
-        if cache_key in self._cache:
-            return self._cache[cache_key]
 
         # Size warning (non-blocking)
         warnings: list[str] = []
@@ -140,8 +149,15 @@ class SubcallManager:
         except Exception as e:
             response = f"Error: {e}"
 
+        # §5.4 / §5.6 item 6: when a schema was requested, repair-parse the
+        # response the way the design requires — servers that only honour
+        # `response_format` loosely return fenced or prose-wrapped JSON.
+        if use_schema is not None and response:
+            response = repair_json(response, use_schema)
+
         # Cache the result
-        self._cache[cache_key] = response
+        with self._cache_lock:
+            self._cache[cache_key] = response
         return response
 
     # ── Budget queries ────────────────────────────────────────────────────
@@ -160,7 +176,18 @@ class SubcallManager:
 
     @property
     def cache_hits(self) -> int:
-        return len(self._cache)
+        """Number of sub-calls served from the memoization cache (R3).
+
+        This is a hit counter, not the cache size.
+        """
+        with self._cache_lock:
+            return self._cache_hits
+
+    @property
+    def cache_size(self) -> int:
+        """Number of distinct prompts memoized."""
+        with self._cache_lock:
+            return len(self._cache)
 
     def shutdown(self) -> None:
         self._executor.shutdown(wait=False)

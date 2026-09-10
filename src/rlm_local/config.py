@@ -122,14 +122,21 @@ class Config:
         raise AttributeError(name)
 
     def prompt_vars(self) -> dict[str, Any]:
-        """Return a dict of values for .format() injection into prompts."""
+        """Return a dict of values for .format() injection into prompts.
+
+        Every key here must be consumed by a prompt template — an inert capacity
+        claim in `prompt_vars` is a claim the model never sees, and
+        `tests/test_prompts.py::TestPromptVarsDiscipline` enforces the match in
+        both directions.
+
+        `root_ctx_size`/`sub_ctx_size` were removed in R16: no template
+        referenced them.
+        """
         return {
             "repl_cap": self.repl_output_char_cap,
             "sub_budget": self.sub_prompt_char_budget,
             "max_turns": self.max_turns,
             "example_chunking_idiom": self.example_chunking_idiom,
-            "root_ctx_size": self.root_ctx_size,
-            "sub_ctx_size": self.sub_ctx_size,
         }
 
 

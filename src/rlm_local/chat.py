@@ -131,12 +131,22 @@ class ChatSession:
             print("Usage: /ask <query>")
             return
 
+        context = self.session_context
+        if not context.strip():
+            # R16: an empty context used to be passed straight to completion(),
+            # which spends a full run discovering there is nothing to read.
+            print(
+                "No context loaded. Use /ingest <path> to add Markdown files "
+                "before asking."
+            )
+            return
+
         import rlm_local
 
         try:
             answer = rlm_local.completion(
                 arg,
-                self.session_context,
+                context,
                 profile=self.profile,
                 backend=self.backend,
                 config=self.config,

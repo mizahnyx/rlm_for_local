@@ -31,6 +31,10 @@ class StubBackend:
     def __init__(self, responses: list[str] | None = None) -> None:
         self.responses = responses or []
         self.calls: list[dict[str, Any]] = []
+        # Length of the byte-stable prefix (system prompt + metadata + prologue
+        # + few-shot + first turn header), captured on the first call so tests
+        # can tell live messages from prompt scaffolding.
+        self.prefix_len: int | None = None
 
     def chat(
         self,
@@ -41,10 +45,13 @@ class StubBackend:
         temperature: float = 0.0,
         response_schema: dict[str, Any] | None = None,
     ) -> str:
+        if self.prefix_len is None:
+            self.prefix_len = len(messages)
         self.calls.append({
             "tier": tier,
             "message_count": len(messages),
             "last_role": messages[-1]["role"] if messages else None,
+            "messages": [dict(m) for m in messages],
         })
         if self.responses:
             return self.responses.pop(0)
@@ -56,6 +63,56 @@ class StubBackend:
             "answer['ready'] = True",
             "```",
         ])
+
+    def user_messages(self) -> list[str]:
+        """Every user-role message the loop has sent so far (incl. prefix)."""
+        return [
+            m["content"]
+            for call in self.calls
+            for m in call["messages"]
+            if m.get("role") == "user"
+        ]
+
+    def live_user_messages(self) -> list[str]:
+        """User messages appended *during* the run, each counted once.
+
+        The message list is cumulative and the bundled few-shot in the prefix
+        is itself made of `REPL output:` messages, so live output is read from
+        the last call's post-`prefix_len` slice.
+        """
+        if self.prefix_len is None or not self.calls:
+            return []
+        return [
+            m["content"]
+            for m in self.calls[-1]["messages"][self.prefix_len:]
+            if m.get("role") == "user"
+        ]
+
+    def live_assistant_messages(self) -> list[str]:
+        if self.prefix_len is None or not self.calls:
+            return []
+        return [
+            m["content"]
+            for m in self.calls[-1]["messages"][self.prefix_len:]
+            if m.get("role") == "assistant"
+        ]
+
+    def count_appended(self, text: str) -> int:
+        """How many times `text` was appended as a user message during the run."""
+        return sum(1 for m in self.live_user_messages() if m == text)
+
+    def trailing_user_messages(self) -> list[str]:
+        """The last user message of each call — i.e. what the loop just appended.
+
+        Needed for counting: the message list is cumulative, so a nudge sent
+        once appears in every later call's history.
+        """
+        out = []
+        for call in self.calls:
+            msgs = call["messages"]
+            if msgs and msgs[-1].get("role") == "user":
+                out.append(msgs[-1]["content"])
+        return out
 
 
 # ── Fixtures ───────────────────────────────────────────────────────────────
@@ -172,6 +229,310 @@ class TestRootLoopIntegration:
         assert answer is not None
         assert isinstance(answer, str)
         assert len(answer) > 0
+
+
+class TestAnswerFinalizationGuards:
+    """R6 — empty submissions are nudged, never silently swallowed.
+
+    Before the fix, `answer['ready'] = True` with `content == ""` produced
+    `final_answer = ""`, which the loop's truthiness check read as "not final",
+    so the run continued without ever telling the model what went wrong. The
+    nudge that existed for exactly this case (`NUDGE_EMPTY_ANSWER`) was never
+    emitted anywhere.
+    """
+
+    def test_empty_submission_is_nudged_then_real_answer_wins(self, tiny_cfg):
+        from rlm_local.templates import NUDGE_EMPTY_ANSWER
+
+        backend = StubBackend(responses=[
+            # Turn 0 — claims readiness with nothing in it.
+            "\n".join([
+                "Submitting now.",
+                "```repl",
+                "answer['content'] = ''",
+                "answer['ready'] = True",
+                "```",
+            ]),
+            # Turn 1 — the real thing.
+            "\n".join([
+                "Sorry — here it is.",
+                "```repl",
+                "answer['content'] = 'the real answer'",
+                "answer['ready'] = True",
+                "```",
+            ]),
+        ])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None)
+        try:
+            answer = loop.run("Empty answer test", "Some context")
+        finally:
+            loop.shutdown()
+
+        assert answer == "the real answer"
+        from rlm_local.templates import NUDGE_EMPTY_ANSWER
+        assert any(NUDGE_EMPTY_ANSWER in m for m in backend.user_messages())
+
+    def test_whitespace_only_submission_is_treated_as_empty(self, tiny_cfg):
+        backend = StubBackend(responses=[
+            "\n".join([
+                "```repl",
+                "answer['content'] = '   \\n  '",
+                "answer['ready'] = True",
+                "```",
+            ]),
+            "\n".join([
+                "```repl",
+                "answer['content'] = 'actual'",
+                "answer['ready'] = True",
+                "```",
+            ]),
+        ])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None)
+        try:
+            answer = loop.run("Whitespace answer test", "Some context")
+        finally:
+            loop.shutdown()
+        assert answer == "actual"
+
+    def test_empty_submission_nudge_text_reaches_the_model(self, tiny_cfg):
+        from rlm_local.templates import NUDGE_EMPTY_ANSWER
+
+        backend = StubBackend(responses=[
+            "\n".join([
+                "```repl",
+                "answer['content'] = ''",
+                "answer['ready'] = True",
+                "```",
+            ]),
+            "\n".join([
+                "```repl",
+                "answer['content'] = 'fixed'",
+                "answer['ready'] = True",
+                "```",
+            ]),
+        ])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None)
+        try:
+            loop.run("Nudge content test", "Some context")
+        finally:
+            loop.shutdown()
+
+        nudges = [
+            m for c in backend.calls for m in c["messages"]
+            if m["role"] == "user" and NUDGE_EMPTY_ANSWER in m["content"]
+        ]
+        assert nudges, "the empty-answer nudge must be sent to the model"
+
+    def test_repeated_empty_submissions_do_not_spin_forever(self, tiny_cfg):
+        """Nudges are bounded by max_consecutive_nudges, then forced finalize."""
+        backend = StubBackend(responses=[
+            "\n".join([
+                "```repl",
+                "answer['content'] = ''",
+                "answer['ready'] = True",
+                "```",
+            ])
+        ] * 50 + ["FINAL: gave up gracefully"])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None)
+        try:
+            answer = loop.run("Spin test", "Some context")
+        finally:
+            loop.shutdown()
+
+        # 1..max_turns turns, plus at most one forced-finalization call.
+        assert len(backend.calls) <= tiny_cfg.max_turns + 2, (
+            f"loop made {len(backend.calls)} model calls"
+        )
+        assert answer.strip() != ""
+
+    def test_empty_answer_nudge_budget_is_respected(self, tiny_cfg):
+        from rlm_local.templates import NUDGE_EMPTY_ANSWER
+
+        backend = StubBackend(responses=[
+            "\n".join([
+                "```repl",
+                "answer['content'] = ''",
+                "answer['ready'] = True",
+                "```",
+            ])
+        ] * 50 + ["FINAL: done"])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None)
+        try:
+            loop.run("Nudge budget test", "Some context")
+        finally:
+            loop.shutdown()
+
+        # The message history is cumulative, so count appended messages only.
+        nudges = backend.count_appended(NUDGE_EMPTY_ANSWER)
+        assert nudges <= tiny_cfg.max_consecutive_nudges, (
+            f"{nudges} empty-answer nudges exceeds the budget "
+            f"{tiny_cfg.max_consecutive_nudges}"
+        )
+        assert nudges >= 1
+
+
+class TestStderrSelfCorrectionWiring:
+    """R5 — §5.6 stage 4 must actually run: a traceback must engage the
+    consecutive-error budget and hand the model a correction nudge."""
+
+    def test_error_then_recovery_finishes_with_the_corrected_answer(self, tiny_cfg):
+        from rlm_local.templates import NUDGE_STDERR_ERROR
+
+        backend = StubBackend(responses=[
+            # Turn 0 — a cell that raises.
+            "\n".join([
+                "Probing.",
+                "```repl",
+                "raise ValueError('boom')",
+                "```",
+            ]),
+            # Turn 1 — corrected cell that submits.
+            "\n".join([
+                "Fixed the typo.",
+                "```repl",
+                "answer['content'] = 'recovered'",
+                "answer['ready'] = True",
+                "```",
+            ]),
+        ])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None)
+        try:
+            answer = loop.run("Recovery test", "Some context")
+        finally:
+            loop.shutdown()
+
+        assert answer == "recovered"
+        nudges = [
+            m["content"] for c in backend.calls for m in c["messages"]
+            if m["role"] == "user" and "consecutive errors" in m["content"]
+        ]
+        assert nudges, "the stderr correction nudge must reach the model"
+        assert "ValueError" in nudges[0]
+
+    def test_clean_cell_resets_the_error_streak(self, tiny_cfg):
+        """A cell that raises, then a clean cell, then success."""
+        backend = StubBackend(responses=[
+            "```repl\nraise RuntimeError('x')\n```",
+            "```repl\nprint('clean')\n```",
+            "```repl\nanswer['content'] = 'ok'; answer['ready'] = True\n```",
+        ])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None)
+        try:
+            answer = loop.run("Reset test", "Some context")
+        finally:
+            loop.shutdown()
+        assert answer == "ok"
+
+    def test_persistent_errors_reach_forced_finalization(self, tiny_cfg):
+        """A model that never stops erroring must hit the error budget."""
+        erroring = "```repl\nraise ValueError('always')\n```"
+        backend = StubBackend(responses=[erroring] * 40 + ["FINAL: best effort"])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None)
+        try:
+            answer = loop.run("Error budget test", "Some context")
+        finally:
+            loop.shutdown()
+
+        assert answer.strip() != ""
+        assert len(backend.calls) <= tiny_cfg.max_turns + 2
+
+    def test_error_budget_is_bounded_by_max_consecutive_errors(self, tiny_cfg):
+        erroring = "```repl\nraise ValueError('always')\n```"
+        backend = StubBackend(responses=[erroring] * 40 + ["FINAL: best effort"])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None)
+        try:
+            loop.run("Error budget bound test", "Some context")
+        finally:
+            loop.shutdown()
+        # The loop must stop well before exhausting 40 scripted responses.
+        assert len(backend.calls) < 40
+
+
+class TestSubcallRepairJsonWiring:
+    """R5 — `repair_json` must run on schema'd sub-call responses (§5.4)."""
+
+    def test_schema_response_is_repair_parsed(self, tiny_cfg):
+        from rlm_local.subcall_manager import SubcallManager
+
+        class JsonBackend:
+            def chat(self, messages, *, tier="sub", max_tokens=1024,
+                     temperature=0.0, response_schema=None):
+                return 'Here you go:\n```json\n{"answer": "1648"}\n```\nHope that helps!'
+
+        mgr = SubcallManager(JsonBackend(), max_calls=5, max_chars=10000)
+        try:
+            out = mgr.llm_query("give me json", schema={"type": "object"})
+            assert out == '{"answer": "1648"}', out
+        finally:
+            mgr.shutdown()
+
+    def test_no_schema_leaves_response_untouched(self, tiny_cfg):
+        from rlm_local.subcall_manager import SubcallManager
+
+        raw = 'Here you go:\n```json\n{"answer": "1648"}\n```'
+
+        class Backend:
+            def chat(self, messages, *, tier="sub", max_tokens=1024,
+                     temperature=0.0, response_schema=None):
+                return raw
+
+        mgr = SubcallManager(Backend(), max_calls=5, max_chars=10000)
+        try:
+            assert mgr.llm_query("give me json") == raw
+        finally:
+            mgr.shutdown()
+
+
+class TestOutputCapPromise:
+    """R10 — "the model is never lied to": the prompt's `{repl_cap}` and the
+    enforced stdout cap must be the same number, by construction."""
+
+    def test_prompt_cap_and_enforced_cap_agree(self):
+        from rlm_local.config import load_config
+        from rlm_local.templates import CELL_STDOUT_TRUNCATED
+
+        cap = 37  # deliberately unlike any profile default
+        cfg = load_config("tiny", repl_output_char_cap=cap)
+        backend = StubBackend(responses=[
+            "```repl\nprint('x' * 5000)\n```",
+            "```repl\nanswer['content'] = 'done'; answer['ready'] = True\n```",
+        ])
+        loop = RootLoop(cfg, backend, kernel_bridge=None)
+        try:
+            answer = loop.run("Cap test", "Some context")
+        finally:
+            loop.shutdown()
+        assert answer == "done"
+
+        system_prompt = backend.calls[0]["messages"][0]["content"]
+        assert f"truncated to {cap} characters" in system_prompt, (
+            "the prompt must advertise the cap that is actually enforced"
+        )
+
+        repl_messages = [m for m in backend.live_user_messages() if m.startswith("REPL output:")]
+        assert repl_messages, "expected a REPL output message"
+        body = repl_messages[0]
+        assert "x" * cap in body
+        assert "x" * (cap + 1) not in body, "more than the advertised cap leaked"
+        assert CELL_STDOUT_TRUNCATED.format(cap=cap) in body
+
+    def test_default_profile_cap_is_enforced_too(self, tiny_cfg):
+        from rlm_local.templates import CELL_STDOUT_TRUNCATED
+
+        cap = tiny_cfg.repl_output_char_cap
+        backend = StubBackend(responses=[
+            "```repl\nprint('z' * 20000)\n```",
+            "```repl\nanswer['content'] = 'ok'; answer['ready'] = True\n```",
+        ])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None)
+        try:
+            answer = loop.run("Default cap test", "Some context")
+        finally:
+            loop.shutdown()
+        assert answer == "ok"
+        body = [m for m in backend.live_user_messages() if m.startswith("REPL output:")][0]
+        assert CELL_STDOUT_TRUNCATED.format(cap=cap) in body
+        assert "z" * (cap + 1) not in body
 
 
 class TestCompletionAPI:

@@ -5,6 +5,10 @@ accidental str.format collisions with code blocks containing braces.
 
 When a kernel vault is available, templates load from contract/templates/
 pages first, falling back to these package-bundled defaults (§5.2, K0).
+
+`tests/test_templates.py::test_no_dead_templates` enforces that every constant
+defined here is actually referenced by `src/rlm_local/` — a template that no
+code path can emit is a lie about what the harness says.
 """
 
 
@@ -57,6 +61,12 @@ NUDGE_NARRATION = (
     "Emit exactly one ```repl block containing the code you intend to run."
 )
 
+NUDGE_STDERR_ERROR = (
+    "Your last cell raised {error_kind} "
+    "({errors}/{max_errors} consecutive errors). "
+    "Read the traceback above, fix the cause, and emit exactly one ```repl block."
+)
+
 # ---------------------------------------------------------------------------
 # Sub-call budget / warning messages (§5.4)
 # ---------------------------------------------------------------------------
@@ -93,17 +103,22 @@ FORCED_FINALIZATION_PROMPT = (
     "answer now. Summarize your findings in plain text."
 )
 
+# Terminal placeholders — the harness must never return an empty string as an
+# answer, and these are the only places that decide what to say instead.
+NO_ANSWER_PRODUCED = "(No answer produced)"
+FINALIZATION_FAILED = "(No answer produced — forced finalization failed)"
+
 # ---------------------------------------------------------------------------
-# Cell limits
+# Cell limits (§5.5, R1.3)
 # ---------------------------------------------------------------------------
 
 CELL_TIMEOUT_ERROR = "Error: cell exceeded the {timeout}s time limit."
 CELL_STDOUT_TRUNCATED = "\n[... output truncated to {cap} characters ...]"
-
-# ---------------------------------------------------------------------------
-# REPL environment boot messages
-# ---------------------------------------------------------------------------
-
-REPL_READY = "REPL ready."
-REPL_FINAL_ANSWER = "Final answer submitted."
+# stderr keeps head and tail (the traceback ends in the useful line), so the
+# elision is reported in the middle.
+CELL_STDERR_TRUNCATED = "\n[... {elided} characters of stderr elided ...]\n"
+REPL_WORKER_RESTARTED = (
+    "Error: the REPL worker did not respond and was restarted. "
+    "All REPL variables (including any partial results) were lost."
+)
 

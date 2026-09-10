@@ -188,27 +188,34 @@ def test_empty_input_noop():
 
 # ── Tests: /ask ─────────────────────────────────────────────────────────────
 
-def test_ask_slash():
-    output = _run_script(["/ask What is the answer?", "/quit"])
+def test_ask_slash(test_file1: Path):
+    output = _run_script([f"/ingest {test_file1}", "/ask What is the answer?", "/quit"])
     assert "stub response" in output
 
 
-def test_ask_implicit_non_slash():
-    output = _run_script(["What is life?", "/quit"])
+def test_ask_implicit_non_slash(test_file1: Path):
+    output = _run_script([f"/ingest {test_file1}", "What is life?", "/quit"])
     assert "stub response" in output
 
 
-def test_ask_with_context_wiring():
+def test_ask_without_context_warns_instead_of_calling_the_model():
+    """R16 — an empty session context must not burn a full completion run."""
+    backend = StubBackend("should not be reached")
+    output = _run_script(["/ask what is anything?", "/quit"], backend=backend)
+    assert backend.calls == [], "completion() was called with an empty context"
+    assert "No context loaded" in output
+
+
+def test_ask_with_context_wiring(test_file1: Path):
     """Context accumulated via /ingest should feed into /ask."""
     backend = StubBackend("context-aware answer")
     output = _run_script(
-        ["/ingest docs/notes.md", "/ask summarize this", "/quit"],
+        [f"/ingest {test_file1}", "/ask summarize this", "/quit"],
         backend=backend,
     )
     # Backend was called; RootLoop makes multiple turns internally
     assert len(backend.calls) > 0
-    # The ingest path doesn't exist, so context is empty
-    assert "not found" in output.lower()
+    assert "context-aware answer" in output
 
 
 def test_ask_empty_usage():
@@ -400,10 +407,10 @@ def test_unknown_command():
 
 # ── Tests: Error handling ───────────────────────────────────────────────────
 
-def test_ask_handles_backend_error():
+def test_ask_handles_backend_error(test_file1: Path):
     backend = FailingBackend()
     output = _run_script(
-        ["/ask something", "/quit"],
+        [f"/ingest {test_file1}", "/ask something", "/quit"],
         backend=backend,
     )
     assert "Completion error" in output
@@ -446,8 +453,8 @@ def test_eof_quits():
 
 # ── Tests: Non-slash input treated as /ask ──────────────────────────────────
 
-def test_plain_text_is_ask():
-    output = _run_script(["hello", "/quit"])
+def test_plain_text_is_ask(test_file1: Path):
+    output = _run_script([f"/ingest {test_file1}", "hello", "/quit"])
     assert "stub response" in output
 
 

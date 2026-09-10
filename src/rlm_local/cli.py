@@ -6,6 +6,7 @@ Subcommands:
   rlm ingest     Ingest Markdown documents into the vault as pages
   rlm search     Hybrid search over the vault
   rlm get        Print a vault page
+  rlm tag        Tag a vault page (and reindex)
   rlm check      Model suitability battery
   rlm vault      Pass-through to rlm-kernel vault management
   rlm optimize   GEPA offline optimization
@@ -211,9 +212,11 @@ def _cmd_chat(args: argparse.Namespace) -> int:
         vault_str = str(args.vault_path) if args.vault_path else None
         run_chat(profile=args.profile, vault_path=vault_str)
         return 0
-    except ImportError:
-        print("Chat mode not yet implemented. Run 'rlm ask' for single completions.",
-              file=sys.stderr)
+    except ImportError as e:
+        # Chat mode exists; this fires only when a kernel dependency is missing.
+        print(f"Chat mode unavailable: {e}", file=sys.stderr)
+        print("Install the kernel dependencies (uv sync) and retry, "
+              "or use 'rlm ask' for single completions.", file=sys.stderr)
         return 1
 
 

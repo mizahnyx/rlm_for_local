@@ -7,6 +7,8 @@ of live turns (R4.1 equivalence-class normalization).
 
 from __future__ import annotations
 
+import re
+
 # ── System prompt (§5.5) ──────────────────────────────────────────────────
 # Design notes:
 # - {repl_cap}, {sub_budget}, {max_turns}, {example_chunking_idiom} injected
@@ -84,6 +86,46 @@ FEWSHOT_EXAMPLE = [
      "```"),
 ]
 
+# ── Example 2: voluntary submission (R25.6) ───────────────────────────────
+# The recorded P4 follow-up: the model was scoring 0/15 on "answer-dict
+# submission" because it described its answer in prose and let forced
+# finalization carry the run. Example 1 *does* end in a submission, but it
+# arrives after three turns of narration; this example makes the point
+# unmissable — a short probe, then submit *immediately*, in the same turn the
+# evidence is verified, without being asked.
+
+EXAMPLE_2_HEADER = "Example 2: Submit the moment the evidence is verified."
+
+FEWSHOT_SUBMISSION_EXAMPLE = [
+    ("user", "Answer the following: What is the vault access code?\n\n"
+             "Your context is a str of 120000 total characters. A sub-LLM call "
+             "handles roughly 8000 characters well. You have 8 turns."),
+    ("assistant",
+     "One step is enough: grep the context for the code, then submit it in the "
+     "same turn. I will not narrate the answer instead of submitting it.\n\n"
+     "```repl\n"
+     "hits = grep('access code')\n"
+     "print(f'Found {len(hits)} matches')\n"
+     "print(hits[0] if hits else 'none')\n"
+     "```"),
+    ("user", "REPL output:\n"
+             "Found 1 matches\n"
+             "The vault access code is KX-2210 and it rotates every quarter."),
+    ("assistant",
+     "The evidence is verified, so I submit now — this is the step that ends the "
+     "task. Note that submitting means executing code that sets `answer`; writing "
+     "the answer as prose leaves the task unfinished and the harness has to force "
+     "a finalization.\n\n"
+     "```repl\n"
+     "answer['content'] = 'The vault access code is KX-2210.'\n"
+     "answer['ready'] = True\n"
+     "```"),
+]
+
+FEWSHOT_EXAMPLE = FEWSHOT_EXAMPLE + [
+    ("user", EXAMPLE_2_HEADER)
+] + FEWSHOT_SUBMISSION_EXAMPLE
+
 
 def build_system_prompt(prompt_vars: dict) -> str:
     """Construct the full system prompt with config values injected."""
@@ -152,7 +194,8 @@ def load_system_prompt_from_vault(
     1. contract/repl-contract.md body (rendered with prompt_vars)
     2. One-line summaries of active helper pages
     3. contract/how-to-work.md body
-    4. A few-shot transcript from fewshots/
+    4. A few-shot transcript from fewshot/ (R8: one active vault page, if it
+       fits the prompt budget; see load_fewshots_from_vault)
 
     Args:
         bridge: Optional KernelBridge for index-backed helper listing (C1).
@@ -208,20 +251,126 @@ def load_system_prompt_from_vault(
         return build_system_prompt(prompt_vars)
 
 
+def parse_fewshot_body(body: str) -> list[tuple[str, str]]:
+    """Turn a vault few-shot page body into (role, content) message pairs (R8).
+
+    Two shapes are recognised, both of which this repository actually writes:
+
+    1. ``## Query`` + ``## Answer`` — written by ``rlm_kernel.seed`` and by
+       ``rlm_kernel.optimize.bootstrap_fewshots``. Yields one user/assistant
+       pair.
+    2. One or more ``## Example`` / ``## Examples`` sections, each optionally
+       split by a ``### Assistant`` (or ``### Response`` / ``### Answer``)
+       sub-heading into the user turn and the assistant turn. Yields one pair
+       per section.
+
+    Anything else yields ``[]``. Guessing at a transcript the page does not
+    actually contain would put invented turns in the prompt.
+    """
+    sections = _sections(body)
+    if not sections:
+        return []
+
+    by_title = {title: content for title, content in sections}
+    if by_title.get("query") and by_title.get("answer"):
+        return [("user", by_title["query"]), ("assistant", by_title["answer"])]
+
+    pairs: list[tuple[str, str]] = []
+    for title, content in sections:
+        if not title.startswith("example"):
+            continue
+        split = _split_example(content)
+        if split is not None:
+            pairs.extend(split)
+    return pairs
+
+
+# A `## Heading` line starts a new section.
+_SECTION_RE = re.compile(r"^##[ \t]+(.+?)[ \t]*$", re.MULTILINE)
+# Within an example section, the assistant turn starts at one of these.
+_ASSISTANT_HEADING_RE = re.compile(
+    r"^###[ \t]*(?:assistant|response|answer)[ \t]*$", re.MULTILINE | re.IGNORECASE
+)
+# ...and the user turn, when it is labelled at all.
+_USER_HEADING_RE = re.compile(
+    r"^###[ \t]*(?:user|query|question|prompt)[ \t]*$", re.MULTILINE | re.IGNORECASE
+)
+
+
+def _sections(body: str) -> list[tuple[str, str]]:
+    """Split a body on `## ` headings into (lowercased title, content) pairs."""
+    matches = list(_SECTION_RE.finditer(body))
+    out: list[tuple[str, str]] = []
+    for i, match in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
+        out.append((match.group(1).strip().lower(), body[match.end():end].strip()))
+    return out
+
+
+def _split_example(content: str) -> tuple[tuple[str, str], tuple[str, str]] | None:
+    """Split one `## Example` section into ((user...), (assistant...)), or None."""
+    assistant = _ASSISTANT_HEADING_RE.search(content)
+    if assistant is None:
+        return None
+    user_part = content[: assistant.start()]
+    assistant_part = content[assistant.end():]
+    user_heading = _USER_HEADING_RE.search(user_part)
+    if user_heading is not None:
+        user_part = user_part[user_heading.end():]
+    user_text = user_part.strip()
+    assistant_text = assistant_part.strip()
+    if not user_text or not assistant_text:
+        return None
+    return ("user", user_text), ("assistant", assistant_text)
+
+
 def load_fewshots_from_vault(
     vault: object | None = None,
+    prompt_char_budget: int | None = None,
 ) -> list[tuple[str, str]]:
-    """Load few-shot examples from vault, with package-bundled fallback."""
+    """Load few-shot examples from the vault, with package-bundled fallback (R8).
+
+    The builtin example is always first (it is load-bearing for small models and
+    defines the conversation shape). At most **one** active vault few-shot is
+    then appended, and only if it fits the prompt budget: a pair whose combined
+    length exceeds ``prompt_char_budget / 4`` is skipped, because it would crowd
+    out real work in the root window.
+
+    Args:
+        vault: A VaultStore, or None for the package-bundled example only.
+        prompt_char_budget: The sub-prompt character budget the pair must fit
+            within a quarter of. Defaults to the `laptop` profile's budget.
+
+    Anything unrecognised or unreachable degrades to the bundled example — this
+    function must never be able to break a run.
+    """
     if vault is None:
         return list(FEWSHOT_EXAMPLE)
 
+    if prompt_char_budget is None:
+        from rlm_local.config import PROFILES
+
+        prompt_char_budget = PROFILES["laptop"].sub_prompt_char_budget
+    max_pair_chars = max(0, prompt_char_budget // 4)
+
     try:
-        fewshots = vault.list(kind="fewshot")
-        if fewshots:
-            # Return the first few-shot page body as user/assistant pairs
-            # For now, return the hardcoded example + vault content as prompt
-            result = list(FEWSHOT_EXAMPLE)
-            return result
-        return list(FEWSHOT_EXAMPLE)
+        pages = vault.list(kind="fewshot")
     except Exception:
         return list(FEWSHOT_EXAMPLE)
+
+    result = list(FEWSHOT_EXAMPLE)
+    for page in pages:
+        try:
+            status = page.frontmatter.status.value
+        except Exception:
+            continue
+        if status != "active":
+            continue
+        pairs = parse_fewshot_body(page.body or "")
+        if not pairs:
+            continue
+        if sum(len(content) for _, content in pairs) > max_pair_chars:
+            continue
+        result.extend(pairs)
+        break  # at most one vault few-shot
+    return result

@@ -13,6 +13,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from rlm_local.templates import NUDGE_STDERR_ERROR
+
 
 @dataclass
 class ParseResult:
@@ -97,7 +99,6 @@ class Parser:
             result.blocks = [b.strip() for b in blocks]
             self._normalize(result)
             self._consecutive_nudges = 0
-            self._consecutive_errors = 0
             return result
 
         # 2. Rescue parse: unclosed final fence
@@ -107,36 +108,20 @@ class Parser:
             result.warnings.append("Unclosed ```repl fence repaired.")
             self._normalize(result)
             self._consecutive_nudges = 0
-            self._consecutive_errors = 0
             return result
 
-        # 3. Rescue parse: ```python or bare ``` fences
-        alt_blocks = re.findall(r"```(?:python)?\s*\n(.*?)```", text, re.DOTALL)
-        if alt_blocks:
-            result.blocks = [b.strip() for b in alt_blocks]
-            result.warnings.append("Non-repl fence treated as ```repl.")
-            self._normalize(result)
-            self._consecutive_nudges = 0
-            self._consecutive_errors = 0
-            return result
-
-        # 3b. Rescue parse: single obvious code block — model wrote code
-        # without fences (narration pattern)
-        alt_unclosed = re.findall(r"```(?:python)?\s*\n(.*?)$", text, re.DOTALL)
-        if alt_unclosed:
-            result.blocks = [alt_unclosed[0].strip()]
-            result.warnings.append("Unclosed fence repaired (narration pattern).")
-            self._normalize(result)
-            self._consecutive_nudges = 0
-            self._consecutive_errors = 0
-            return result
+        # Stages 3/3b of the original pipeline ("```python or bare ```" and the
+        # narration variant) were removed in R5: their regexes accepted a bare
+        # or `python`-only language tag where stages 1/2 also accept `repl`, so
+        # every text they matched had already been consumed above — they were
+        # unreachable. The behaviour they were meant to provide is covered by
+        # stages 1/2 (see tests/test_parser.py::TestUnreachableStagesRemoved).
 
         # 4. Courtesy FINAL: line
         final_match = FINAL_LINE_RE.search(text)
         if final_match:
             result.final_answer = final_match.group(1).strip()
             self._consecutive_nudges = 0
-            self._consecutive_errors = 0
             return result
 
         # 5. Prose narration with no code at all: nudge
@@ -172,15 +157,37 @@ class Parser:
             result.warnings.append("Smart quotes normalized to ASCII.")
 
     def parse_stderr(self, text: str, stderr_text: str) -> ParseResult | None:
-        """Check if the model fixed a previous error and extract the new block.
+        """§5.6 stage 4 — stderr self-correction.
 
-        Returns None if no fix was attempted.
+        Called after a cell produced a traceback. A cell that errored counts
+        against the consecutive-error budget, so a model that keeps emitting
+        broken code reaches forced finalization instead of spinning until the
+        turn budget runs out; while the budget holds, the returned result
+        carries a templated nudge naming the exception class.
+
+        Returns None if the response contained no code (nothing to correct).
+        Deliberately side-effect free apart from the error counter: it must not
+        touch the nudge counter or re-run the main pipeline.
         """
-        result = self.parse(text)
-        if result.blocks:
-            self._consecutive_errors += 1
-            return result
-        return None
+        result = ParseResult(raw_text=text)
+
+        blocks = FENCE_RE.findall(text)
+        if not blocks:
+            blocks = [b for b in FENCE_UNCLOSED_RE.findall(text) if b.strip()]
+        if not blocks:
+            return None
+
+        result.blocks = [b.strip() for b in blocks]
+        self._normalize(result)
+
+        self._consecutive_errors += 1
+        if self._consecutive_errors <= self._max_errors:
+            result.nudge = NUDGE_STDERR_ERROR.format(
+                error_kind=_error_kind(stderr_text),
+                errors=self._consecutive_errors,
+                max_errors=self._max_errors,
+            )
+        return result
 
     def check_answer_in_block(self, block: str) -> tuple[str | None, bool]:
         """Check if a code block sets answer['content'] and answer['ready']=True.
@@ -204,6 +211,29 @@ class Parser:
         self._consecutive_nudges = 0
         self._consecutive_errors = 0
         self._turn = 0
+
+    def reset_errors(self) -> None:
+        """A cell executed without a traceback — the error streak is over.
+
+        Called by the root loop after a clean REPL result. `parse()` must NOT
+        do this: it runs *before* execution and so cannot know whether the code
+        worked.
+        """
+        self._consecutive_errors = 0
+
+
+_ERROR_KIND_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Warning|Interrupt))\b")
+
+
+def _error_kind(stderr_text: str) -> str:
+    """Best-effort exception class name from a traceback ('' → generic label)."""
+    if not stderr_text:
+        return "error"
+    matches = _ERROR_KIND_RE.findall(stderr_text)
+    if matches:
+        return matches[-1]
+    tail = [ln for ln in stderr_text.strip().splitlines() if ln.strip()]
+    return tail[-1].strip() if tail else "error"
 
 
 def repair_json(text: str, schema: dict[str, Any] | None = None) -> str:

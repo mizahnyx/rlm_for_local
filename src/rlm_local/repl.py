@@ -1,11 +1,27 @@
 """REPL sandbox — subprocess-isolated Python worker (§5.3).
 
 Uses a bidirectional TCP socket protocol:
-- Harness sends: exec, init, shutdown
+- Harness sends: init, exec, shutdown
 - Worker sends back: result, subcall_request (which the harness proxies)
 
 This enables llm_query/llm_query_batched as ordinary Python functions in the
 worker while keeping the worker killable and memory-bounded.
+
+Design contracts honoured here
+------------------------------
+* **Disk spill reaches the worker (R1).** When the context handle is
+  disk-backed, `init` sends a small *file descriptor* (`{"kind": "file", ...}`)
+  rather than the text; the worker binds a lazy reader over the same path. The
+  store keeps ownership of the file — the worker only ever reads it.
+* **Cells are correlated (R4).** Every `exec` carries a monotonically
+  increasing `cell_id` and the worker echoes it. A result belonging to a cell
+  the harness already timed out on is discarded instead of being handed to the
+  model as if it were the current cell's output; two timeouts in a row restart
+  the worker.
+* **The output cap is real (R10).** `stdout_cap` is what the prompt advertises
+  as `{repl_cap}`; stdout is head-truncated with a marker and stderr keeps its
+  head *and* tail (the traceback's last line is the useful one).
+* **Every harness-emitted string is templated (R4.1).** See `templates.py`.
 """
 
 from __future__ import annotations
@@ -24,6 +40,12 @@ from pathlib import Path
 from typing import Any
 
 from rlm_local.context_store import Context, _InMemoryContext
+from rlm_local.templates import (
+    CELL_STDERR_TRUNCATED,
+    CELL_STDOUT_TRUNCATED,
+    CELL_TIMEOUT_ERROR,
+    REPL_WORKER_RESTARTED,
+)
 
 # ── Result envelope ────────────────────────────────────────────────────────
 
@@ -68,6 +90,21 @@ def _recv_msg(sock: socket.socket, timeout: float | None = None) -> dict | None:
             sock.settimeout(None)
 
 
+def _truncate_middle(text: str, cap: int) -> str:
+    """Keep the head and the tail of ``text``, eliding the middle.
+
+    Tracebacks put the actionable line last, so a head-only cut throws away the
+    most useful part of the error (§5.5).
+    """
+    if cap <= 0:
+        return CELL_STDERR_TRUNCATED.format(elided=len(text))
+    if len(text) <= cap:
+        return text
+    head = cap // 2
+    tail = cap - head
+    return text[:head] + CELL_STDERR_TRUNCATED.format(elided=len(text) - cap) + text[-tail:]
+
+
 # ── REPL worker script (runs in subprocess) ────────────────────────────────
 
 _WORKER_SCRIPT = r"""
@@ -100,25 +137,178 @@ def _recv():
         data += chunk
     return json.loads(data.decode('utf-8'))
 
+# Cell correlation (R4): every harness->worker message carries a cell_id and
+# every worker->harness message echoes it, so the harness can tell a late
+# result from the current one.
+_cell_id = None
+
+# ── Lazy disk-backed context (R1) ─────────────────────────────────────────
+
+class _FileContext:
+    '''Read-only, lazy view over the context file the harness spilled.
+
+    Byte-addressed exactly like rlm_local.context_store.Context: len() is a
+    UTF-8 byte count, ctx[a:b] decodes byte offsets, ctx[i] is the character
+    starting at byte offset i. The worker never writes and never deletes this
+    file — ContextStore owns it.
+    '''
+
+    def __init__(self, path, total):
+        self._path = path
+        self._total = int(total)
+        self._line_offsets = None
+
+    def __len__(self):
+        return self._total
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            if key < 0:
+                key = self._total + key
+            if key < 0 or key >= self._total:
+                raise IndexError('context index %d out of range' % key)
+            with open(self._path, 'rb') as f:
+                f.seek(key)
+                raw = f.read(4)
+            return _decode_one(raw, key)
+        if isinstance(key, slice):
+            start, stop, step = key.indices(self._total)
+            if step != 1:
+                raise ValueError('context slicing only supports step=1')
+            if stop - start <= 0:
+                return ''
+            with open(self._path, 'rb') as f:
+                f.seek(start)
+                raw = f.read(stop - start)
+            return raw.decode('utf-8', errors='strict')
+        raise TypeError('unsupported index type: %s' % type(key))
+
+    def __iter__(self):
+        return self.lines()
+
+    def __str__(self):
+        return self[:]
+
+    def __repr__(self):
+        return '<Context %d bytes at %s>' % (self._total, self._path)
+
+    def _index(self):
+        '''Byte offsets of line starts, built once by streaming the file.'''
+        if self._line_offsets is None:
+            offsets = [0]
+            pos = 0
+            with open(self._path, 'rb') as f:
+                while True:
+                    block = f.read(65536)
+                    if not block:
+                        break
+                    start = 0
+                    while True:
+                        nl = block.find(b'\n', start)
+                        if nl == -1:
+                            break
+                        offsets.append(pos + nl + 1)
+                        start = nl + 1
+                    pos += len(block)
+            self._line_offsets = offsets
+        return self._line_offsets
+
+    def lines(self, start=0, count=None):
+        offsets = self._index()
+        with open(self._path, 'rb') as f:
+            if start > 0 and start < len(offsets):
+                f.seek(offsets[start])
+            else:
+                for _ in range(start):
+                    if not f.readline():
+                        return
+            yielded = 0
+            for raw in f:
+                yield raw.decode('utf-8', errors='strict').rstrip('\r\n')
+                yielded += 1
+                if count is not None and yielded >= count:
+                    break
+
+    def grep(self, pattern, max_hits=50):
+        try:
+            regex = re.compile(pattern)
+        except re.error as e:
+            return ['Error: invalid regex pattern: %s' % e]
+        hits = []
+        with open(self._path, 'rb') as f:
+            for raw in f:
+                line = raw.decode('utf-8', errors='strict')
+                if regex.search(line):
+                    hits.append(line.rstrip('\r\n'))
+                    if len(hits) >= max_hits:
+                        break
+        return hits
+
+    def chunk(self, size=None, by=None):
+        if by == 'paragraph':
+            return list(self._paragraphs())
+        chunk_size = size or 3000
+        chunks = []
+        with open(self._path, 'r', encoding='utf-8') as f:
+            while True:
+                piece = f.read(chunk_size)
+                if not piece:
+                    break
+                chunks.append(piece)
+        return chunks
+
+    def _paragraphs(self, block=65536):
+        buf = ''
+        with open(self._path, 'r', encoding='utf-8') as f:
+            while True:
+                piece = f.read(block)
+                if not piece:
+                    break
+                buf += piece
+                parts = re.split(r'\n\s*\n', buf)
+                buf = parts.pop()
+                for p in parts:
+                    p = p.strip()
+                    if p:
+                        yield p
+        for p in re.split(r'\n\s*\n', buf):
+            p = p.strip()
+            if p:
+                yield p
+
+
+def _decode_one(raw, offset):
+    for n in range(1, len(raw) + 1):
+        try:
+            ch = raw[:n].decode('utf-8', errors='strict')
+        except UnicodeDecodeError:
+            continue
+        if len(ch) == 1:
+            return ch
+        break
+    raise UnicodeDecodeError('utf-8', raw or b'', 0, 1,
+                             'byte offset %d is not a character boundary' % offset)
+
 # ── Callback to harness for sub-calls ─────────────────────────────────────
 
 def _harness_llm_query(prompt, schema=None):
-    _send({"cmd": "subcall", "prompt": prompt, "schema": schema})
+    _send({"cmd": "subcall", "prompt": prompt, "schema": schema, "cell_id": _cell_id})
     resp = _recv()
     return resp.get("response", "Error: no response from harness")
 
 def _harness_llm_query_batched(prompts, schema=None):
-    _send({"cmd": "subcall_batched", "prompts": prompts, "schema": schema})
+    _send({"cmd": "subcall_batched", "prompts": prompts, "schema": schema, "cell_id": _cell_id})
     resp = _recv()
     return resp.get("responses", ["Error: no response from harness"] * len(prompts))
 
 def _harness_search(query, k=5, kinds=None):
-    _send({"cmd": "search", "query": query, "k": k, "kinds": kinds})
+    _send({"cmd": "search", "query": query, "k": k, "kinds": kinds, "cell_id": _cell_id})
     resp = _recv()
     return resp.get("result", "(no results)")
 
 def _harness_propose(kind, name, body, rationale=""):
-    _send({"cmd": "propose", "kind": kind, "name": name, "body": body, "rationale": rationale})
+    _send({"cmd": "propose", "kind": kind, "name": name, "body": body,
+           "rationale": rationale, "cell_id": _cell_id})
     resp = _recv()
     return resp.get("result", "Error: propose failed")
 
@@ -136,9 +326,9 @@ _SHOW_VARS_IGNORE = frozenset({"answer", "context", "__builtins__", "llm_query",
                                 "search", "propose",
                                 "_harness_llm_query", "_harness_llm_query_batched",
                                 "_harness_search", "_harness_propose",
-                                "_SHOW_VARS_IGNORE", "_sock", "_send", "_recv",
+                                "_SHOW_VARS_IGNORE", "_sock", "_send", "_recv", "_cell_id",
                                 "json", "os", "re", "socket", "struct", "sys", "traceback",
-                                "StringIO", "_HOST", "_PORT"})
+                                "StringIO", "_HOST", "_PORT", "_FileContext", "_decode_one"})
 
 def peek(n=2000):
     s = str(context)[:n]
@@ -207,12 +397,13 @@ def show_vars():
 # ── Main loop ─────────────────────────────────────────────────────────────
 
 def main():
-    global context, answer
+    global context, answer, _cell_id
     while True:
         msg = _recv()
         cmd = msg.get("cmd")
 
         if cmd == "exec":
+            _cell_id = msg.get("cell_id")
             code = msg["code"]
             cap_buf = StringIO()
             err_buf = StringIO()
@@ -233,31 +424,39 @@ def main():
 
             _send({
                 "type": "result",
+                "cell_id": _cell_id,
                 "stdout": cap_buf.getvalue(),
                 "stderr": err_buf.getvalue(),
                 "final_answer": final_answer,
             })
 
         elif cmd == "init":
-            raw_ctx = msg.get("context", "")
-            context = raw_ctx
+            raw_ctx = msg.get("context")
+            if isinstance(raw_ctx, dict) and raw_ctx.get("kind") == "file":
+                context = _FileContext(raw_ctx["path"], raw_ctx["total"])
+            elif raw_ctx is None:
+                context = ""
+            else:
+                context = raw_ctx
             helpers = msg.get("helpers", [])
             for h in helpers:
                 try:
                     exec(h["code"], globals())
                 except Exception:
                     pass
-            _send({"type": "result", "status": "ok"})
+            _send({"type": "result", "cell_id": None, "status": "ok"})
 
         elif cmd == "search":
             query = msg.get("query", "")
             k = msg.get("k", 5)
             kinds = msg.get("kinds")
-            _send({"cmd": "search", "query": query, "k": k, "kinds": kinds})
+            _send({"cmd": "search", "query": query, "k": k, "kinds": kinds,
+                   "cell_id": _cell_id})
             resp = _recv()
             result_text = resp.get("result", "(no results)")
             _send({
                 "type": "result",
+                "cell_id": _cell_id,
                 "stdout": result_text,
                 "stderr": "",
                 "final_answer": None,
@@ -266,10 +465,11 @@ def main():
         elif cmd == "propose":
             _send({"cmd": "propose", "kind": msg.get("kind", ""),
                     "name": msg.get("name", ""), "body": msg.get("body", ""),
-                    "rationale": msg.get("rationale", "")})
+                    "rationale": msg.get("rationale", ""), "cell_id": _cell_id})
             resp = _recv()
             _send({
                 "type": "result",
+                "cell_id": _cell_id,
                 "stdout": resp.get("result", "Error: propose failed"),
                 "stderr": "",
                 "final_answer": None,
@@ -291,31 +491,78 @@ class REPLSandbox:
         self,
         cell_timeout: float = 60.0,
         stdout_cap: int = 256 * 1024,
+        restart_after_consecutive_timeouts: int = 2,
     ) -> None:
         self._cell_timeout = cell_timeout
         self._stdout_cap = stdout_cap
+        self._restart_threshold = max(2, restart_after_consecutive_timeouts)
         self._proc: subprocess.Popen | None = None
         self._server_sock: socket.socket | None = None
         self._worker_sock: socket.socket | None = None
         self._worker_path: Path | None = None
         self._subcall_manager: Any = None
-        self._lock = threading.Lock()
-        self._accept_thread: threading.Thread | None = None
+        self._lock = threading.RLock()
         self._kernel_bridge: Any = None
+        # R4 protocol state
+        self._cell_seq = 0
+        self._init_payload: dict | None = None
+        self._consecutive_timeouts = 0
+
+    # ── Lifecycle ─────────────────────────────────────────────────────────
 
     def start(self, context: Any, subcall_manager: Any,
               definitions: list[dict[str, str]] | None = None) -> None:
         """Start the REPL worker and inject context + subcall manager.
 
         Args:
-            context: The user context data.
+            context: The user context data. A disk-backed
+                :class:`~rlm_local.context_store.Context` is passed by
+                reference (path + byte length) so the text never crosses the
+                socket and the worker reads it lazily (R1).
             subcall_manager: The SubcallManager for sub-LLM call proxying.
             definitions: Optional list of {"name": str, "code": str} helper
                          definitions to inject into the REPL namespace (K1).
         """
         self._subcall_manager = subcall_manager
 
-        # Write worker script
+        if isinstance(context, Context):
+            init_ctx: Any = {
+                "kind": "file",
+                "path": str(context._path),
+                "total": len(context),
+            }
+        else:
+            init_ctx = str(context)
+
+        self._init_payload = {"cmd": "init", "context": init_ctx}
+        if definitions:
+            self._init_payload["helpers"] = definitions
+
+        self._spawn()
+
+    def _spawn(self) -> None:
+        """(Re)launch the worker process and replay the init payload."""
+        if self._worker_sock is not None:
+            try:
+                self._worker_sock.close()
+            except OSError:
+                pass
+            self._worker_sock = None
+        if self._server_sock is not None:
+            try:
+                self._server_sock.close()
+            except OSError:
+                pass
+            self._server_sock = None
+        if self._proc is not None:
+            try:
+                self._proc.kill()
+                self._proc.wait(timeout=5)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+            self._proc = None
+
+        # Write worker script (kept on disk so tracebacks are readable)
         tmpdir = Path(tempfile.mkdtemp(prefix="rlm_repl_"))
         worker_path = tmpdir / "_worker.py"
         worker_path.write_text(_WORKER_SCRIPT, encoding="utf-8")
@@ -346,128 +593,174 @@ class REPLSandbox:
         finally:
             self._server_sock.settimeout(None)
 
-        # Start a background thread to handle subcall requests from worker
-        self._accept_thread = threading.Thread(
-            target=self._subcall_loop, daemon=True,
-        )
-        self._accept_thread.start()
-
-        # Initialize: send context + optional helpers (K1)
-        ctx_str = str(context) if isinstance(context, (Context, _InMemoryContext, str)) else str(context)
-        init_msg: dict = {"cmd": "init", "context": ctx_str}
-        if definitions:
-            init_msg["helpers"] = definitions
-        _send_msg(self._worker_sock, init_msg)
+        # Initialize: send context reference + optional helpers (K1)
+        _send_msg(self._worker_sock, self._init_payload or {"cmd": "init", "context": ""})
         resp = _recv_msg(self._worker_sock, timeout=5.0)
         if resp is None or resp.get("status") != "ok":
             self.shutdown()
             raise RuntimeError(f"REPL init failed: {resp}")
 
-    def _subcall_loop(self) -> None:
-        """Background thread: listen for subcall requests from worker socket.
+        self._cell_seq = 0
+        self._consecutive_timeouts = 0
 
-        The worker sends subcall/subcall_batched, we proxy to SubcallManager,
-        and send the response back.
+    def restart_worker(self) -> None:
+        """Kill and relaunch the worker, replaying init (R4).
+
+        REPL variables are lost; callers must tell the model.
         """
-        # We need a separate connection or multiplexing. Simpler: the worker
-        # uses the same socket for subcall requests and the harness intercepts
-        # them between exec commands.
-        #
-        # Actually, the subcall requests happen during exec() — the worker
-        # sends a subcall cmd, the harness receives it on the same socket,
-        # processes it, sends response back, then the worker continues.
-        #
-        # This means _recv_msg in execute() must handle interleaved subcall
-        # messages. We implement this in execute() itself.
-        pass  # Handled inline in execute()
+        with self._lock:
+            self._spawn()
+
+    def _restart_in_place(self) -> None:
+        self._spawn()
+
+    # ── Execution ─────────────────────────────────────────────────────────
 
     def execute(self, code: str) -> REPLResult:
-        """Execute code in the worker, handling interleaved subcall requests."""
+        """Execute code in the worker, handling interleaved subcall requests.
+
+        Every cell carries a `cell_id`; results carrying a different id belong
+        to a cell that already timed out and are discarded rather than
+        misattributed to this one (R4).
+        """
         if not self._worker_sock:
             raise RuntimeError("REPL not started")
 
         with self._lock:
-            _send_msg(self._worker_sock, {"cmd": "exec", "code": code})
+            self._cell_seq += 1
+            cell_id = self._cell_seq
+            _send_msg(self._worker_sock, {"cmd": "exec", "code": code, "cell_id": cell_id})
 
-            # Read responses — may be subcall requests or the final result
+            deadline = time.monotonic() + self._cell_timeout
+
             while True:
-                msg = _recv_msg(self._worker_sock, timeout=self._cell_timeout)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    msg = None
+                else:
+                    msg = _recv_msg(self._worker_sock, timeout=remaining)
+
                 if msg is None:
-                    return REPLResult(
-                        stderr=f"Error: REPL timed out after {self._cell_timeout}s",
-                    )
+                    return self._on_timeout(cell_id)
 
                 msg_type = msg.get("type", msg.get("cmd", ""))
+                msg_cell = msg.get("cell_id")
 
-                if msg_type == "subcall":
-                    # Worker is requesting a subcall
-                    prompt = msg.get("prompt", "")
-                    schema = msg.get("schema")
-                    if self._subcall_manager:
-                        response = self._subcall_manager.llm_query(prompt, schema=schema)
-                    else:
-                        response = "Error: subcall manager not available"
-                    _send_msg(self._worker_sock, {"response": response})
+                if msg_type == "result":
+                    if msg_cell != cell_id:
+                        # A late result for a cell we already gave up on. Drop
+                        # it and let the current cell have a full window — the
+                        # worker only starts it once it has finished the old
+                        # one.
+                        deadline = time.monotonic() + self._cell_timeout
+                        continue
+                    return self._build_result(msg)
 
-                elif msg_type == "subcall_batched":
-                    prompts = msg.get("prompts", [])
-                    schema = msg.get("schema")
-                    if self._subcall_manager:
-                        responses = self._subcall_manager.llm_query_batched(prompts, schema=schema)
-                    else:
-                        responses = ["Error: subcall manager not available"] * len(prompts)
-                    _send_msg(self._worker_sock, {"responses": responses})
+                if msg_cell is not None and msg_cell != cell_id:
+                    # Late request from a cell we already abandoned: answer it
+                    # so the worker is not left blocked, then keep draining.
+                    self._answer_stale_request(msg)
+                    deadline = time.monotonic() + self._cell_timeout
+                    continue
 
-                elif msg_type == "search":
-                    # K1: worker requesting a vault search
-                    if self._kernel_bridge:
-                        result_text = self._kernel_bridge.handle_search(
-                            msg.get("query", ""),
-                            k=msg.get("k", 5),
-                            kinds=msg.get("kinds"),
-                        )
-                    else:
-                        result_text = "Error: kernel bridge not available"
-                    _send_msg(self._worker_sock, {"result": result_text})
+                self._handle_request(msg_type, msg)
 
-                elif msg_type == "propose":
-                    # K1: worker proposing a new page
-                    if self._kernel_bridge:
-                        result_text = self._kernel_bridge.handle_propose(
-                            msg.get("kind", ""),
-                            msg.get("name", ""),
-                            msg.get("body", ""),
-                            msg.get("rationale", ""),
-                        )
-                    else:
-                        result_text = "Error: kernel bridge not available"
-                    _send_msg(self._worker_sock, {"result": result_text})
+    def _build_result(self, msg: dict) -> REPLResult:
+        stdout = msg.get("stdout", "")
+        stderr = msg.get("stderr", "")
+        final_answer = msg.get("final_answer")
 
-                elif msg_type == "result":
-                    # Final execution result
-                    stdout = msg.get("stdout", "")
-                    stderr = msg.get("stderr", "")
-                    final_answer = msg.get("final_answer")
+        if len(stdout) > self._stdout_cap:
+            stdout = stdout[: self._stdout_cap] + CELL_STDOUT_TRUNCATED.format(
+                cap=self._stdout_cap,
+            )
+        if len(stderr) > self._stdout_cap:
+            stderr = _truncate_middle(stderr, self._stdout_cap)
 
-                    if len(stdout) > self._stdout_cap:
-                        from rlm_local.templates import CELL_STDOUT_TRUNCATED
-                        stdout = stdout[:self._stdout_cap] + CELL_STDOUT_TRUNCATED.format(
-                            cap=self._stdout_cap,
-                        )
-                    if len(stderr) > self._stdout_cap:
-                        stderr = stderr[:self._stdout_cap] + "\n[... stderr truncated ...]"
+        self._consecutive_timeouts = 0
+        return REPLResult(stdout=stdout, stderr=stderr, final_answer=final_answer)
 
-                    return REPLResult(
-                        stdout=stdout,
-                        stderr=stderr,
-                        final_answer=final_answer,
-                    )
+    def _on_timeout(self, cell_id: int) -> REPLResult:
+        """Handle a cell that exceeded `cell_timeout` (R4)."""
+        self._consecutive_timeouts += 1
+        message = CELL_TIMEOUT_ERROR.format(timeout=self._cell_timeout)
 
-                else:
-                    # Unknown message — shouldn't happen
-                    return REPLResult(
-                        stderr=f"Error: unexpected REPL response type: {msg_type}",
-                    )
+        if self._consecutive_timeouts >= self._restart_threshold:
+            # A stale result is still outstanding and we timed out again: the
+            # worker is wedged. Restart it and start a clean cell sequence.
+            try:
+                self._restart_in_place()
+            except Exception as e:  # pragma: no cover - environment failure
+                return REPLResult(stderr=f"{message}\n{REPL_WORKER_RESTARTED}\n{e}")
+            return REPLResult(stderr=f"{message}\n{REPL_WORKER_RESTARTED}")
+
+        return REPLResult(stderr=message)
+
+    def _answer_stale_request(self, msg: dict) -> None:
+        """Unblock a worker that is asking about a cell we already abandoned."""
+        if not self._worker_sock:
+            return
+        msg_type = msg.get("type", msg.get("cmd", ""))
+        try:
+            if msg_type == "subcall_batched":
+                n = len(msg.get("prompts", []))
+                _send_msg(self._worker_sock, {"responses": ["Error: cell timed out"] * n})
+            elif msg_type in ("subcall", "search", "propose"):
+                _send_msg(self._worker_sock, {"response": "Error: cell timed out",
+                                              "result": "Error: cell timed out"})
+        except OSError:
+            pass
+
+    def _handle_request(self, msg_type: str, msg: dict) -> None:
+        """Serve a sub-call / search / propose request from the running cell."""
+        if msg_type == "subcall":
+            prompt = msg.get("prompt", "")
+            schema = msg.get("schema")
+            if self._subcall_manager:
+                response = self._subcall_manager.llm_query(prompt, schema=schema)
+            else:
+                response = "Error: subcall manager not available"
+            _send_msg(self._worker_sock, {"response": response})
+
+        elif msg_type == "subcall_batched":
+            prompts = msg.get("prompts", [])
+            schema = msg.get("schema")
+            if self._subcall_manager:
+                responses = self._subcall_manager.llm_query_batched(prompts, schema=schema)
+            else:
+                responses = ["Error: subcall manager not available"] * len(prompts)
+            _send_msg(self._worker_sock, {"responses": responses})
+
+        elif msg_type == "search":
+            # K1: worker requesting a vault search
+            if self._kernel_bridge:
+                result_text = self._kernel_bridge.handle_search(
+                    msg.get("query", ""),
+                    k=msg.get("k", 5),
+                    kinds=msg.get("kinds"),
+                )
+            else:
+                result_text = "Error: kernel bridge not available"
+            _send_msg(self._worker_sock, {"result": result_text})
+
+        elif msg_type == "propose":
+            # K1: worker proposing a new page
+            if self._kernel_bridge:
+                result_text = self._kernel_bridge.handle_propose(
+                    msg.get("kind", ""),
+                    msg.get("name", ""),
+                    msg.get("body", ""),
+                    msg.get("rationale", ""),
+                )
+            else:
+                result_text = "Error: kernel bridge not available"
+            _send_msg(self._worker_sock, {"result": result_text})
+
+        else:
+            _send_msg(self._worker_sock, {
+                "response": f"Error: unsupported REPL request: {msg_type}",
+                "result": f"Error: unsupported REPL request: {msg_type}",
+            })
 
     def shutdown(self) -> None:
         """Terminate the REPL worker and clean up."""
@@ -502,6 +795,12 @@ class REPLSandbox:
             shutil.rmtree(self._worker_path.parent, ignore_errors=True)
             self._worker_path = None
 
+    # ── Introspection (used by the root loop / tests) ─────────────────────
+
     @property
     def cell_timeout(self) -> float:
         return self._cell_timeout
+
+    @property
+    def stdout_cap(self) -> int:
+        return self._stdout_cap
