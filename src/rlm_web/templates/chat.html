@@ -5,7 +5,8 @@
 
 <div id="chat-messages" class="card" style="max-height: 500px; overflow-y: auto; font-family: monospace; font-size: 0.9rem; white-space: pre-wrap;">
     <p><strong>System:</strong> RLM Chat — type a query or use slash commands.</p>
-    <p>Commands: /ask, /ingest &lt;path&gt;, /context, /clear, /search, /get, /quit</p>
+    <p>Commands: /ask, /context, /clear, /search, /get, /quit</p>
+    <p>To add documents to the vault, use the <a href="/vault">Vault</a> page upload form.</p>
     <p>Profile: <span id="chat-profile">{{ profile }}</span> | Vault: active (search() available in REPL)</p>
 </div>
 
@@ -54,17 +55,20 @@
             eventSource = new EventSource('/chat/events/' + data.stream_id);
             
             let responseText = '';
+            let assistantEl = null;
             eventSource.onmessage = function(evt) {
                 const d = JSON.parse(evt.data);
                 if (d.type === 'chunk') {
                     responseText += d.text;
-                    // Update last assistant message
-                    const lastMsg = messages.lastElementChild;
-                    if (lastMsg && lastMsg.innerHTML.startsWith('<p><strong>Assistant:</strong>')) {
-                        lastMsg.textContent = 'Assistant: ' + responseText;
-                    } else {
-                        messages.innerHTML += '<p><strong>Assistant:</strong> ' + escapeHtml(responseText) + '</p>';
+                    if (!assistantEl) {
+                        assistantEl = document.createElement('p');
+                        const strong = document.createElement('strong');
+                        strong.textContent = 'Assistant: ';
+                        assistantEl.appendChild(strong);
+                        assistantEl.appendChild(document.createTextNode(''));
+                        messages.appendChild(assistantEl);
                     }
+                    assistantEl.lastChild.textContent = responseText;
                 } else if (d.type === 'done') {
                     eventSource.close();
                 } else if (d.type === 'error') {

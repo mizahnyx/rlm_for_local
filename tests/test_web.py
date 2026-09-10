@@ -12,6 +12,44 @@ from fastapi.testclient import TestClient
 from rlm_web.app import app
 
 
+_ENV_KEYS = (
+    "RLM_WEB_TOKEN",
+    "RLM_WEB_SSL_KEY",
+    "RLM_WEB_SSL_CERT",
+    "RLM_WEB_ALLOW_TESTCLIENT",
+)
+
+
+@pytest.fixture(autouse=True)
+def _web_state():
+    """Isolate every test from process-global web state (S5/R21).
+
+    * The web app's dev-client allowance is explicit: Starlette's TestClient
+      connects from the synthetic host "testclient", which is *not* loopback,
+      so without the opt-in every request would be rejected once no
+      `RLM_WEB_TOKEN` is configured (`TestAuthFailClosed` unsets it to prove
+      the fail-closed default).
+    * `main()` re-installs SessionMiddleware with `https_only=True` when SSL
+      args are present. That is deliberate process state; tests must not leak
+      it into each other, so the middleware stack and the relevant env vars are
+      snapshotted and restored.
+    """
+    saved_middleware = list(app.user_middleware)
+    saved_stack = app.middleware_stack
+    saved_env = {k: os.environ.get(k) for k in _ENV_KEYS}
+
+    os.environ["RLM_WEB_ALLOW_TESTCLIENT"] = "1"
+    yield
+
+    app.user_middleware = saved_middleware
+    app.middleware_stack = saved_stack
+    for key, value in saved_env.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+
+
 @pytest.fixture
 def client():
     with TestClient(app) as c:
@@ -19,12 +57,22 @@ def client():
 
 
 class TestStatic:
-    def test_htmx_js_served(self, client):
-        """htmx.min.js is served from /static/."""
+    def test_static_dir_is_mounted_and_empty_by_default(self, client):
+        """The static mount exists but no third-party JS is vendored.
+
+        htmx was loaded on every page with zero `hx-` attributes in the
+        templates; the job and chat pages use vanilla EventSource (R16).
+        """
         resp = client.get("/static/htmx.min.js")
-        assert resp.status_code == 200
-        assert len(resp.content) > 1000
-        assert b"htmx" in resp.content.lower()
+        assert resp.status_code == 404
+
+    def test_no_vendored_htmx_file(self):
+        static = Path(__file__).parent.parent / "src" / "rlm_web" / "static"
+        assert not (static / "htmx.min.js").exists()
+
+    def test_base_template_loads_no_scripts(self):
+        base = Path(__file__).parent.parent / "src" / "rlm_web" / "templates" / "base.html"
+        assert "<script" not in base.read_text(encoding="utf-8")
 
 
 class TestAuth:
@@ -132,6 +180,28 @@ class TestStartupArgs:
             assert called[0].get("ssl_certfile") == "cert.pem"
         finally:
             uvicorn.run = _orig
+
+    def test_ssl_args_make_the_session_cookie_secure(self):
+        """S5/R21 — the session cookie must be Secure when TLS is served."""
+        import uvicorn
+
+        from rlm_web.app import _session_https_only, main as web_main
+
+        assert _session_https_only() is False
+        _orig = uvicorn.run
+        uvicorn.run = lambda *a, **kw: None
+        try:
+            web_main(["--ssl-keyfile", "key.pem", "--ssl-certfile", "cert.pem"])
+        finally:
+            uvicorn.run = _orig
+        assert _session_https_only() is True
+
+        os.environ["RLM_WEB_TOKEN"] = "t"
+        with TestClient(app, base_url="https://testserver") as c:
+            resp = c.post("/login", data={"token": "t"}, follow_redirects=False)
+            assert resp.status_code == 303
+            cookie = resp.headers["set-cookie"].lower()
+            assert "secure" in cookie, cookie
 
 
 class TestVault:
@@ -280,3 +350,244 @@ class TestPromptRegressionGuard:
 
 import io
 from io import BytesIO
+
+
+# ── S5 / R21 — auth completeness ───────────────────────────────────────────
+
+class TestSSEAuth:
+    """Both SSE endpoints used to skip `_check_auth` entirely, so job answers
+    and chat responses were readable by anyone who could reach the port."""
+
+    def test_job_events_requires_auth(self, client):
+        os.environ["RLM_WEB_TOKEN"] = "sekrit"
+        try:
+            resp = client.get("/jobs/does-not-matter/events")
+            assert resp.status_code == 401, resp.status_code
+        finally:
+            del os.environ["RLM_WEB_TOKEN"]
+
+    def test_chat_events_requires_auth(self, client):
+        os.environ["RLM_WEB_TOKEN"] = "sekrit"
+        try:
+            resp = client.get("/chat/events/whatever")
+            assert resp.status_code == 401, resp.status_code
+        finally:
+            del os.environ["RLM_WEB_TOKEN"]
+
+    def test_job_events_allowed_after_login(self):
+        os.environ["RLM_WEB_TOKEN"] = "sekrit"
+        try:
+            with TestClient(app) as c:
+                assert c.post("/login", data={"token": "sekrit"}).status_code in (200, 303)
+                resp = c.get("/jobs/nope/events")
+                # Authenticated: the auth gate passes. The stream itself is
+                # empty for an unknown job, which is a different concern.
+                assert resp.status_code == 200, resp.status_code
+        finally:
+            del os.environ["RLM_WEB_TOKEN"]
+
+    def test_chat_events_allowed_after_login(self, monkeypatch):
+        import rlm_web.app as webapp
+
+        # An unknown stream id is reported after a bounded wait rather than
+        # holding the request open forever.
+        monkeypatch.setattr(webapp, "CHAT_STREAM_WAIT_SECONDS", 0.4)
+        os.environ["RLM_WEB_TOKEN"] = "sekrit"
+        try:
+            with TestClient(app) as c:
+                assert c.post("/login", data={"token": "sekrit"}).status_code in (200, 303)
+                resp = c.get("/chat/events/nope")
+                assert resp.status_code == 200, resp.status_code
+                assert "unknown stream id" in resp.text
+        finally:
+            del os.environ["RLM_WEB_TOKEN"]
+
+
+class TestAuthCoverageByConstruction:
+    """R21 — auth is a route dependency, so a new route cannot forget it."""
+
+    PUBLIC_ALLOWLIST = {
+        "/login",
+        "/logout",
+        "/openapi.json",
+        "/docs",
+        "/docs/oauth2-redirect",
+        "/redoc",
+    }
+
+    def test_every_api_route_declares_auth(self):
+        from fastapi.routing import APIRoute
+
+        from rlm_web.app import require_auth
+
+        missing = []
+        for route in app.routes:
+            if not isinstance(route, APIRoute):
+                continue
+            if route.path in self.PUBLIC_ALLOWLIST or route.path.startswith("/static"):
+                continue
+            calls = [d.call for d in route.dependant.dependencies]
+            if require_auth not in calls:
+                missing.append(route.path)
+        assert missing == [], f"routes without the auth dependency: {missing}"
+
+    def test_the_guard_actually_finds_unprotected_routes(self):
+        """Non-vacuity: the checker would notice a route that skipped auth."""
+        from fastapi import Depends, FastAPI
+        from fastapi.routing import APIRoute
+
+        from rlm_web.app import require_auth
+
+        probe = FastAPI()
+
+        @probe.get("/protected", dependencies=[Depends(require_auth)])
+        async def _a():  # pragma: no cover - not called
+            return {}
+
+        @probe.get("/unprotected")
+        async def _b():  # pragma: no cover - not called
+            return {}
+
+        def unauth_paths(application):
+            out = []
+            for route in application.routes:
+                if not isinstance(route, APIRoute):
+                    continue
+                calls = [d.call for d in route.dependant.dependencies]
+                if require_auth not in calls:
+                    out.append(route.path)
+            return out
+
+        assert unauth_paths(probe) == ["/unprotected"]
+
+
+class TestAuthFailClosed:
+    """S5/R21 — no implicit trust for a test client or a missing peer address."""
+
+    def test_no_token_remote_client_is_rejected(self):
+        os.environ.pop("RLM_WEB_TOKEN", None)
+        with TestClient(app, client=("10.0.0.9", 1234)) as remote:
+            assert remote.get("/").status_code == 401
+
+    def test_no_token_loopback_client_is_allowed(self):
+        os.environ.pop("RLM_WEB_TOKEN", None)
+        with TestClient(app, client=("127.0.0.1", 1234)) as local:
+            assert local.get("/").status_code == 200
+
+    def test_testclient_host_is_rejected_without_the_env_optin(self):
+        os.environ.pop("RLM_WEB_TOKEN", None)
+        old = os.environ.pop("RLM_WEB_ALLOW_TESTCLIENT", None)
+        try:
+            with TestClient(app) as c:
+                assert c.get("/").status_code == 401
+        finally:
+            if old is not None:
+                os.environ["RLM_WEB_ALLOW_TESTCLIENT"] = old
+            os.environ["RLM_WEB_ALLOW_TESTCLIENT"] = "1"
+
+    def test_authorize_helper_table(self):
+        from rlm_web.app import _authorize
+
+        # No token: loopback only, and only with the explicit opt-in for a
+        # missing peer address.
+        assert _authorize(client_host="127.0.0.1", session_authenticated=False,
+                          token="", allow_testclient=False) is True
+        assert _authorize(client_host="::1", session_authenticated=False,
+                          token="", allow_testclient=False) is True
+        assert _authorize(client_host="localhost", session_authenticated=False,
+                          token="", allow_testclient=False) is True
+        assert _authorize(client_host="10.0.0.9", session_authenticated=False,
+                          token="", allow_testclient=False) is False
+        assert _authorize(client_host=None, session_authenticated=False,
+                          token="", allow_testclient=False) is False
+        assert _authorize(client_host=None, session_authenticated=False,
+                          token="", allow_testclient=True) is True
+        assert _authorize(client_host="testclient", session_authenticated=False,
+                          token="", allow_testclient=False) is False
+        assert _authorize(client_host="testclient", session_authenticated=False,
+                          token="", allow_testclient=True) is True
+        # Token configured: only an authenticated session passes, and a remote
+        # client cannot be saved by the dev opt-in.
+        assert _authorize(client_host="10.0.0.9", session_authenticated=True,
+                          token="t", allow_testclient=False) is True
+        assert _authorize(client_host="127.0.0.1", session_authenticated=False,
+                          token="t", allow_testclient=False) is False
+        assert _authorize(client_host="testclient", session_authenticated=False,
+                          token="t", allow_testclient=True) is False
+
+
+class TestLoginPolicy:
+    def test_login_without_configured_token_is_400(self, client):
+        """A login form with no token to check against is a misconfiguration."""
+        old = os.environ.pop("RLM_WEB_TOKEN", None)
+        try:
+            resp = client.post("/login", data={"token": "anything"})
+            assert resp.status_code == 400, resp.status_code
+        finally:
+            if old is not None:
+                os.environ["RLM_WEB_TOKEN"] = old
+
+    def test_login_uses_constant_time_comparison(self):
+        """Token comparison must not leak length/prefix through timing."""
+        import inspect
+
+        import rlm_web.app as webapp
+
+        src = inspect.getsource(webapp)
+        assert "compare_digest" in src
+
+
+class TestVaultTemplateEscaping:
+    """S5 — the ingest result was built with innerHTML from server data."""
+
+    def test_vault_template_does_not_use_innerhtml(self):
+        tpl = Path(__file__).parent.parent / "src" / "rlm_web" / "templates" / "vault.html"
+        text = tpl.read_text(encoding="utf-8")
+        assert ".innerHTML" not in text, (
+            "server-echoed filenames must not be injected as HTML"
+        )
+        assert "insertAdjacentHTML" not in text
+        assert "textContent" in text
+
+
+class TestCheckPageRemoved:
+    """R16/R21 — check.html posts to a route that does not exist (405)."""
+
+    def test_check_html_is_gone(self):
+        tpl = Path(__file__).parent.parent / "src" / "rlm_web" / "templates" / "check.html"
+        assert not tpl.exists(), "dead UI should be deleted or implemented"
+
+    def test_get_check_is_not_a_route(self, client):
+        assert client.get("/check").status_code == 404
+
+
+class TestBoundedStores:
+    """R22 — jobs and chat sessions were unbounded in-memory dictionaries."""
+
+    def test_lru_evicts_oldest(self):
+        from rlm_web.app import _BoundedLRU
+
+        store = _BoundedLRU(maxlen=3)
+        for i in range(5):
+            store[f"k{i}"] = i
+        assert len(store) == 3
+        assert "k0" not in store and "k1" not in store
+        assert list(store) == ["k2", "k3", "k4"]
+
+    def test_lru_keeps_recently_used_entries(self):
+        from rlm_web.app import _BoundedLRU
+
+        store = _BoundedLRU(maxlen=3)
+        for i in range(3):
+            store[f"k{i}"] = i
+        _ = store.get("k0")  # touch
+        store["k3"] = 3
+        assert "k0" in store, "a touched entry must survive eviction"
+        assert "k1" not in store
+
+    def test_job_and_chat_stores_are_bounded(self):
+        from rlm_web.app import _chat_sessions, _jobs, MAX_STORED_ENTRIES
+
+        assert _jobs._maxlen == MAX_STORED_ENTRIES
+        assert _chat_sessions._maxlen == MAX_STORED_ENTRIES
+        assert MAX_STORED_ENTRIES == 100

@@ -1,19 +1,32 @@
 """FastAPI web frontend for rlm_web (D2).
 
-HTTPS-ready, Tailscale-reachable, server-rendered with Jinja2 + htmx.
+HTTPS-ready, Tailscale-reachable, server-rendered with Jinja2 (plus vanilla
+EventSource on the job/chat pages).
+
+Trust model (S5/R21)
+--------------------
+Authentication is a **route dependency** (`require_auth`), not a call each
+handler has to remember: `tests/test_web.py::TestAuthCoverageByConstruction`
+walks the route table and fails if any API route lacks it. The gate is:
+
+* with `RLM_WEB_TOKEN` set — an authenticated session cookie is required;
+* without it — loopback callers only, and a missing peer address is rejected
+  unless `RLM_WEB_ALLOW_TESTCLIENT=1` is set explicitly (dev only).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import secrets
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
@@ -25,8 +38,40 @@ from rlm_local.model_backend import HTTPModelBackend
 
 app = FastAPI(title="RLM Web", version="0.1.0")
 
-# Session middleware for auth cookie
-app.add_middleware(SessionMiddleware, secret_key=os.environ.get("RLM_WEB_SECRET", "rlm-web-dev-secret-change-in-production"))
+
+def _session_https_only() -> bool:
+    """Cookie flags follow the TLS configuration (S5/R21).
+
+    `main()` sets these env vars from `--ssl-keyfile`/`--ssl-certfile`, so the
+    session cookie is marked `Secure` whenever the server actually speaks TLS.
+    """
+    return bool(os.environ.get("RLM_WEB_SSL_KEY")) and bool(
+        os.environ.get("RLM_WEB_SSL_CERT")
+    )
+
+
+def _install_session_middleware(https_only: bool) -> None:
+    """(Re)install SessionMiddleware with the given cookie policy.
+
+    Safe to call before the app starts serving: the middleware stack is rebuilt
+    on the next request.
+    """
+    app.user_middleware = [
+        m for m in app.user_middleware if getattr(m, "cls", None) is not SessionMiddleware
+    ]
+    app.middleware_stack = None
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=os.environ.get(
+            "RLM_WEB_SECRET", "rlm-web-dev-secret-change-in-production"
+        ),
+        https_only=https_only,
+        same_site="lax",
+    )
+
+
+_install_session_middleware(_session_https_only())
+
 static_dir = Path(__file__).parent / "static"
 static_dir.mkdir(exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
@@ -34,6 +79,15 @@ app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 # Upload limits (P2)
 MAX_UPLOAD_FILES = 20
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024  # 8 MB
+
+# In-memory stores are bounded so a long-lived server cannot grow without
+# limit (R22).
+MAX_STORED_ENTRIES = 100
+
+# How long an SSE client waits for its stream to appear before being told the
+# id is unknown. Without this the chat stream endpoint spun forever on a stale
+# or bogus id, holding a request worker open indefinitely.
+CHAT_STREAM_WAIT_SECONDS = 30.0
 
 # Templates
 from fastapi.templating import Jinja2Templates  # noqa: E402
@@ -43,31 +97,95 @@ templates_dir.mkdir(exist_ok=True)
 templates = Jinja2Templates(directory=str(templates_dir))
 
 
+# ── Bounded in-memory stores (R22) ─────────────────────────────────────────
+
+class _BoundedLRU(OrderedDict):
+    """OrderedDict that evicts the least-recently-used entry past `maxlen`.
+
+    Used for jobs and chat sessions: both are process-lifetime caches of
+    user-supplied content, and neither had any upper bound.
+    """
+
+    def __init__(self, maxlen: int = MAX_STORED_ENTRIES) -> None:
+        super().__init__()
+        self._maxlen = maxlen
+
+    def __setitem__(self, key, value) -> None:
+        if key in self:
+            self.move_to_end(key)
+        super().__setitem__(key, value)
+        while len(self) > self._maxlen:
+            self.popitem(last=False)
+
+    def get(self, key, default=None):
+        if key in self:
+            self.move_to_end(key)
+        return super().get(key, default)
+
+    def __getitem__(self, key):
+        value = super().__getitem__(key)
+        self.move_to_end(key)
+        return value
+
+
 # ── Auth ───────────────────────────────────────────────────────────────────
 
-def _check_auth(request: Request) -> None:
-    """Check bearer token or session cookie. Fail-closed for non-local (P3)."""
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _authorize(
+    *,
+    client_host: str | None,
+    session_authenticated: bool,
+    token: str,
+    allow_testclient: bool,
+) -> bool:
+    """Decide whether a request may proceed. Pure, so it is directly testable."""
+    if token:
+        # A token is configured: only an authenticated session passes. The dev
+        # opt-in must not override this.
+        return session_authenticated
+    if client_host is None:
+        # No peer address (e.g. behind an ASGI server that omits it): only an
+        # explicit dev opt-in, never a fail-open.
+        return allow_testclient
+    if client_host in _LOOPBACK_HOSTS:
+        return True
+    return allow_testclient and client_host == "testclient"
+
+
+def require_auth(request: Request) -> None:
+    """FastAPI dependency: bearer-session auth, fail-closed (P3, S5/R21)."""
     token = os.environ.get("RLM_WEB_TOKEN", "")
+    allow_testclient = os.environ.get("RLM_WEB_ALLOW_TESTCLIENT") == "1"
 
-    if not token:
-        # No token configured: allow loopback and test clients only
-        if request.client is None:
-            return  # TestClient — allow
-        host = request.client.host
-        if host in ("127.0.0.1", "::1", "localhost", "testclient"):
-            return
-
-    # Token configured: require session authentication
     try:
-        if request.session.get("authenticated"):
-            return
+        authenticated = bool(request.session.get("authenticated"))
     except Exception:
-        pass
-    raise HTTPException(status_code=401, detail="Authentication required")
+        authenticated = False
+
+    client_host = request.client.host if request.client is not None else None
+
+    if not _authorize(
+        client_host=client_host,
+        session_authenticated=authenticated,
+        token=token,
+        allow_testclient=allow_testclient,
+    ):
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+
 @app.post("/login")
 async def login(request: Request, token: str = Form(...)):
     expected = os.environ.get("RLM_WEB_TOKEN", "")
-    if token == expected or not expected:
+    if not expected:
+        # Loopback-only mode needs no login, and there is nothing to compare
+        # against — accepting any token here was a fail-open (S5/R21).
+        raise HTTPException(
+            status_code=400,
+            detail="No RLM_WEB_TOKEN is configured; login is disabled.",
+        )
+    if secrets.compare_digest(token, expected):
         request.session["authenticated"] = True
         return RedirectResponse(url="/", status_code=303)
     return HTMLResponse("Invalid token", status_code=401)
@@ -81,7 +199,7 @@ async def logout(request: Request):
 
 # ── Job storage ────────────────────────────────────────────────────────────
 
-_jobs: dict[str, dict[str, Any]] = {}
+_jobs: dict[str, dict[str, Any]] = _BoundedLRU(MAX_STORED_ENTRIES)
 _jobs_lock = threading.Lock()
 
 
@@ -139,27 +257,52 @@ def _run_job(job_id: str) -> None:
 
 # ── Routes ─────────────────────────────────────────────────────────────────
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/", response_class=HTMLResponse, dependencies=[Depends(require_auth)])
 async def console(request: Request):
-    _check_auth(request)
     return templates.TemplateResponse(request, "console.html")
 
 
-@app.post("/jobs", response_class=HTMLResponse)
+@app.post("/jobs", response_class=HTMLResponse, dependencies=[Depends(require_auth)])
 async def create_job(
     request: Request,
     query: str = Form(...),
     context: str = Form(""),
     profile: str = Form("laptop"),
+    files: list[UploadFile] | None = None,
 ):
-    _check_auth(request)
+    """Create a job. Uploaded .md files are appended to the pasted context.
+
+    The console form has always offered a file picker; the handler used to
+    ignore it, so uploads vanished silently (R16).
+    """
+    if files:
+        if len(files) > MAX_UPLOAD_FILES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Too many files: {len(files)} (max {MAX_UPLOAD_FILES})",
+            )
+        total = sum(f.size or 0 for f in files)
+        if total > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Upload too large: {total} bytes (max {MAX_UPLOAD_BYTES})",
+            )
+        parts = [context] if context.strip() else []
+        for f in files:
+            if not f.filename or not f.filename.endswith(".md"):
+                continue
+            text = (await f.read()).decode("utf-8", errors="replace")
+            if text.strip():
+                parts.append(f"# {f.filename}\n\n{text}")
+        context = "\n\n".join(parts)
+
     job_id = _create_job(query, context, profile)
     return RedirectResponse(url=f"/jobs/{job_id}", status_code=303)
 
 
-@app.get("/jobs/{job_id}", response_class=HTMLResponse)
+@app.get("/jobs/{job_id}", response_class=HTMLResponse,
+         dependencies=[Depends(require_auth)])
 async def job_view(request: Request, job_id: str):
-    _check_auth(request)
     job = _jobs.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -168,7 +311,7 @@ async def job_view(request: Request, job_id: str):
     })
 
 
-@app.get("/jobs/{job_id}/events")
+@app.get("/jobs/{job_id}/events", dependencies=[Depends(require_auth)])
 async def job_events(request: Request, job_id: str):
     """SSE endpoint for live job progress."""
     from fastapi.responses import StreamingResponse
@@ -196,9 +339,8 @@ async def _asleep(seconds: float) -> None:
     await asyncio.sleep(seconds)
 
 
-@app.get("/vault", response_class=HTMLResponse)
+@app.get("/vault", response_class=HTMLResponse, dependencies=[Depends(require_auth)])
 async def vault_search(request: Request, q: str = ""):
-    _check_auth(request)
     results = []
     if q:
         try:
@@ -216,9 +358,9 @@ async def vault_search(request: Request, q: str = ""):
     })
 
 
-@app.get("/vault/page/{path:path}", response_class=HTMLResponse)
+@app.get("/vault/page/{path:path}", response_class=HTMLResponse,
+         dependencies=[Depends(require_auth)])
 async def vault_page(request: Request, path: str):
-    _check_auth(request)
     try:
         from rlm_kernel.vault import LocalVault
         vault_root = _get_vault_root()
@@ -241,10 +383,9 @@ def _get_vault_root() -> Path:
                 str(Path.home() / ".local" / "share" / "rlm-kernel" / "vault")))
 
 
-@app.post("/vault/ingest")
+@app.post("/vault/ingest", dependencies=[Depends(require_auth)])
 async def vault_ingest(request: Request, files: list[UploadFile] | None = None):
     """Ingest uploaded Markdown files into the vault as permanent pages."""
-    _check_auth(request)
     if not files:
         return JSONResponse({"error": "no files uploaded"}, status_code=400)
     if len(files) > MAX_UPLOAD_FILES:
@@ -335,15 +476,9 @@ async def vault_ingest(request: Request, files: list[UploadFile] | None = None):
         "ingested": ingested, "skipped": skipped, "results": results,
     })
 
-@app.get("/check", response_class=HTMLResponse)
-async def check_page(request: Request):
-    _check_auth(request)
-    return templates.TemplateResponse(request, "check.html")
-
-
-@app.get("/docs/{name:path}", response_class=HTMLResponse)
+@app.get("/docs/{name:path}", response_class=HTMLResponse,
+         dependencies=[Depends(require_auth)])
 async def docs_page(request: Request, name: str):
-    _check_auth(request)
     docs_dir = Path(__file__).parent.parent.parent / "docs"
     resolved = (docs_dir / name).resolve()
     if not resolved.is_relative_to(docs_dir.resolve()) or not resolved.is_file():
@@ -356,20 +491,18 @@ async def docs_page(request: Request, name: str):
 
 # ── Chat ───────────────────────────────────────────────────────────────────
 
-_chat_sessions: dict[str, dict[str, Any]] = {}
+_chat_sessions: dict[str, dict[str, Any]] = _BoundedLRU(MAX_STORED_ENTRIES)
 _chat_lock = threading.Lock()
 
 
-@app.get("/chat", response_class=HTMLResponse)
+@app.get("/chat", response_class=HTMLResponse, dependencies=[Depends(require_auth)])
 async def chat_page(request: Request):
-    _check_auth(request)
     return templates.TemplateResponse(request, "chat.html", {"profile": "laptop"})
 
 
-@app.post("/chat/send")
+@app.post("/chat/send", dependencies=[Depends(require_auth)])
 async def chat_send(request: Request):
     """Queue a chat message and return a stream ID for SSE."""
-    _check_auth(request)
     body = await request.json()
     session_id = body.get("session_id", "default")
     message = body.get("message", "").strip()
@@ -378,7 +511,7 @@ async def chat_send(request: Request):
         return JSONResponse({"error": "empty message"}, status_code=400)
     stream_id = uuid.uuid4().hex[:8]
     with _chat_lock:
-        sess = _chat_sessions.setdefault(session_id, {"context": ""})
+        _chat_sessions.setdefault(session_id, {"context": ""})
     threading.Thread(
         target=_process_chat_message,
         args=(session_id, message, stream_id, profile),
@@ -387,23 +520,33 @@ async def chat_send(request: Request):
     return JSONResponse({"stream_id": stream_id, "session_id": session_id})
 
 
-@app.get("/chat/events/{stream_id}")
+@app.get("/chat/events/{stream_id}", dependencies=[Depends(require_auth)])
 async def chat_events(request: Request, stream_id: str):
     """SSE endpoint for chat response streaming."""
     import asyncio as _asyncio
     from fastapi.responses import StreamingResponse
 
     async def event_stream():
+        waited = 0.0
         while True:
             found = None
             with _chat_lock:
-                for sess in _chat_sessions.values():
+                for sess in list(_chat_sessions.values()):
                     queues = sess.get("_queues", {})
                     if stream_id in queues:
                         found = queues[stream_id]
                         break
             if found is None:
+                if waited >= CHAT_STREAM_WAIT_SECONDS:
+                    yield (
+                        "data: "
+                        + json.dumps({"type": "error",
+                                      "text": f"unknown stream id: {stream_id}"})
+                        + "\n\n"
+                    )
+                    return
                 await _asyncio.sleep(0.2)
+                waited += 0.2
                 continue
             while found:
                 evt = found.pop(0)
@@ -415,10 +558,9 @@ async def chat_events(request: Request, stream_id: str):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-@app.post("/chat/clear")
+@app.post("/chat/clear", dependencies=[Depends(require_auth)])
 async def chat_clear(request: Request):
     """Clear a chat session's context."""
-    _check_auth(request)
     body = await request.json()
     session_id = body.get("session_id", "default")
     with _chat_lock:
@@ -427,10 +569,9 @@ async def chat_clear(request: Request):
     return JSONResponse({"status": "ok"})
 
 
-@app.post("/chat/context")
+@app.post("/chat/context", dependencies=[Depends(require_auth)])
 async def chat_context(request: Request):
     """Return current chat session context."""
-    _check_auth(request)
     body = await request.json()
     session_id = body.get("session_id", "default")
     with _chat_lock:
@@ -476,7 +617,7 @@ def _process_chat_message(session_id: str, message: str, stream_id: str, profile
         try:
             from rlm_kernel.search import search_vault
             from rlm_kernel.vault import LocalVault
-            vr = Path.home() / ".local" / "share" / "rlm-kernel" / "vault"
+            vr = _get_vault_root()
             vault = LocalVault(vr, init_git=False)
             idx = vr / ".index" / "meta.sqlite"
             if idx.exists():
@@ -493,7 +634,7 @@ def _process_chat_message(session_id: str, message: str, stream_id: str, profile
         path = msg[len("/get "):].strip()
         try:
             from rlm_kernel.vault import LocalVault
-            vault = LocalVault(Path.home() / ".local/share/rlm-kernel/vault", init_git=False)
+            vault = LocalVault(_get_vault_root(), init_git=False)
             page = vault.get(path)
             emit("chunk", text=f"{page.frontmatter.title}\n\n{page.body[:1000]}\n" if page else f"Not found: {path}\n")
         except Exception as e:
@@ -529,7 +670,7 @@ def _get_kernel_bridge():
             from rlm_kernel.repl_bridge import KernelBridge
             from rlm_kernel.vault import LocalVault
             from rlm_kernel.index import rebuild_index
-            vault_root = Path.home() / ".local" / "share" / "rlm-kernel" / "vault"
+            vault_root = _get_vault_root()
             vault = LocalVault(vault_root, init_git=False)
             idx_path = vault_root / ".index" / "meta.sqlite"
             if not idx_path.exists():
@@ -538,6 +679,8 @@ def _get_kernel_bridge():
         except Exception:
             globals()["_cached_bridge"] = None
     return globals().get("_cached_bridge")
+
+
 # ── Startup ────────────────────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> None:
@@ -555,6 +698,11 @@ def main(argv: list[str] | None = None) -> None:
     if args.ssl_keyfile and args.ssl_certfile:
         kwargs["ssl_keyfile"] = args.ssl_keyfile
         kwargs["ssl_certfile"] = args.ssl_certfile
+        # Cookie flags follow the served scheme (S5/R21): a Secure session
+        # cookie once the server actually speaks TLS.
+        os.environ["RLM_WEB_SSL_KEY"] = args.ssl_keyfile
+        os.environ["RLM_WEB_SSL_CERT"] = args.ssl_certfile
+        _install_session_middleware(https_only=True)
 
     uvicorn.run("rlm_web.app:app", **kwargs)
 

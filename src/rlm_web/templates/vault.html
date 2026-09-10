@@ -30,6 +30,8 @@
 <p><small>Uploaded .md files become permanent, searchable vault pages.</small></p>
 
 <script>
+// Server-echoed values (uploaded filenames, error text) are inserted with
+// textContent/createElement, never innerHTML — they are user-controlled (S5).
 document.getElementById('ingest-form').onsubmit = async function(e) {
     e.preventDefault();
     var form = e.target;
@@ -38,20 +40,27 @@ document.getElementById('ingest-form').onsubmit = async function(e) {
     var result = document.getElementById('ingest-result');
     btn.disabled = true;
     btn.textContent = 'Uploading...';
-    result.innerHTML = '';
+    while (result.firstChild) result.removeChild(result.firstChild);
     try {
         var resp = await fetch('/vault/ingest', {method: 'POST', body: data});
         var json = await resp.json();
+        var summary = document.createElement('p');
+        summary.textContent = json.ingested + ' ingested, ' + json.skipped + ' skipped';
+        result.appendChild(summary);
+        var pre = document.createElement('pre');
         var lines = [];
         for (var r of json.results) {
             var icon = r.status === 'ok' ? '+' : r.status === 'skipped' ? '=' : '!';
             lines.push(icon + ' ' + r.file + (r.path ? ' - ' + r.path : ' (' + r.reason + ')'));
         }
-        result.innerHTML = '<p>' + json.ingested + ' ingested, ' + json.skipped + ' skipped</p>'
-            + '<pre>' + lines.join('\\n') + '</pre>';
+        pre.textContent = lines.join('\n');
+        result.appendChild(pre);
         form.reset();
     } catch(err) {
-        result.innerHTML = '<p style=\"color:red\">Error: ' + err.message + '</p>';
+        var p = document.createElement('p');
+        p.style.color = 'red';
+        p.textContent = 'Error: ' + err.message;
+        result.appendChild(p);
     }
     btn.disabled = false;
     btn.textContent = 'Upload to Vault';

@@ -230,11 +230,12 @@ GEPA offline optimization of harness prompts. Targets: `prologue`,
 | Route | Description |
 |---|---|
 | `GET /` | Console — query form with Markdown upload/paste |
-| `POST /jobs` | Submit a query → redirects to job page |
+| `POST /jobs` | Submit a query (pasted context **and** uploaded `.md` files) → redirects to job page |
 | `GET /jobs/{id}` | Live job view with SSE progress stream |
 | `GET /vault?q=` | Read-only vault search |
 | `GET /vault/page/{path}` | Read-only page view |
-| `GET /check` | Model check form |
+| `POST /vault/ingest` | Upload `.md` files as permanent vault pages |
+| `GET /chat`, `POST /chat/send` | Chat console (SSE response stream) |
 | `GET /docs/{name}` | Operator guide and manuals |
 
 ### Job Lifecycle
@@ -263,10 +264,19 @@ uv run python -m rlm_web.app \
 This gives you a real Let's Encrypt certificate — no phone warnings.
 
 **Option B — Self-signed cert (fallback):**
+
+TLS material is **never committed** — `cert.pem` / `key.pem` were removed from
+version control and `*.pem` / `*.crt` / `*.key` are gitignored. Generate a fresh
+pair **per host**, in the directory you run the server from:
+
 ```bash
-# Generate
+# One-liner, per host (825 days is the max the CA/B forum allows for a leaf cert)
+openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem \
+    -days 825 -subj "/CN=localhost"
+
+# Or, with SAN entries for the Tailscale hostname and 100.x.y.z address:
 openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem \
-    -days 365 -nodes \
+    -days 825 -nodes \
     -subj "/CN=<tailscale-hostname>" \
     -addext "subjectAltName=DNS:<tailscale-hostname>,IP:<100.x.y.z>"
 
@@ -275,6 +285,10 @@ uv run python -m rlm_web.app \
     --host 0.0.0.0 --port 8778 \
     --ssl-keyfile key.pem --ssl-certfile cert.pem
 ```
+
+If you are upgrading an existing checkout, the old committed files are already
+on disk; the `git rm --cached` that untracked them leaves them in place, so
+nothing breaks. Just do not re-add them.
 Install the cert on your phone (Android: Settings → Security → Install from
 storage; iOS: Settings → General → About → Certificate Trust Settings).
 
@@ -286,6 +300,43 @@ storage; iOS: Settings → General → About → Certificate Trust Settings).
 4. Accept the self-signed cert warning (first time only) or use the
    Tailscale cert path above.
 5. Log in with your `RLM_WEB_TOKEN`.
+
+### TLS Verification Posture (R18)
+
+The harness talks to a local self-signed inference server, so
+`HTTPModelBackend` defaults to `verify=False`. That default is fine on
+loopback — and only there:
+
+- **Loopback endpoints** (`localhost`, `127.0.0.0/8`, `::1`) are exempt, and no
+  warning is emitted.
+- **A non-loopback `https` endpoint with verification off emits a
+  `UserWarning`** naming the endpoint, because anything on the path can
+  intercept the traffic. Plain `http` has no certificate to verify, so it is not
+  warned about.
+- To silence it responsibly, put the server on `localhost` (an SSH tunnel or a
+  local port-forward counts) or pass `verify=True`.
+
+The same posture applies to the GEPA optimizer: it used to set
+`litellm.ssl_verify = False` **process-globally**, which would have disabled
+verification for every litellm call in the process, including a later remote
+one. It now passes `ssl_verify` per call on the reflection model only.
+
+**Web console (S5/R21).** The console's trust model is worth knowing before
+exposing it:
+
+- Authentication is a route dependency, so a new route cannot forget it —
+  `tests/test_web.py::TestAuthCoverageByConstruction` walks the route table.
+- With `RLM_WEB_TOKEN` set, an authenticated session is required for **every**
+  route, including both SSE endpoints (`/jobs/{id}/events`,
+  `/chat/events/{stream_id}`), which previously streamed answers unauthenticated.
+- Without a token the console is **loopback-only**; `POST /login` returns 400
+  because there is nothing to compare against. Starlette's `TestClient` connects
+  from a synthetic non-loopback host, so the test suite opts in explicitly with
+  `RLM_WEB_ALLOW_TESTCLIENT=1`.
+- Session cookies are marked `Secure` whenever the server is started with
+  `--ssl-keyfile`/`--ssl-certfile`.
+- `/check` was removed: the page posted to a route that did not exist. Use
+  `rlm check <model>` from the CLI.
 
 ---
 
