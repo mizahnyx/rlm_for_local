@@ -9,7 +9,7 @@
 **Baseline:** `Qwen3.5-4B-Abliterated` — **90/100, SUITABLE**, P4 = 15/15
 (voluntary `answer['ready']`), measured earlier the same day.
 
-**Result:** five other models score **100/100 SUITABLE**; see §3.
+**Result:** six other models pass the battery — five at **100/100**; see §3.
 
 ---
 
@@ -70,11 +70,11 @@ Two observations worth keeping:
   prompt-wording accident, and it is consistent with the FAIL recorded for
   `LFM2.5-VL-1.6B` and `LFM2.5-8B-A1B-Uncensored`.
 
-## 3. Stage 2 — suitability battery (complete for 9 of 10)
+## 3. Stage 2 — suitability battery (complete)
 
 Ran the `--quick` battery (P1 + P4 + P6, 50-point scale reported /100) against the
 ten screen survivors, one at a time with a router restart between models. Total
-wall clock **19 161 s (5.3 h)**.
+wall clock **22 247 s (6.2 h)** including the one retry.
 
 | Model | Score | Verdict | P1 | P4 | P6 | Time |
 |---|---|---|---|---|---|---|
@@ -84,18 +84,26 @@ wall clock **19 161 s (5.3 h)**.
 | **Qwen3-VL-4B** | **100** | **SUITABLE** | 20/20 | 15/15 | 15/15 | 2 330 s |
 | **Qwen3-VL-4B-Abliterated** | **100** | **SUITABLE** | 20/20 | 15/15 | 15/15 | 3 198 s |
 | **Qwen3.5-4B-HauhauCS** | **90** | **SUITABLE** | 20/20 | 15/15 | 10/15 | 2 253 s |
+| **Qwen3.5-4B-Q38-Heretic** | **90** | **SUITABLE** | 20/20 | 15/15 | 10/15 | 3 086 s |
 | Huihui-0.8B-Abliterated | 70 | MARGINAL | 20/20 | 0/15 | 15/15 | 882 s |
 | Qwen3.5-2B-Instruct | 60 | MARGINAL | 20/20 | 0/15 | 10/15 | 1 784 s |
 | Qwen3.5-0.8B-Unsloth | 50 | MARGINAL | 20/20 | 0/15 | 5/15 | 1 196 s |
-| Qwen3.5-4B-Q38-Heretic | — | *re-running* | | | | 946 s (transport error) |
 | *(baseline)* Qwen3.5-4B-Abliterated | 90 | SUITABLE | 20/20 | 15/15 | 10/15 | 1 848 s |
 
-**Answer to the question asked:** besides `Qwen3.5-4B-Abliterated`, **five models
-pass the suitability battery outright** — `Qwen3-4B-2507`, `Nanbeige4.2-3B-Heretic`,
-`MiniCPM5-2B`, `Qwen3-VL-4B` and `Qwen3-VL-4B-Abliterated` — each scoring a
-**perfect 100/100**, i.e. *above* the current production model. `Qwen3.5-4B-HauhauCS`
-also passes (90/100, equal to the baseline). `Qwen3.5-4B-Q38-Heretic` is still
-being measured after a transport error on its first attempt.
+**Answer to the question asked:** besides `Qwen3.5-4B-Abliterated`, **six models
+pass the suitability battery**:
+
+- **five with a perfect 100/100** — `Qwen3-4B-2507`, `Nanbeige4.2-3B-Heretic`,
+  `MiniCPM5-2B`, `Qwen3-VL-4B`, `Qwen3-VL-4B-Abliterated`, i.e. *above* the
+  current production model on this scale;
+- **two at 90/100** — `Qwen3.5-4B-HauhauCS` and `Qwen3.5-4B-Q38-Heretic`, equal
+  to the baseline. Both lose the same 5 points on P6's third needle.
+
+Three models are MARGINAL (70 / 60 / 50), all of them 0.8B–2B, and all three fail
+for the same reason: P4 = 0.
+
+**Notable:** `MiniCPM5-2B` reaches 100/100 in 818 s — a third of the baseline's
+runtime — so on this hardware it is the best capability-per-second on the router.
 
 ### 3.1 P1 is saturated — P4 is the discriminator
 
@@ -104,20 +112,20 @@ block"), including both 0.8B models. On this router P1 separates nothing: the
 protocol *format* is easy. The entire spread between SUITABLE and MARGINAL comes
 from two probes:
 
-- **P4 — voluntary `answer['ready']` submission (0 or 15).** Six models submit on
+- **P4 — voluntary `answer['ready']` submission (0 or 15).** Seven models submit on
   their own; three never do and are carried by forced finalization. `MiniCPM5-2B`
   and `Huihui-0.8B-Abliterated` illustrate the gap exactly: same P1, same
   six-model class, opposite P4 outcome.
-- **P6 — needle retrieval (0–15).** `Qwen3.5-4B-HauhauCS` passes overall but
-  loses a needle (10/15), and `Huihui-0.8B-Abliterated` retrieves *all three*
-  needles despite failing P4 outright — the sub-call path works fine on a 0.8B
-  model when the loop gets there.
+- **P6 — needle retrieval (0–15).** The two 90/100 models lose the same third
+  needle; `Huihui-0.8B-Abliterated` retrieves *all three* needles despite failing
+  P4 outright — the sub-call path works fine on a 0.8B model when the loop
+  reaches it.
 
 Two consequences worth acting on:
 
-- **The R25.6 voluntary-submission few-shot generalised.** Six models now submit
-  voluntarily and five hit 100/100, where the recorded pre-R25.6 baseline was
-  0/15 on P4 with forced finalization carrying every run. The fixed few-shot
+- **The R25.6 voluntary-submission few-shot generalised.** Seven of ten models now
+  submit on their own and five hit 100/100, where the recorded pre-R25.6 baseline
+  was 0/15 on P4 with forced finalization carrying every run. The fixed few-shot
   (a short probe then an immediate `answer['ready']`) is not
   Qwen3.5-Abliterated-specific.
 - **`Qwen3.5-2B-Instruct`'s P4 evidence is contradictory and deserves a look:**
@@ -125,7 +133,7 @@ Two consequences worth acting on:
   `No final answer detected` + forced finalization. The model wrote the
   submission text somewhere the REPL did not execute it as a submission (a
   malformed or outside-the-fence block). That is a harness-diagnostic gap, not a
-  model verdict — the P4 probe scores 0 on a disagreement it does not explain.
+  model verdict — P4 scores 0 on a disagreement it does not explain.
 
 ### 3.2 Models deliberately not battery-tested
 
@@ -133,6 +141,22 @@ Two consequences worth acting on:
 skipped: a ~1.5 h battery each would only re-confirm that they cannot emit the
 protocol in a single turn. Re-run them with `--only` if you want the explicit
 FAIL on record.
+
+### 3.3 One model needed a retry, and why
+
+`Qwen3.5-4B-Q38-Heretic` first recorded a `ConnectTimeout` after burning its full
+900 s client timeout. The router log shows the model itself is fine
+(`state: ready`, 4.3B params, `n_ctx` 262 144, serving at ~7 tok/s with prefix
+caching at `f_keep = 0.97`). The failure is a **host interaction, not a model
+property**: `--before-each` restarts the router, the first request then triggers
+a load of a model whose preset asks for a 262 144-token context on a 15 GiB
+machine, and the router is unresponsive to new connections while that allocation
+happens. The re-run completed normally at 90/100.
+
+Mitigations now in the tool: `wait_for_router` requires three consecutive answers
+before starting a model, and a model whose run dies on an `httpx.TransportError`
+is retried once after 20 s instead of being recorded as a failure. A transient
+there costs an hour, so the retry is worth its worst case.
 
 ## 4. Host tuning note (why the sweep restarts the router between models)
 
