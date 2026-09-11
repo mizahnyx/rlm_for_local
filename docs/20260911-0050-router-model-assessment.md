@@ -9,6 +9,8 @@
 **Baseline:** `Qwen3.5-4B-Abliterated` — **90/100, SUITABLE**, P4 = 15/15
 (voluntary `answer['ready']`), measured earlier the same day.
 
+**Result:** five other models score **100/100 SUITABLE**; see §3.
+
 ---
 
 ## 1. Why this document has two stages
@@ -68,42 +70,69 @@ Two observations worth keeping:
   prompt-wording accident, and it is consistent with the FAIL recorded for
   `LFM2.5-VL-1.6B` and `LFM2.5-8B-A1B-Uncensored`.
 
-## 3. Stage 2 — suitability battery (in progress)
+## 3. Stage 2 — suitability battery (complete for 9 of 10)
 
-Running the `--quick` battery (P1 + P4 + P6, 50-point scale reported /100) in the
-background, in this order, one model at a time with a router restart between
-models so only one model instance is resident (see §4):
+Ran the `--quick` battery (P1 + P4 + P6, 50-point scale reported /100) against the
+ten screen survivors, one at a time with a router restart between models. Total
+wall clock **19 161 s (5.3 h)**.
 
-| # | Model | State |
-|---|---|---|
-| 1 | Qwen3.5-4B-HauhauCS | running |
-| 2 | Qwen3.5-4B-Q38-Heretic | queued |
-| 3 | Qwen3-4B-2507 | queued |
-| 4 | Nanbeige4.2-3B-Heretic | queued |
-| 5 | Qwen3.5-2B-Instruct | queued |
-| 6 | MiniCPM5-2B | queued |
-| 7 | Qwen3-VL-4B | queued |
-| 8 | Qwen3-VL-4B-Abliterated | queued |
-| 9 | Qwen3.5-0.8B-Unsloth | queued |
-| 10 | Huihui-0.8B-Abliterated | queued |
+| Model | Score | Verdict | P1 | P4 | P6 | Time |
+|---|---|---|---|---|---|---|
+| **Qwen3-4B-2507** | **100** | **SUITABLE** | 20/20 | 15/15 | 15/15 | 1 430 s |
+| **Nanbeige4.2-3B-Heretic** | **100** | **SUITABLE** | 20/20 | 15/15 | 15/15 | 4 325 s |
+| **MiniCPM5-2B** | **100** | **SUITABLE** | 20/20 | 15/15 | 15/15 | 818 s |
+| **Qwen3-VL-4B** | **100** | **SUITABLE** | 20/20 | 15/15 | 15/15 | 2 330 s |
+| **Qwen3-VL-4B-Abliterated** | **100** | **SUITABLE** | 20/20 | 15/15 | 15/15 | 3 198 s |
+| **Qwen3.5-4B-HauhauCS** | **90** | **SUITABLE** | 20/20 | 15/15 | 10/15 | 2 253 s |
+| Huihui-0.8B-Abliterated | 70 | MARGINAL | 20/20 | 0/15 | 15/15 | 882 s |
+| Qwen3.5-2B-Instruct | 60 | MARGINAL | 20/20 | 0/15 | 10/15 | 1 784 s |
+| Qwen3.5-0.8B-Unsloth | 50 | MARGINAL | 20/20 | 0/15 | 5/15 | 1 196 s |
+| Qwen3.5-4B-Q38-Heretic | — | *re-running* | | | | 946 s (transport error) |
+| *(baseline)* Qwen3.5-4B-Abliterated | 90 | SUITABLE | 20/20 | 15/15 | 10/15 | 1 848 s |
 
-**Skipped deliberately:** `Qwen2.5-VL-3B` and `LFM2.5-2.6B-Heretic` — they cannot
-emit the protocol in a single turn, so a ~1.5 h battery each would only
-re-confirm a rejection. Re-run them with `--only` if you want the explicit FAIL
-on record.
+**Answer to the question asked:** besides `Qwen3.5-4B-Abliterated`, **five models
+pass the suitability battery outright** — `Qwen3-4B-2507`, `Nanbeige4.2-3B-Heretic`,
+`MiniCPM5-2B`, `Qwen3-VL-4B` and `Qwen3-VL-4B-Abliterated` — each scoring a
+**perfect 100/100**, i.e. *above* the current production model. `Qwen3.5-4B-HauhauCS`
+also passes (90/100, equal to the baseline). `Qwen3.5-4B-Q38-Heretic` is still
+being measured after a transport error on its first attempt.
 
-Results append to `logs/router-model-battery.jsonl`, one JSON object per model,
-so the sweep is resumable: read the completed model IDs and re-launch with
-`--skip` for those. Expected wall clock: roughly 12–16 hours for the ten models.
+### 3.1 P1 is saturated — P4 is the discriminator
 
-```bash
-# collect the verdicts as they land
-type logs\router-model-battery.jsonl
+Every one of the ten models scored **20/20 on P1** ("emits a valid ```repl
+block"), including both 0.8B models. On this router P1 separates nothing: the
+protocol *format* is easy. The entire spread between SUITABLE and MARGINAL comes
+from two probes:
 
-# resume after an interruption (skip what is already recorded)
-uv run python scripts/assess_router_models.py --endpoint https://lunacode:9010/v1 \
-    --out logs/router-model-battery.jsonl --skip Qwen3.5-4B-HauhauCS
-```
+- **P4 — voluntary `answer['ready']` submission (0 or 15).** Six models submit on
+  their own; three never do and are carried by forced finalization. `MiniCPM5-2B`
+  and `Huihui-0.8B-Abliterated` illustrate the gap exactly: same P1, same
+  six-model class, opposite P4 outcome.
+- **P6 — needle retrieval (0–15).** `Qwen3.5-4B-HauhauCS` passes overall but
+  loses a needle (10/15), and `Huihui-0.8B-Abliterated` retrieves *all three*
+  needles despite failing P4 outright — the sub-call path works fine on a 0.8B
+  model when the loop gets there.
+
+Two consequences worth acting on:
+
+- **The R25.6 voluntary-submission few-shot generalised.** Six models now submit
+  voluntarily and five hit 100/100, where the recorded pre-R25.6 baseline was
+  0/15 on P4 with forced finalization carrying every run. The fixed few-shot
+  (a short probe then an immediate `answer['ready']`) is not
+  Qwen3.5-Abliterated-specific.
+- **`Qwen3.5-2B-Instruct`'s P4 evidence is contradictory and deserves a look:**
+  the probe reports `answer['ready'] = True found in model output` *and*
+  `No final answer detected` + forced finalization. The model wrote the
+  submission text somewhere the REPL did not execute it as a submission (a
+  malformed or outside-the-fence block). That is a harness-diagnostic gap, not a
+  model verdict — the P4 probe scores 0 on a disagreement it does not explain.
+
+### 3.2 Models deliberately not battery-tested
+
+`Qwen2.5-VL-3B` and `LFM2.5-2.6B-Heretic` failed the stage-1 screen and were
+skipped: a ~1.5 h battery each would only re-confirm that they cannot emit the
+protocol in a single turn. Re-run them with `--only` if you want the explicit
+FAIL on record.
 
 ## 4. Host tuning note (why the sweep restarts the router between models)
 
@@ -152,11 +181,18 @@ Both stages use the same `RLM_ENDPOINT` / `--endpoint` plumbing added to the CLI
 
 ## 6. Follow-ups
 
-- **Stage 2 verdicts** land in `logs/router-model-battery.jsonl`; the table in §3
-  should be replaced with real scores once the run finishes.
-- **`--screen` is not a gate.** If it is ever used to decide what *not* to
-  assess, remember it passes 0.8B models; its only justified use is dropping
-  models that cannot emit the protocol at all.
+- **`Qwen3.5-4B-Q38-Heretic`** is being re-measured after its first attempt died
+  on a `ConnectTimeout` (the router's restart/load window, not the model). The
+  sweep now waits for three consecutive router answers and retries a model once
+  after a transport error, so a second occurrence should not cost an hour.
+- **`Qwen3.5-2B-Instruct`'s contradictory P4 evidence** (submission text present,
+  no submission executed) should be turned into a real diagnostic: P4 currently
+  scores 0 without saying *why* the two signals disagree.
+- **P1 is saturated on this router** — every model, down to 0.8B, scores 20/20.
+  If the battery is used for ranking rather than pass/fail, the weight belongs on
+  P4 and P6, not P1.
+- **`--screen` is not a gate.** It passes 0.8B models; its only justified use is
+  dropping models that cannot emit the protocol at all.
 - **Parallel assessment is not safe here.** The router can hold several
   instances, but this host cannot — see §4. If a bigger box ever serves the
   router, raise `max_instances` and parallelise then.

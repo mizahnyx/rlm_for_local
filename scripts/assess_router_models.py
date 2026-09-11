@@ -45,13 +45,14 @@ def list_models(endpoint: str) -> list[str]:
 
 
 def wait_for_router(endpoint: str, timeout: float = 120.0) -> bool:
-    """Block until the router answers *twice in a row*.
+    """Block until the router has answered steadily for a few probes.
 
     One successful `/v1/models` is not enough after a restart: the router's own
-    listener can come back before it is ready to spawn a model instance, and a
-    request in that window is refused at the socket level. Requiring two
-    consecutive answers a couple of seconds apart avoids that race (observed as
-    a spurious ConnectError for one model in the first screen run).
+    listener comes back before it can spawn a model instance, and a request in
+    that window fails at the socket level. In the first screen run that produced
+    a spurious `ConnectError`; in the first battery run it produced a
+    `ConnectTimeout` that cost a whole model. Three consecutive answers a few
+    seconds apart costs ~6 s and removes the race.
     """
     deadline = time.time() + timeout
     consecutive = 0
@@ -59,11 +60,11 @@ def wait_for_router(endpoint: str, timeout: float = 120.0) -> bool:
         try:
             list_models(endpoint)
             consecutive += 1
-            if consecutive >= 2:
+            if consecutive >= 3:
                 return True
         except Exception:  # noqa: BLE001 - keep polling until the deadline
             consecutive = 0
-        time.sleep(2.0)
+        time.sleep(3.0)
     return False
 
 
@@ -130,6 +131,9 @@ def main() -> int:
     ap.add_argument("--screen", action="store_true",
                     help="one-turn protocol screen per model (cheap triage) "
                          "instead of the check battery")
+    ap.add_argument("--no-transport-retry", action="store_true",
+                    help="do not retry a model whose run died on a transport "
+                         "error (the default retries once after 20 s)")
     ap.add_argument("--order", default="",
                     help="comma-separated model IDs to assess first, so a long "
                          "sweep yields the most interesting results early")
@@ -199,37 +203,56 @@ def main() -> int:
                 fh.write(json.dumps(record, ensure_ascii=False) + "\n")
             continue
 
-        backend = HTTPModelBackend(
-            root_endpoint=args.endpoint,
-            root_model=model,
-            verify=False,
-            timeout=900.0,
-        )
         record: dict = {"model": model, "profile": args.profile,
                         "quick": not args.full}
-        try:
-            result = check_model(backend, model,
-                                 quick=not args.full, profile=args.profile)
-            record.update({
-                "score": result.get("score"),
-                "verdict": result.get("verdict"),
-                "probes_passed": result.get("probes_passed"),
-                "probes_total": result.get("probes_total"),
-                "per_probe": {
-                    pid: {"score": pr.get("score"),
-                          "max_score": pr.get("max_score"),
-                          "passed": pr.get("passed")}
-                    for pid, pr in (result.get("per_probe") or {}).items()
-                },
-                "evidence": (result.get("evidence_lines") or [])[:12],
-            })
-            print(f"    score={record['score']}/100 verdict={record['verdict']} "
-                  f"probes={record['probes_passed']}/{record['probes_total']}", flush=True)
-        except Exception as e:  # noqa: BLE001 - one bad model must not stop the sweep
-            record.update({"error": f"{type(e).__name__}: {e}"})
+        # A transport-level failure here costs the whole model (the battery is
+        # ~1.5 h on a slow host), and the transient ones are the router's own
+        # restart/load window rather than anything about the model. Retry once
+        # after a pause before recording a failure.
+        attempts = 2 if not args.no_transport_retry else 1
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            backend = HTTPModelBackend(
+                root_endpoint=args.endpoint,
+                root_model=model,
+                verify=False,
+                timeout=900.0,
+            )
+            try:
+                result = check_model(backend, model,
+                                     quick=not args.full, profile=args.profile)
+                record.update({
+                    "score": result.get("score"),
+                    "verdict": result.get("verdict"),
+                    "probes_passed": result.get("probes_passed"),
+                    "probes_total": result.get("probes_total"),
+                    "per_probe": {
+                        pid: {"score": pr.get("score"),
+                              "max_score": pr.get("max_score"),
+                              "passed": pr.get("passed")}
+                        for pid, pr in (result.get("per_probe") or {}).items()
+                    },
+                    "evidence": (result.get("evidence_lines") or [])[:12],
+                })
+                print(f"    score={record['score']}/100 verdict={record['verdict']} "
+                      f"probes={record['probes_passed']}/{record['probes_total']}",
+                      flush=True)
+                last_error = None
+                break
+            except Exception as e:  # noqa: BLE001 - one bad model must not stop the sweep
+                last_error = e
+                if isinstance(e, httpx.TransportError) and attempt < attempts:
+                    print(f"    transient {type(e).__name__}; retrying once in 20s",
+                          flush=True)
+                    time.sleep(20.0)
+                    continue
+                break
+            finally:
+                backend.close()
+
+        if last_error is not None:
+            record.update({"error": f"{type(last_error).__name__}: {last_error}"})
             print(f"    ERROR {record['error']}", flush=True)
-        finally:
-            backend.close()
 
         record["elapsed_s"] = round(time.time() - t0, 1)
         results.append(record)
