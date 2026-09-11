@@ -537,6 +537,154 @@ class TestLoginPolicy:
         assert "compare_digest" in src
 
 
+class TestSessionSecret:
+    """S5 follow-up — the session-signing secret must never be a published value.
+
+    The middleware used to fall back to the hardcoded string
+    `rlm-web-dev-secret-change-in-production`, which is in the repository. With
+    `RLM_WEB_TOKEN` set (auth on) but `RLM_WEB_SECRET` unset, anyone who could
+    reach the port could forge `{"authenticated": true}` and bypass the token:
+
+        no cookie                                        -> 401
+        cookie forged with the published default secret  -> 200
+        same forgery with a different secret             -> 401
+
+    The first two lines are the bug. `_forge_session` below reproduces exactly
+    what Starlette's SessionMiddleware signs, so these tests fail if the
+    published constant ever comes back.
+    """
+
+    LEAKED_DEFAULT = "rlm-web-dev-secret-change-in-production"
+
+    @staticmethod
+    def _forge_session(secret: str) -> str:
+        import base64
+        import json
+
+        import itsdangerous
+
+        signer = itsdangerous.TimestampSigner(secret)
+        payload = base64.b64encode(json.dumps({"authenticated": True}).encode("utf-8"))
+        return signer.sign(payload).decode("utf-8")
+
+    @staticmethod
+    def _start_app(token: str | None, secret: str | None) -> None:
+        """Resolve the env and (re)install the session middleware.
+
+        The signing secret is fixed when the middleware is installed — i.e. at
+        process start — so a test that changes `RLM_WEB_SECRET` must reinstall
+        it, exactly as `main()` does before uvicorn binds. The module's autouse
+        `_web_state` fixture restores the previous stack and env afterwards.
+        """
+        import rlm_web.app as webapp
+
+        for key, value in (("RLM_WEB_TOKEN", token), ("RLM_WEB_SECRET", secret)):
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        webapp._install_session_middleware(https_only=False)
+
+    def test_published_default_secret_no_longer_authenticates(self):
+        self._start_app(token="the-real-token", secret=None)
+        with TestClient(app) as c:
+            assert c.get("/").status_code == 401
+            c.cookies.set("session", self._forge_session(self.LEAKED_DEFAULT))
+            resp = c.get("/")
+            assert resp.status_code == 401, (
+                "a cookie forged with the published default secret was accepted"
+            )
+
+    def test_configured_secret_still_works_and_others_do_not(self):
+        self._start_app(token="the-real-token", secret="operator-chosen-secret")
+
+        with TestClient(app) as c:
+            c.cookies.set("session", self._forge_session("operator-chosen-secret"))
+            assert c.get("/").status_code == 200, (
+                "a cookie signed with the configured secret must authenticate"
+            )
+
+        with TestClient(app) as c:
+            c.cookies.set("session", self._forge_session(self.LEAKED_DEFAULT))
+            assert c.get("/").status_code == 401
+
+    def test_unset_secret_generates_an_unguessable_one(self):
+        from rlm_web.app import _session_secret
+
+        os.environ.pop("RLM_WEB_SECRET", None)
+        first = _session_secret()
+        assert first and first != self.LEAKED_DEFAULT
+        assert len(first) >= 32, "an ephemeral secret must be long enough to matter"
+
+    def test_no_hardcoded_secret_literal_remains_in_the_source(self):
+        """The constant must not appear as a *string value* anywhere.
+
+        Quoted form on purpose: prose explaining what the old default was is
+        fine, using it as a value is not.
+        """
+        src = Path(__file__).parent.parent / "src" / "rlm_web" / "app.py"
+        text = src.read_text(encoding="utf-8")
+        assert f'"{self.LEAKED_DEFAULT}"' not in text
+        assert f"'{self.LEAKED_DEFAULT}'" not in text
+
+    def test_main_refuses_to_start_with_a_token_but_no_secret(self):
+        """Fail closed: an exposed console must not sign sessions with a secret
+        the operator did not choose."""
+        import uvicorn
+
+        import rlm_web.app as webapp
+
+        os.environ["RLM_WEB_TOKEN"] = "the-real-token"
+        os.environ.pop("RLM_WEB_SECRET", None)
+        started: list[dict] = []
+        _orig = uvicorn.run
+        uvicorn.run = lambda *a, **kw: started.append(kw)
+        try:
+            with pytest.raises(SystemExit) as exc:
+                webapp.main([])
+            assert exc.value.code not in (0, None), "must exit non-zero"
+            assert started == [], "uvicorn must not be started"
+        finally:
+            uvicorn.run = _orig
+            del os.environ["RLM_WEB_TOKEN"]
+
+    def test_main_starts_when_token_and_secret_are_both_set(self):
+        import uvicorn
+
+        import rlm_web.app as webapp
+
+        os.environ["RLM_WEB_TOKEN"] = "the-real-token"
+        os.environ["RLM_WEB_SECRET"] = "operator-chosen-secret"
+        started: list[dict] = []
+        _orig = uvicorn.run
+        uvicorn.run = lambda *a, **kw: started.append(kw)
+        try:
+            assert webapp.main([]) in (0, None)
+            assert started, "uvicorn should have been started"
+        finally:
+            uvicorn.run = _orig
+            del os.environ["RLM_WEB_TOKEN"]
+            del os.environ["RLM_WEB_SECRET"]
+
+    def test_main_starts_in_loopback_mode_without_either(self):
+        """No token means loopback-only mode, which needs no login — and no
+        secret to sign it with."""
+        import uvicorn
+
+        import rlm_web.app as webapp
+
+        os.environ.pop("RLM_WEB_TOKEN", None)
+        os.environ.pop("RLM_WEB_SECRET", None)
+        started: list[dict] = []
+        _orig = uvicorn.run
+        uvicorn.run = lambda *a, **kw: started.append(kw)
+        try:
+            assert webapp.main([]) in (0, None)
+            assert started
+        finally:
+            uvicorn.run = _orig
+
+
 class TestVaultTemplateEscaping:
     """S5 — the ingest result was built with innerHTML from server data."""
 

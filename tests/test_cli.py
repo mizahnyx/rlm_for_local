@@ -52,6 +52,144 @@ class TestAsk:
             sys.stdin = saved_stdin
 
 
+class TestRemoteEndpoint:
+    """Pointing the harness at a model server that is not on localhost.
+
+    The shipped profiles hardcode `https://localhost:9010/v1`, and `rlm ask` /
+    `rlm chat` offered no override, so a router on another LAN or Tailscale host
+    (e.g. a llama.cpp router that loads models on demand) was reachable only from
+    Python. These tests pin the CLI path and the `RLM_ENDPOINT`/`RLM_MODEL`
+    defaults.
+    """
+
+    def test_ask_passes_endpoint_and_model_to_both_tiers(self, monkeypatch, tmp_path):
+        import rlm_local
+
+        captured: dict = {}
+
+        def fake_completion(query, context, **kwargs):
+            captured.update(kwargs)
+            captured["query"] = query
+            return "ok"
+
+        monkeypatch.setattr(rlm_local, "completion", fake_completion)
+
+        md = tmp_path / "ctx.md"
+        md.write_text("# doc\n\nbody", encoding="utf-8")
+
+        rc = cli_main([
+            "ask", "what?", "--context-file", str(md),
+            "--endpoint", "https://lunacode:9010/v1",
+            "--model", "Qwen3.5-2B-Instruct",
+        ])
+        assert rc == 0
+        assert captured["root_endpoint"] == "https://lunacode:9010/v1"
+        assert captured["root_model"] == "Qwen3.5-2B-Instruct"
+        assert captured["sub_model"] == "Qwen3.5-2B-Instruct", (
+            "the sub tier must follow --model, or sub-calls silently run on the "
+            "profile's model instead of the one being assessed"
+        )
+
+    def test_ask_env_vars_supply_the_defaults(self, monkeypatch, tmp_path):
+        import rlm_local
+
+        captured: dict = {}
+        monkeypatch.setattr(
+            rlm_local, "completion",
+            lambda query, context, **kw: captured.update(kw) or "ok",
+        )
+        monkeypatch.setenv("RLM_ENDPOINT", "https://lunacode:9010/v1")
+        monkeypatch.setenv("RLM_MODEL", "Nanbeige4.2-3B-Heretic")
+
+        md = tmp_path / "ctx.md"
+        md.write_text("body", encoding="utf-8")
+
+        assert cli_main(["ask", "q", "--context-file", str(md)]) == 0
+        assert captured["root_endpoint"] == "https://lunacode:9010/v1"
+        assert captured["root_model"] == "Nanbeige4.2-3B-Heretic"
+
+    def test_flags_beat_env(self, monkeypatch, tmp_path):
+        import rlm_local
+
+        captured: dict = {}
+        monkeypatch.setattr(
+            rlm_local, "completion",
+            lambda query, context, **kw: captured.update(kw) or "ok",
+        )
+        monkeypatch.setenv("RLM_ENDPOINT", "https://ignored:9010/v1")
+
+        md = tmp_path / "ctx.md"
+        md.write_text("body", encoding="utf-8")
+
+        assert cli_main([
+            "ask", "q", "--context-file", str(md),
+            "--endpoint", "https://lunacode:9010/v1",
+        ]) == 0
+        assert captured["root_endpoint"] == "https://lunacode:9010/v1"
+
+    def test_ask_without_overrides_leaves_the_profile_alone(self, monkeypatch, tmp_path):
+        import rlm_local
+
+        captured: dict = {}
+        monkeypatch.setattr(
+            rlm_local, "completion",
+            lambda query, context, **kw: captured.update(kw) or "ok",
+        )
+        monkeypatch.delenv("RLM_ENDPOINT", raising=False)
+        monkeypatch.delenv("RLM_MODEL", raising=False)
+
+        md = tmp_path / "ctx.md"
+        md.write_text("body", encoding="utf-8")
+
+        assert cli_main(["ask", "q", "--context-file", str(md)]) == 0
+        assert "root_endpoint" not in captured
+        assert "root_model" not in captured
+
+    def test_chat_receives_endpoint_and_model(self, monkeypatch):
+        import rlm_local.chat as chat_mod
+
+        captured: dict = {}
+        monkeypatch.setattr(
+            chat_mod, "run_chat",
+            lambda **kw: captured.update(kw),
+        )
+
+        rc = cli_main([
+            "chat", "--endpoint", "https://lunacode:9010/v1",
+            "--model", "Qwen3.5-4B-HauhauCS",
+        ])
+        assert rc == 0
+        config = captured.get("config")
+        assert config is not None, "chat must receive a Config carrying the overrides"
+        assert config.root_endpoint == "https://lunacode:9010/v1"
+        assert config.root_model == "Qwen3.5-4B-HauhauCS"
+        assert config.sub_model == "Qwen3.5-4B-HauhauCS"
+
+    def test_check_endpoint_default_honours_the_env_var(self, monkeypatch):
+        import argparse
+
+        monkeypatch.setenv("RLM_ENDPOINT", "https://lunacode:9010/v1")
+        subparsers = next(
+            a for a in build_parser()._actions
+            if isinstance(a, argparse._SubParsersAction)
+        )
+        check = subparsers.choices["check"]
+        endpoint_action = next(a for a in check._actions if a.dest == "endpoint")
+        assert endpoint_action.default == "https://lunacode:9010/v1"
+
+    def test_every_model_command_exposes_endpoint_and_model(self):
+        import argparse
+
+        subparsers = next(
+            a for a in build_parser()._actions
+            if isinstance(a, argparse._SubParsersAction)
+        )
+        for command in ("ask", "chat"):
+            dests = {a.dest for a in subparsers.choices[command]._actions}
+            assert "endpoint" in dests, f"{command} needs --endpoint"
+            assert "model" in dests, f"{command} needs --model"
+
+
 class TestSearch:
     def test_search_no_index_reports_rebuild(self, tmp_path, capsys):
         """rlm search on a vault with no index exits 1 and says what to run."""

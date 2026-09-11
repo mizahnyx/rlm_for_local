@@ -164,9 +164,24 @@ uv run python -m rlm_local.cli check Qwen3.5-4B-Abliterated
 **Web UI** — HTTPS/Tailscale-ready console with live SSE progress:
 ```bash
 export RLM_WEB_TOKEN="your-token"
+export RLM_WEB_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
 uv run python -m rlm_web.app
 # Open https://localhost:8778
 ```
+
+Point the CLI at a model server on another host — a LAN box, a Tailscale peer,
+or a llama.cpp router that loads models on demand:
+
+```bash
+export RLM_ENDPOINT="https://lunacode:9010/v1"
+export RLM_MODEL="Qwen3.5-4B-Abliterated"
+uv run python -m rlm_local.cli ask "What color?" --context-file doc.md
+```
+
+`--endpoint` / `--model` do the same per invocation. `--model` sets **both** the
+root and sub-call tiers, so sub-calls cannot silently run on a different model
+than the one you named. To sweep every model a router offers, see
+`scripts/assess_router_models.py`.
 
 ## Documentation
 
@@ -181,20 +196,27 @@ uv run python -m rlm_web.app
 
 ## Security Posture
 
-The defaults are tuned for a single-user machine; three of them are worth
+The defaults are tuned for a single-user machine; four of them are worth
 knowing before you expose anything:
 
 - **The gate is a quality gate, not containment.** Model-authored helper code is
   parsed and pattern-scanned by default; running it in the restricted-builtin
   sandbox is opt-in (`rlm-kernel review --execute`, `validate(..., execute=True)`)
   and is escapable on CPython. See the kernel manual §7.3.1.
+- **The REPL is a process boundary, not a sandbox.** Design §5.3's restricted
+  builtins and `open` jail were never implemented: a cell can read what the
+  harness user can read, and the worker inherits the harness environment. Run
+  against content and models you trust.
 - **TLS verification is off for local self-signed servers.** A non-loopback
   `https` endpoint with verification off raises a `UserWarning` rather than
   failing silently. Certificates and keys are never committed (`*.pem`,
   `*.crt`, `*.key` are gitignored).
-- **The web console is loopback-only without `RLM_WEB_TOKEN`.** With a token
-  set, every route — including both SSE streams — requires an authenticated
-  session; auth is a route dependency so a new route cannot forget it.
+- **The web console is loopback-only without `RLM_WEB_TOKEN`, and requires
+  `RLM_WEB_SECRET` when a token is set.** With a token, every route — including
+  both SSE streams — requires an authenticated session; auth is a route
+  dependency so a new route cannot forget it. Without a session secret the
+  server refuses to start, because a guessable signing key would let anyone
+  forge an authenticated session and bypass the token.
 
 Details and the reasoning: [Operator Guide](docs/operator-guide.md).
 

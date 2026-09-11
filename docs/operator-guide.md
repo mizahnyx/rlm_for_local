@@ -94,15 +94,48 @@ Overrides are ordinary `load_config()` keyword arguments, so they also work for
 `config=load_config("tiny", root_endpoint="…")` and for any other profile value
 (`max_turns`, `cell_timeout`, `repl_output_char_cap`, …).
 
-From the CLI, `rlm check` is the one command with an explicit endpoint flag:
+From the CLI, two environment variables configure **every** model-facing command
+— `ask`, `chat` and `check` alike:
 
 ```bash
-uv run python -m rlm_local.cli check Qwen3.5-4B-Abliterated \
-    --endpoint https://lunacode:9010/v1 --quick
+export RLM_ENDPOINT="https://lunacode:9010/v1"
+export RLM_MODEL="Qwen3.5-4B-Abliterated"
+
+uv run python -m rlm_local.cli ask "What is the access code?" --context-file doc.md
+uv run python -m rlm_local.cli chat
+uv run python -m rlm_local.cli check "$RLM_MODEL" --quick
 ```
 
-`rlm ask` / `rlm chat` use the profile defaults; for a remote endpoint call
-`completion()` as above (or edit `PROFILES` in `src/rlm_local/config.py`).
+Or per invocation with `--endpoint` / `--model` (flags beat the environment):
+
+```bash
+uv run python -m rlm_local.cli ask "…" --context-file doc.md \
+    --endpoint https://lunacode:9010/v1 --model Qwen3.5-2B-Instruct
+```
+
+Four things worth knowing:
+
+- **`--model` sets both tiers.** The root model and the sub-call model are the
+  same, so sub-calls run on the model you named rather than the profile default.
+  Naming one model while silently delegating to another would make a suitability
+  result meaningless.
+- **`sub_endpoint` follows `root_endpoint`** (empty means "same as root"), so
+  `--endpoint` covers both tiers.
+- **The `/v1` suffix is optional** — endpoints are normalized, so
+  `https://lunacode:9010` and `https://lunacode:9010/v1` are equivalent (R9).
+- **A cold router model takes time.** A llama.cpp router loads a model on first
+  touch (tens of seconds for a 4B on CPU); the default 300 s request timeout
+  absorbs that, and the R9 retry policy covers a momentary refusal during a swap.
+
+To sweep every model a router offers:
+
+```bash
+uv run python scripts/assess_router_models.py --endpoint "$RLM_ENDPOINT"
+```
+
+It runs the `check` battery against each advertised model, sequentially (model
+swapping is not safe to parallelise), and appends one JSON line per model so
+partial results survive an interruption.
 
 A non-loopback `https` endpoint emits a `UserWarning` because verification is off
 by default — see §4, "TLS Verification Posture".
@@ -148,8 +181,9 @@ to search the vault, `/context` to see what's loaded.
 ### 2.8 Web Frontend (First Login)
 
 ```bash
-# Set a token for web auth
+# Set a token for web auth — and the secret that signs the session cookie
 export RLM_WEB_TOKEN="your-secret-token"
+export RLM_WEB_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
 
 # Start the web server
 uv run python -m rlm_web.app
@@ -157,6 +191,20 @@ uv run python -m rlm_web.app
 
 Open `http://localhost:8778`, log in with your token. Upload Markdown files
 or paste context, submit queries, watch live progress.
+
+**`RLM_WEB_SECRET` is required whenever `RLM_WEB_TOKEN` is set.** The session
+cookie is signed with it, so without one either the signing key is guessable —
+which lets anyone forge an authenticated session and skip the token — or it
+changes on every restart and logs you out constantly. The server refuses to
+start in that configuration rather than serving an authentication check that
+does not hold:
+
+```
+error: RLM_WEB_TOKEN is set but RLM_WEB_SECRET is not.
+```
+
+Running without `RLM_WEB_TOKEN` needs no secret: the console then serves
+loopback-only, and login is disabled.
 
 ---
 
@@ -167,8 +215,11 @@ or paste context, submit queries, watch live progress.
 ```bash
 rlm ask "QUERY" [--context-file FILE.md ...] [--context-dir DIR] \
     [--stdin] [--vault PATH] [--profile tiny|laptop|workstation] \
-    [--max-turns N] [--log-path FILE]
+    [--max-turns N] [--log-path FILE] [--endpoint URL] [--model ID]
 ```
+
+`--endpoint` / `--model` (or `RLM_ENDPOINT` / `RLM_MODEL`) point the run at a
+model server on another host; `--model` sets both tiers. See §2.3.
 
 Context is assembled in this order: `--context-file` (each with a `# filename`
 heading, separated by `---`), `--context-dir` (all `*.md` sorted), `--stdin`,
@@ -195,7 +246,8 @@ rlm ask "Find dates." --context-file data.md --log-path /tmp/traj.jsonl
 ### `rlm chat`
 
 ```bash
-rlm chat [--profile tiny|laptop|workstation] [--vault-path PATH]
+rlm chat [--profile tiny|laptop|workstation] [--vault-path PATH] \
+    [--endpoint URL] [--model ID]
 ```
 
 Interactive loop with slash commands:
@@ -214,12 +266,13 @@ Non-slash input is treated as `/ask`. Ctrl+C to interrupt, Ctrl+D to quit.
 ### `rlm ingest`
 
 ```bash
-rlm ingest <path...> [--kind note|source|definition] [--tags a,b] [--vault PATH]
+rlm ingest <path...> [--kind note|definition|topic] [--tags a,b] [--vault PATH]
 ```
 
 Creates one vault page per Markdown file. Slugifies the filename, extracts
 title from the first `# heading`. Idempotent — re-ingesting the same content
-prints `skipped (duplicate)`.
+prints `skipped (duplicate)`. Pages land in `<kind>/<name>.md` (notes go to
+`memory/notes/`), matching the kernel's directory convention.
 
 ### `rlm search`
 
@@ -480,12 +533,22 @@ write a file (see §3).
   Change it periodically. The login form sets an HttpOnly session cookie, and
   the cookie is marked `Secure` whenever the server is started with
   `--ssl-keyfile`/`--ssl-certfile`. Token comparison is constant-time.
+- **Session secret:** set `RLM_WEB_SECRET` to a random value whenever
+  `RLM_WEB_TOKEN` is set — it signs the session cookie. There is no built-in
+  default: without it the key would be guessable (so an attacker could forge an
+  authenticated session and bypass the token entirely) or would change on every
+  restart. The server refuses to start in that configuration. Generate one with
+  `python -c 'import secrets; print(secrets.token_urlsafe(48))'`.
 - **Fail-closed by default:** without `RLM_WEB_TOKEN` the console is reachable
   from **loopback only**, and `POST /login` returns 400 because there is nothing
   to compare against. Authentication is a route dependency, so every route —
   including both SSE streams — enforces it; adding a route without it fails a test.
   `RLM_WEB_ALLOW_TESTCLIENT=1` exists solely so the test suite's synthetic
   non-loopback client can reach the app, and it never overrides a configured token.
+- **No CSRF tokens (known gap).** The state-changing `POST` routes rely on the
+  `SameSite=Lax` session cookie rather than an anti-forgery token. That is
+  adequate for a single-user console on a tailnet, but if you expose it more
+  widely, front it with a proxy that enforces an origin check.
 - **Tailscale scope:** the web frontend binds `0.0.0.0` but only the Tailscale
   interface is reachable from outside your LAN. Verify with `tailscale status`.
 - **Self-signed certs:** browsers and phones will warn. Either use the

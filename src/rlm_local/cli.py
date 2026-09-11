@@ -15,6 +15,7 @@ Subcommands:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ask.add_argument("--max-turns", type=int, default=None)
     p_ask.add_argument("--log-path", type=Path, default=None,
                        help="Write trajectory JSONL to this path")
+    _add_model_server_flags(p_ask)
 
     # ── chat ─────────────────────────────────────────────────────────────
     p_chat = sub.add_parser("chat", help="Interactive chat loop")
@@ -61,6 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
                         choices=["tiny", "laptop", "workstation"])
     p_chat.add_argument("--vault-path", type=Path, default=None,
                         help="Path to vault root")
+    _add_model_server_flags(p_chat)
 
     # ── ingest ───────────────────────────────────────────────────────────
     p_ingest = sub.add_parser("ingest", help="Ingest Markdown into vault")
@@ -94,7 +97,11 @@ def build_parser() -> argparse.ArgumentParser:
     # ── check ────────────────────────────────────────────────────────────
     p_check = sub.add_parser("check", help="Model suitability battery")
     p_check.add_argument("model_id", help="Model ID on the server")
-    p_check.add_argument("--endpoint", default="https://localhost:9010/v1")
+    p_check.add_argument(
+        "--endpoint",
+        default=os.environ.get("RLM_ENDPOINT", "https://localhost:9010/v1"),
+        help="Base URL of the model server (env RLM_ENDPOINT)",
+    )
     p_check.add_argument("--quick", action="store_true")
     p_check.add_argument("--profile", default="tiny")
 
@@ -142,6 +149,46 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
 # ── ask ───────────────────────────────────────────────────────────────────
+
+def _add_model_server_flags(parser: argparse.ArgumentParser) -> None:
+    """Add the shared model-server overrides to a subcommand.
+
+    The shipped profiles point at `https://localhost:9010/v1`. A model server on
+    another host — a LAN box, a Tailscale peer, or a llama.cpp **router** that
+    loads models on demand — needs these overrides, and the environment variables
+    let one export configure every command (`ask`, `chat`, `check`) at once.
+    """
+    parser.add_argument(
+        "--endpoint", default=os.environ.get("RLM_ENDPOINT"),
+        help="Base URL of the model server, e.g. https://lunacode:9010/v1 "
+             "(default: the profile's root_endpoint; env RLM_ENDPOINT)",
+    )
+    parser.add_argument(
+        "--model", default=os.environ.get("RLM_MODEL"),
+        help="Model ID for BOTH tiers (default: the profile's model; env "
+             "RLM_MODEL). The sub tier follows the root tier, so sub-calls use "
+             "the model you name rather than the profile default.",
+    )
+
+
+def _model_server_overrides(args: argparse.Namespace) -> dict[str, Any]:
+    """Translate `--endpoint`/`--model` into `load_config` overrides.
+
+    Both tiers are set from `--model`: leaving `sub_model` at the profile
+    default would run the root model on the server you named while every
+    sub-call went somewhere else. `sub_endpoint` is deliberately left alone —
+    empty means "same as root", so it follows `--endpoint` automatically.
+    """
+    overrides: dict[str, Any] = {}
+    endpoint = getattr(args, "endpoint", None)
+    model = getattr(args, "model", None)
+    if endpoint:
+        overrides["root_endpoint"] = endpoint
+    if model:
+        overrides["root_model"] = model
+        overrides["sub_model"] = model
+    return overrides
+
 
 def _assemble_context(args: argparse.Namespace) -> str | None:
     """Assemble context from files, dir, stdin, and/or vault."""
@@ -196,7 +243,7 @@ def _cmd_ask(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 2
 
-    overrides: dict[str, Any] = {}
+    overrides: dict[str, Any] = _model_server_overrides(args)
     if args.max_turns is not None:
         overrides["max_turns"] = args.max_turns
 
@@ -219,8 +266,13 @@ def _cmd_ask(args: argparse.Namespace) -> int:
 def _cmd_chat(args: argparse.Namespace) -> int:
     try:
         from rlm_local.chat import run_chat
+        from rlm_local.config import load_config
         vault_str = str(args.vault_path) if args.vault_path else None
-        run_chat(profile=args.profile, vault_path=vault_str)
+        run_chat(
+            profile=args.profile,
+            vault_path=vault_str,
+            config=load_config(args.profile, **_model_server_overrides(args)),
+        )
         return 0
     except ImportError as e:
         # Chat mode exists; this fires only when a kernel dependency is missing.

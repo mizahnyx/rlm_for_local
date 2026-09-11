@@ -50,6 +50,39 @@ def _session_https_only() -> bool:
     )
 
 
+# Generated once per process when no secret is configured. Never a constant:
+# a published signing secret lets anyone forge `{"authenticated": true}` and
+# bypass RLM_WEB_TOKEN entirely (S5 follow-up).
+_EPHEMERAL_SESSION_SECRET: str | None = None
+
+
+def _session_secret() -> str:
+    """Return the session-signing secret, never a value published in the repo.
+
+    Resolution order:
+
+    1. `RLM_WEB_SECRET` when the operator set it — the only value that survives
+       a restart, and the only one an operator has actually chosen.
+    2. Otherwise a random per-process secret, generated on first use.
+
+    There is deliberately **no hardcoded fallback**. The previous constant
+    (`rlm-web-dev-secret-change-in-production`) was in the repository, so with
+    `RLM_WEB_TOKEN` set and `RLM_WEB_SECRET` unset anyone who could reach the
+    port could mint a valid session cookie. `main()` additionally refuses to
+    start in that configuration; a random fallback keeps programmatic and
+    loopback-only use safe either way.
+    """
+    global _EPHEMERAL_SESSION_SECRET
+
+    configured = os.environ.get("RLM_WEB_SECRET", "").strip()
+    if configured:
+        return configured
+
+    if _EPHEMERAL_SESSION_SECRET is None:
+        _EPHEMERAL_SESSION_SECRET = secrets.token_urlsafe(48)
+    return _EPHEMERAL_SESSION_SECRET
+
+
 def _install_session_middleware(https_only: bool) -> None:
     """(Re)install SessionMiddleware with the given cookie policy.
 
@@ -62,9 +95,7 @@ def _install_session_middleware(https_only: bool) -> None:
     app.middleware_stack = None
     app.add_middleware(
         SessionMiddleware,
-        secret_key=os.environ.get(
-            "RLM_WEB_SECRET", "rlm-web-dev-secret-change-in-production"
-        ),
+        secret_key=_session_secret(),
         https_only=https_only,
         same_site="lax",
     )
@@ -683,7 +714,42 @@ def _get_kernel_bridge():
 
 # ── Startup ────────────────────────────────────────────────────────────────
 
-def main(argv: list[str] | None = None) -> None:
+def _require_production_secret() -> None:
+    """Refuse to serve with auth on and no operator-chosen session secret.
+
+    Fail closed (S5 follow-up). A token without a secret means the session
+    cookie is signed with something the process invented or, before this check
+    existed, with a constant published in the repository — either way the
+    token gate can be bypassed or every session dies on restart.
+
+    Exits non-zero with an actionable message rather than starting a server
+    whose authentication does not hold.
+    """
+    import sys
+
+    token = os.environ.get("RLM_WEB_TOKEN", "").strip()
+    secret = os.environ.get("RLM_WEB_SECRET", "").strip()
+    if token and not secret:
+        print(
+            "error: RLM_WEB_TOKEN is set but RLM_WEB_SECRET is not.\n"
+            "\n"
+            "The session cookie must be signed with a secret you choose. Without\n"
+            "one, either the signing key is guessable (which lets anyone forge an\n"
+            "authenticated session and bypass the token) or it changes on every\n"
+            "restart (which logs you out constantly).\n"
+            "\n"
+            "Generate one and export it:\n"
+            "    export RLM_WEB_SECRET=\"$(python -c 'import secrets;"
+            " print(secrets.token_urlsafe(48))')\"\n"
+            "\n"
+            "Or run without RLM_WEB_TOKEN, which serves loopback-only and needs no\n"
+            "login at all.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+
+def main(argv: list[str] | None = None) -> int:
     import argparse
     import uvicorn
 
@@ -704,7 +770,10 @@ def main(argv: list[str] | None = None) -> None:
         os.environ["RLM_WEB_SSL_CERT"] = args.ssl_certfile
         _install_session_middleware(https_only=True)
 
+    _require_production_secret()
+
     uvicorn.run("rlm_web.app:app", **kwargs)
+    return 0
 
 
 if __name__ == "__main__":

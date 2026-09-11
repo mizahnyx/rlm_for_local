@@ -411,7 +411,69 @@ pinning the stale, FAIL-rated `LFM2.5-VL-1.6B` model.
 
 ---
 
-## 8. What a reviewer should check first
+## 8. Follow-ups after this wave (2026-09-10, later the same day)
+
+Two items the R1–R25 plan did not allocate, plus one that made the plan's LIVE
+checks repeatable from the CLI.
+
+### 8.1 Session-secret authentication bypass — fixed
+
+S5 flagged "dev-fallback session secret baked in" and the plan gave it no item, so
+it survived R21. `SessionMiddleware` fell back to the constant
+`rlm-web-dev-secret-change-in-production` — a value published in this repository.
+With `RLM_WEB_TOKEN` set and `RLM_WEB_SECRET` unset, a cookie forged with that
+constant authenticated successfully:
+
+```
+RLM_WEB_TOKEN=the-real-token
+no cookie                                        -> 401
+cookie forged with the published default secret  -> 200   <-- the bug
+same forgery with a different secret             -> 401
+```
+
+**Fix.** There is no hardcoded fallback any more. `_session_secret()` returns
+`RLM_WEB_SECRET` when set, otherwise a random per-process value; `main()` refuses
+to start (exit 2) when a token is configured without a secret, printing the
+one-line `secrets.token_urlsafe(48)` command that fixes it. After the change the
+same exploit returns 401, a cookie signed with the operator's secret returns 200,
+and loopback-only mode (no token) still starts without a secret.
+
+Guards: `tests/test_web.py::TestSessionSecret` (7 tests) — the forged-cookie
+reproduction, the configured-secret positive control, the ephemeral-secret
+length, a source scan asserting the old literal is not used as a value, and the
+three `main()` startup paths.
+
+**Still open:** no CSRF tokens on the state-changing `POST` routes; they rely on
+the `SameSite=Lax` cookie. Documented in the operator guide rather than fixed
+here, because a strict origin check can block non-browser automation and that is
+an operator decision.
+
+### 8.2 Pointing the harness at a model server on another host — fixed
+
+The shipped profiles hardcode `https://localhost:9010/v1`, and only `rlm check`
+exposed `--endpoint`. The LIVE checks in §5 could therefore only be run from
+Python. `rlm ask` and `rlm chat` now take `--endpoint` / `--model`, both
+defaulting to `RLM_ENDPOINT` / `RLM_MODEL` so one export configures every
+model-facing command.
+
+`--model` deliberately sets **both** tiers: leaving `sub_model` at the profile
+default would have run the root model on the named server while every sub-call
+went to a different model, which would make a suitability verdict meaningless.
+`sub_endpoint` is left empty so it follows the root.
+
+Verified end-to-end through the CLI against the router: `rlm ask` with
+`RLM_ENDPOINT`/`RLM_MODEL` exported answered a needle question correctly
+("The vault access code is KX-2210."). The subsequent suitability sweep over
+every model the router offers is written up separately in
+`20260910-router-model-assessment.md`.
+
+### 8.3 New tooling
+
+| Script | Why |
+|---|---|
+| `scripts/assess_router_models.py` | runs the `check` battery over every model a router advertises, sequentially (model swapping is not safe to parallelise), appending one JSON line per model so partial results survive an interruption |
+
+---
 
 1. `tests/test_templates.py` — the dead-template guard is the cheapest way to
    see whether R4.1/R7 discipline held.
