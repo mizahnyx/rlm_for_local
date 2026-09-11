@@ -242,10 +242,14 @@ def main() -> int:
                 # A P4 that scores 0 while the transcript contains submission
                 # text is a disagreement worth keeping in the sweep record: the
                 # "where did the line go" finding is the whole point of the
-                # diagnostic (2026-09-11 assessment §3.1).
+                # diagnostic (2026-09-11 assessment §3.1). The per-trial
+                # breakdown is kept too — P4 is sampled three times precisely
+                # because one sample proved untrustworthy.
                 p4 = (result.get("per_probe") or {}).get("P4") or {}
                 if p4.get("diagnostic"):
                     record["p4_diagnostic"] = p4["diagnostic"]
+                if p4.get("trial_results"):
+                    record["p4_trial_results"] = p4["trial_results"]
                 print(f"    score={record['score']}/100 verdict={record['verdict']} "
                       f"probes={record['probes_passed']}/{record['probes_total']}",
                       flush=True)

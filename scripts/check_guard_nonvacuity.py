@@ -550,6 +550,47 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "tests/test_web.py::TestOriginDecisionTable::test_policy",
         ],
     ),
+    # ── R29: P4 multi-trial sampling (2026-09-11 live confirmation §6) ─────
+    (
+        "R29 P4 collapses back to a single trial",
+        "src/rlm_local/model_check.py",
+        "        for query, context in P4_QUERIES[:trials]",
+        "        for query, context in P4_QUERIES[:1]",
+        [
+            "tests/test_model_check.py::TestProbeP4::test_runs_three_trials_by_default",
+            "tests/test_model_check.py::TestP4SubmissionDiagnostics"
+            "::test_every_contradictory_trial_gets_its_own_diagnostic",
+        ],
+    ),
+    (
+        "R29 one voluntary trial is enough to pass P4",
+        "src/rlm_local/model_check.py",
+        "    majority = len(outcomes) // 2 + 1",
+        "    majority = 1",
+        [
+            "tests/test_model_check.py::TestP4TrialScoring::test_majority_is_more_than_half",
+            "tests/test_model_check.py::TestP4TrialScoring::test_scale",
+        ],
+    ),
+    (
+        "R29 the documented partial credit for a forced submission is dropped",
+        "src/rlm_local/model_check.py",
+        "_FORCED_CREDIT = 8 / 15",
+        "_FORCED_CREDIT = 0.0",
+        [
+            "tests/test_model_check.py::TestP4TrialScoring::test_scale",
+        ],
+    ),
+    (
+        "R29 an unusable trial count silently samples less",
+        "src/rlm_local/model_check.py",
+        "    if 1 <= requested <= DEFAULT_P4_TRIALS:\n        return requested\n    return DEFAULT_P4_TRIALS",
+        "    if 1 <= requested <= DEFAULT_P4_TRIALS:\n        return requested\n    return 1",
+        [
+            "tests/test_model_check.py::TestP4TrialCount"
+            "::test_an_unusable_value_falls_back_to_more_trials_not_fewer",
+        ],
+    ),
 ]
 
 

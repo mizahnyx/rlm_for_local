@@ -48,6 +48,7 @@ for the `rlm-kernel` implementation against its specification
 | 2026-09-11 00:50 | `20260911-0050-router-model-assessment.md` | Router model sweep — stage-1 protocol screen, stage-2 suitability verdicts (five models scored 100/100 besides the baseline), the P1-saturation finding, host tuning note |
 | 2026-09-11 12:19 | `20260911-1219-assessment-follow-ups-hardening.md` | That assessment's follow-ups enacted: cross-origin (CSRF) check on every state-changing route, a real P4 disagreement diagnostic, battery reweighting off the saturated probe |
 | 2026-09-11 13:59 | `20260911-1359-p4-live-confirmation.md` | Live confirmation of that diagnostic on the model it came from: 46.7/NOT SUITABLE (predicted), the contradiction reproduced, and the finding that P4 is single-trial — one probe run swings this model's verdict a full band |
+| 2026-09-11 15:18 | `20260911-1518-p4-multi-trial.md` | P4 sampled three times on three questions, scored as mean credit with a majority pass rule — the owner's call on score semantics, with `RLM_CHECK_P4_TRIALS` as the time/stability knob |
 
 ## Status
 
@@ -89,4 +90,6 @@ The one item that *was* verified live — the P4 diagnostic, on the model whose
 contradiction motivated it — is recorded in
 `20260911-1359-p4-live-confirmation.md`, including what it turned up beyond the
 confirmation: the verdict moved as predicted, and P4's single-trial sampling
-means one probe run can swing a model's verdict a full band.
+means one probe run can swing a model's verdict a full band. That last finding
+was then acted on: `20260911-1518-p4-multi-trial.md` samples P4 three times, on
+the owner's decision, which is the only scoring-semantics change in this thread.

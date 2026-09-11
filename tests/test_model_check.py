@@ -25,6 +25,8 @@ from rlm_local.model_check import (
     _extract_call_text,
     _fence_regions,
     _normalize_for_match,
+    _run_with_trajectory,
+    _score_p4_trials,
     _submission_sites,
     _text_kind_at,
     check_model,
@@ -37,6 +39,7 @@ from rlm_local.model_check import (
     probe_p7_smart_quotes,
     probe_p8_subcall_usage,
     probe_p9_speed,
+    resolve_p4_trials,
     resolve_weights,
     save_check_report,
 )
@@ -481,6 +484,114 @@ class TestProbeP4:
         assert result["score"] < 15
         assert result["passed"] is False
 
+    def test_runs_three_trials_by_default(self, good_backend):
+        """One sample of this behaviour is what proved untrustworthy.
+
+        A live run (2026-09-11) scored the same model 46.7 and then 86.7 minutes
+        apart, differing only in P4 — so P4 is sampled like P1, on three
+        different questions.
+        """
+        result = probe_p4_answer_submission(good_backend)
+        assert result["trials"] == 3
+        assert len(result["trial_results"]) == 3
+        assert result["trial_results"] == ["voluntary", "voluntary", "voluntary"]
+        assert result["voluntary_trials"] == 3
+
+    def test_a_model_that_never_mentions_the_line_says_so_per_trial(
+        self, bad_backend
+    ):
+        result = probe_p4_answer_submission(bad_backend)
+        assert result["trial_results"] == ["none", "none", "none"]
+        assert sum(
+            "never appeared in the output" in line for line in result["evidence"]
+        ) == 3
+
+    def test_fewer_trials_is_announced_in_the_evidence(self, good_backend, monkeypatch):
+        monkeypatch.setenv("RLM_CHECK_P4_TRIALS", "1")
+        result = probe_p4_answer_submission(good_backend)
+        assert result["trials"] == 1
+        assert any(
+            "only 1 of 3 trials ran" in line for line in result["evidence"]
+        ), result["evidence"]
+
+
+class TestP4TrialScoring:
+    """The P4 scale is a pure function of the trial outcomes."""
+
+    @pytest.mark.parametrize(
+        "outcomes,score,passed",
+        [
+            (["voluntary"] * 3, 15.0, True),
+            (["voluntary", "voluntary", "none"], 10.0, True),
+            (["voluntary", "none", "none"], 5.0, False),
+            (["none"] * 3, 0.0, False),
+            # the partial credit the single-shot probe gave a forced submission
+            (["forced"] * 3, 8.0, False),
+            (["voluntary", "forced", "none"], 7.7, False),
+            # fewer trials: the majority rule follows the sample size
+            (["voluntary"], 15.0, True),
+            (["none"], 0.0, False),
+            (["voluntary", "none"], 7.5, False),
+            ([], 0.0, False),
+        ],
+    )
+    def test_scale(self, outcomes, score, passed):
+        assert _score_p4_trials(outcomes) == (score, passed)
+
+    def test_majority_is_more_than_half(self):
+        """A flaky model passes only when it submits most of the time."""
+        assert _score_p4_trials(["voluntary", "voluntary", "none"])[1] is True
+        assert _score_p4_trials(["voluntary", "none", "none"])[1] is False
+
+    def test_the_score_still_reads_as_out_of_fifteen(self):
+        for outcomes in (
+            ["voluntary"] * 3, ["voluntary", "none", "none"], ["none"] * 3,
+        ):
+            score, _ = _score_p4_trials(outcomes)
+            assert 0.0 <= score <= 15.0
+
+
+class TestP4TrialCount:
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            (None, 3), ("", 3), ("1", 1), ("2", 2), ("3", 3), (" 2 ", 2),
+            ("0", 3), ("4", 3), ("-1", 3), ("abc", 3), ("2.5", 3),
+        ],
+    )
+    def test_resolution(self, value, expected, monkeypatch):
+        if value is None:
+            monkeypatch.delenv("RLM_CHECK_P4_TRIALS", raising=False)
+        else:
+            monkeypatch.setenv("RLM_CHECK_P4_TRIALS", value)
+        assert resolve_p4_trials() == expected
+
+    def test_an_unusable_value_falls_back_to_more_trials_not_fewer(self, monkeypatch):
+        """The failure mode must be the safe direction: sample less, not more."""
+        for bad in ("0", "99", "nonsense"):
+            monkeypatch.setenv("RLM_CHECK_P4_TRIALS", bad)
+            assert resolve_p4_trials() == 3
+
+
+class TestP4ForcedSubmissionIsUnreachable:
+    def test_a_repl_submission_never_reports_forced_finalization(self):
+        """Pins why the "forced submission" credit is currently theoretical.
+
+        The loop logs `forced=True` only when `final_answer` was still None at
+        the end, and any REPL submission sets it and breaks out of the turn loop.
+        So `has_final_answer and forced` cannot both hold today — which is why
+        live P4 outcomes are all-or-nothing, and why `_FORCED_CREDIT` is kept for
+        continuity rather than because it fires. If the loop changes, this test
+        goes red and that credit becomes live.
+        """
+        _, lines = _run_with_trajectory("What is 2+2?", "2+2=4.", GoodModelStub())
+        repl = [ln for ln in lines if ln.get("event") == "repl_result"]
+        end = next(ln for ln in lines if ln.get("event") == "end")
+        assert any(r.get("final_answer") is not None for r in repl), (
+            "this stub is supposed to submit"
+        )
+        assert end["forced"] is False
+
 
 class TestProbeP5:
     def test_good_model_passes(self, good_backend):
@@ -902,8 +1013,20 @@ class TestP4SubmissionDiagnostics:
         assert result["passed"] is False
         assert result["diagnostic"]["code"] == DIAG_PROSE
         assert any(
-            line.startswith("DIAGNOSTIC [") for line in result["evidence"]
+            "DIAGNOSTIC [" in line for line in result["evidence"]
         ), result["evidence"]
+
+    def test_every_contradictory_trial_gets_its_own_diagnostic(self):
+        """One diagnostic per trial, not one per probe run.
+
+        A model can fail P4 for different reasons in different trials, so
+        collapsing them to the first would hide the interesting one.
+        """
+        result = probe_p4_answer_submission(ProseSubmissionStub())
+        assert len(result["diagnostics"]) == result["trials"] == 3
+        assert [d["trial"] for d in result["diagnostics"]] == [1, 2, 3]
+        assert all(d["code"] == DIAG_PROSE for d in result["diagnostics"])
+        assert result["diagnostic"] == result["diagnostics"][0]
 
     def test_a_real_submission_carries_no_diagnostic(self, good_backend):
         result = probe_p4_answer_submission(good_backend)

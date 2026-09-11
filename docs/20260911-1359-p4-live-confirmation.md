@@ -140,6 +140,9 @@ it was not observed applying here, and this document does not claim it did.
 
 - **P4 is single-trial.** Consider N trials with a pass rate (as P1 does) or a
   variance flag on the verdict. Scoring-semantics change — owner decision.
+  **Enacted later the same day**, on the owner's decision:
+  `20260911-1518-p4-multi-trial.md`. P4 now runs three different questions,
+  scores the mean per-trial credit, and passes only on a majority.
 - **Model verdicts on this router are cache-state sensitive.** Any sweep whose
   verdicts are worth comparing should state the router state (restarted vs warm),
   which the sweep tooling now records per model via the `weights` and

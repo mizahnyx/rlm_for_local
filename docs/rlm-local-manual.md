@@ -1684,7 +1684,7 @@ the search returns no results and the CLI tells you to rebuild it.
 
 ### 16.1 Test Suite Structure
 
-771 tests collected; 12 marked `slow` (real-model integration + load corpus).
+800 tests collected; 12 marked `slow` (real-model integration + load corpus).
 
 ```
 tests/
@@ -1834,11 +1834,31 @@ the *ratios* between probes: on the quick battery a model that passes P1 alone
 scores 40/100 under `p1-heavy` and 20/100 under `default`, while one that passes
 P4 and P6 but not P1 scores 60 vs 80.
 
-**P4 reports where a submission line went.** When submission text is present in
-the transcript and no submission executed, the probe used to report two
-disagreeing booleans and a 0. It now attaches a `DIAGNOSTIC [code]` naming the
-cause, ordered by evidence quality — a block the interpreter actually ran
-outranks a stray prose mention:
+**P4 is multi-trial, like P1.** It runs `P4_QUERIES` — three different questions,
+the first being the original single-shot query so older runs stay comparable at
+the trial level — and scores the mean credit: 15 points for a voluntary
+submission per trial, `8/15` of that if the submission only happened after forced
+finalization, 0 for none. `passed` requires a *majority* of trials to submit
+voluntarily, so a model that does it in two of three runs passes with 10/15 and
+its flakiness is visible in the score. Per-trial outcomes are reported in the
+evidence, and `RLM_CHECK_P4_TRIALS` (1–3, unusable values fall back to 3) trades
+wall time for stability — a run using fewer trials says so.
+
+The reason is recorded, not stylistic: P4 was single-shot, and a live run of
+`Qwen3.5-2B-Instruct` scored 46.7 (NOT SUITABLE) then 86.7 (SUITABLE) minutes
+later on the same prompt, so one sample decided a verdict band
+(`docs/20260911-1359-p4-live-confirmation.md`).
+
+*Residual, pinned by a test:* the `forced`-submission credit cannot fire today —
+the loop logs `forced=True` only when no REPL submission happened, so live P4
+outcomes are voluntary or nothing. The credit is kept for continuity in case the
+loop changes, and `TestP4ForcedSubmissionIsUnreachable` pins the unreachability.
+
+**P4 also reports where a submission line went.** When submission text is present
+in the transcript and no submission executed, the probe attaches a
+`DIAGNOSTIC [code]` per affected trial, ordered by evidence quality — a block the
+interpreter actually ran outranks a stray prose mention, and within an executed
+block the text/code verdict outranks a traceback elsewhere in the cell:
 
 | Code | Meaning |
 |---|---|
@@ -1853,8 +1873,8 @@ mention of the same line, and within an executed block the text/code verdict
 outranks a traceback elsewhere in the cell — the line never being a statement is
 the actionable fact.
 
-The score is unchanged by the diagnostic: a model that did not submit scores 0,
-now with a reason.
+The diagnostic does not change a trial's credit: a trial in which nothing
+submitted scores 0 for that trial, now with a reason.
 
 Two further probe behaviours are known, **documented, and deliberately not
 tightened** — tightening them changes score semantics and is an owner decision

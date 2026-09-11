@@ -299,7 +299,9 @@ rlm check <model-id> [--endpoint URL] [--quick] [--weights PROFILE] [--profile t
 
 Runs the 9-probe suitability battery. `--quick` runs P1+P4+P6 only (a 50-point
 scale reported out of 100) and takes a few minutes per probe against a local 4B
-model.
+model. Both P1 and P4 sample three times, on three different questions each, so
+they dominate a run's wall time; `RLM_CHECK_P4_TRIALS=1` reduces P4 to one
+sample (see §5.3).
 
 **Weighting (`--weights`, or `RLM_CHECK_WEIGHTS`).** The battery is a weighted
 average, and the weights decide what the score can mean:
@@ -540,13 +542,15 @@ uv run python -m rlm_local.cli check <model-id>
 - **50–74: MARGINAL** — usable as sub-tier or with assistance. May need more nudges or lower expectations.
 - **<50: NOT SUITABLE** — cannot reliably operate the harness protocol. Try a different model.
 
-**A verdict is one run, and P4 is a single trial.** P4 is worth 20 of the 50
-quick-battery points and is sampled once, so a model whose submission behaviour
-is unstable can swing a full band between runs: `Qwen3.5-2B-Instruct` scored
-46.7 (NOT SUITABLE) and, minutes later on the same prompt, behaved as a voluntary
-submitter (86.7, SUITABLE) — see
-`docs/20260911-1359-p4-live-confirmation.md`. For a borderline verdict, re-run
-before acting on it, and record both numbers.
+**P4 is sampled three times, on three different questions.** It asks whether the
+model submits *on its own*, and that turned out to be the least stable thing the
+battery measures: `Qwen3.5-2B-Instruct` scored 46.7 (NOT SUITABLE) and 86.7
+(SUITABLE) minutes apart on the same prompt against the same server, differing
+only in P4 (`docs/20260911-1359-p4-live-confirmation.md`). The probe now scores
+the mean of three trials and passes only on a majority, which is also why a
+`--quick` run on a slow host costs roughly two extra model conversations:
+`RLM_CHECK_P4_TRIALS=1` (or `2`) buys that time back at the price of exactly the
+stability, and the run says so in its own evidence when you do.
 
 **Re-check cadence:** on model upgrade, on prompt change, or when you notice
 degradation. Record the run yourself — `rlm check` prints its report, it does not

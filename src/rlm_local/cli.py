@@ -489,8 +489,14 @@ def _cmd_check(args: argparse.Namespace) -> int:
         print()
         if result.get("evidence_lines"):
             print("Evidence:")
-            for line in result["evidence_lines"][:20]:
+            evidence = result["evidence_lines"]
+            for line in evidence[:20]:
                 print(f"  {line}")
+            # Never truncate silently: P4 alone contributes up to seven lines
+            # (three trials plus a summary), so a full battery can now push
+            # later probes past the cap.
+            if len(evidence) > 20:
+                print(f"  ... {len(evidence) - 20} more line(s) not shown")
         return 0
     except ImportError as e:
         # The battery exists; this fires only when a dependency is missing.

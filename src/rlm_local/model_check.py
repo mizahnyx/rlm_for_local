@@ -7,6 +7,7 @@ model. Each probe runs small completions and inspects the trajectory log.
 from __future__ import annotations
 
 import json
+import os
 import re
 import tempfile
 import time
@@ -713,30 +714,107 @@ def _diagnose_missing_submission(
 
 
 # ── Probe P4: answer-dict submission ─────────────────────────────────────
+#
+# Three trials, like P1, and for a recorded reason: on 2026-09-11 a live run of
+# `Qwen3.5-2B-Instruct` scored 46.7 (NOT SUITABLE) and then, minutes later on the
+# same prompt against the same server, behaved as a voluntary submitter — 86.7
+# (SUITABLE). P4 is worth 20 of the quick battery's 50 points, so one sample of a
+# flaky behaviour was deciding a verdict band.
+#
+# The trials use three *different* questions, so one lucky prompt cannot decide it
+# either. The first is the original single-shot query, so earlier recorded runs
+# remain comparable at the trial level.
 
-
-def probe_p4_answer_submission(
-    backend: ModelBackend,
-    model_id: str = "",
-    profile: str = "tiny",
-) -> dict[str, Any]:
-    """P4: answer-dict submission — model sets answer['content'] and
-    answer['ready'] = True within turn budget.
-
-    Score: 15 pts (max).
-    """
-    query = "What is the name of the largest ocean?"
-    context = (
+P4_QUERIES: list[tuple[str, str]] = [
+    (
+        "What is the name of the largest ocean?",
         "The Pacific Ocean is the largest and deepest of Earth's five oceanic "
         "divisions. It extends from the Arctic Ocean in the north to the "
-        "Southern Ocean in the south."
-    )
+        "Southern Ocean in the south.",
+    ),
+    (
+        "How many players from one team are on the field in a soccer match?",
+        "A soccer match is played by two teams, each fielding eleven players at "
+        "a time, including one goalkeeper. Substitutes wait off the field.",
+    ),
+    (
+        "What is the chemical symbol for gold?",
+        "Gold is a chemical element with the symbol Au and atomic number 79. It "
+        "is a dense, soft, malleable, and ductile metal.",
+    ),
+]
 
+DEFAULT_P4_TRIALS = len(P4_QUERIES)
+P4_TRIALS_ENV = "RLM_CHECK_P4_TRIALS"
+
+#: Credit per trial. A voluntary submission is the property under test; a
+#: submission that only happened once the loop forced finalization keeps the
+#: fraction the previous single-shot scoring gave it (8/15).
+#:
+#: That second case is currently unreachable — the loop logs `forced=True` only
+#: when no REPL submission happened, and any submission sets `forced=False` — but
+#: it is kept so the scale stays continuous if the loop ever changes, and its
+#: unreachability is pinned by a test rather than assumed.
+_VOLUNTARY_CREDIT = 1.0
+_FORCED_CREDIT = 8 / 15
+
+P4_MAX_SCORE = 15
+
+
+def resolve_p4_trials() -> int:
+    """Number of P4 trials, from `RLM_CHECK_P4_TRIALS` when it is usable.
+
+    Fewer trials cost proportionally less wall time — which matters on a host
+    that serves a 4B model at single-digit tokens per second — at the price of
+    exactly the stability this multi-trial sampling exists to buy. So any
+    unusable value falls back to the *full* set rather than to a smaller one, and
+    a run that used fewer says so in its evidence.
+    """
+    raw = os.environ.get(P4_TRIALS_ENV, "").strip()
+    if not raw:
+        return DEFAULT_P4_TRIALS
+    try:
+        requested = int(raw)
+    except ValueError:
+        return DEFAULT_P4_TRIALS
+    if 1 <= requested <= DEFAULT_P4_TRIALS:
+        return requested
+    return DEFAULT_P4_TRIALS
+
+
+def _score_p4_trials(outcomes: list[str]) -> tuple[float, bool]:
+    """Score a list of trial outcomes. Pure, so the scale is directly testable.
+
+    Returns ``(score_out_of_15, passed)``. `passed` is a majority of trials
+    submitting voluntarily — a model that does it in two of three runs *is* a
+    voluntary submitter with a flaky habit, and the score records how flaky.
+    """
+    if not outcomes:
+        return 0.0, False
+
+    credit = sum(
+        _VOLUNTARY_CREDIT if outcome == "voluntary"
+        else _FORCED_CREDIT if outcome == "forced"
+        else 0.0
+        for outcome in outcomes
+    )
+    voluntary = sum(1 for outcome in outcomes if outcome == "voluntary")
+    score = round(P4_MAX_SCORE * credit / len(outcomes), 1)
+    majority = len(outcomes) // 2 + 1
+    return score, voluntary >= majority
+
+
+def _run_p4_trial(
+    backend: ModelBackend,
+    query: str,
+    context: str,
+    profile: str,
+) -> dict[str, Any]:
+    """Run one P4 trial and classify what the model did."""
     final_answer, lines = _run_with_trajectory(query, context, backend, profile)
     assistants = _assistant_messages(lines)
     repl_entries = _repl_results(lines)
 
-    # Check for answer submission in trajectory
     has_answer_ready = any(
         _ANSWER_READY_RE.search(a.get("content", "")) for a in assistants
     )
@@ -748,46 +826,118 @@ def probe_p4_answer_submission(
     )
     forced = end_entry.get("forced", True) if end_entry else True
 
-    evidence: list[str] = []
-    if has_answer_ready:
-        evidence.append("answer['ready'] = True found in model output.")
+    if not has_final_answer:
+        outcome = "none"
+    elif forced:
+        outcome = "forced"
     else:
-        evidence.append("answer['ready'] = True NOT found in model output.")
-
-    if has_final_answer:
-        evidence.append(
-            f"Final answer submitted: {final_answer[:100]}"
-        )
-    else:
-        evidence.append("No final answer detected.")
+        outcome = "voluntary"
 
     # The contradiction that used to be scored silently: submission text is
     # present, yet nothing submitted. Say where the line went instead of
     # reporting two disagreeing booleans and a 0.
     diagnostic: dict[str, Any] | None = None
+    unlocatable = False
     if has_answer_ready and not has_final_answer:
         diagnostic = _diagnose_missing_submission(assistants, repl_entries)
-        if diagnostic is not None:
+        unlocatable = diagnostic is None
+
+    return {
+        "outcome": outcome,
+        "final_answer": final_answer,
+        "has_answer_ready": has_answer_ready,
+        "diagnostic": diagnostic,
+        "unlocatable": unlocatable,
+    }
+
+
+def probe_p4_answer_submission(
+    backend: ModelBackend,
+    model_id: str = "",
+    profile: str = "tiny",
+) -> dict[str, Any]:
+    """P4: answer-dict submission — does the model submit *on its own*?
+
+    `answer['content']` plus `answer['ready'] = True`, executed by the REPL
+    within the turn budget, with no forced finalization. Several trials (see
+    `P4_QUERIES`), because a single sample of this behaviour is what the
+    2026-09-11 live run showed to be untrustworthy.
+
+    Score: 15 pts (max) — the mean per-trial credit, so a model that submits in
+    two of three trials scores 10 and one that never does scores 0.
+    """
+    trials = resolve_p4_trials()
+    results = [
+        _run_p4_trial(backend, query, context, profile)
+        for query, context in P4_QUERIES[:trials]
+    ]
+
+    evidence: list[str] = []
+    diagnostics: list[dict[str, Any]] = []
+    voluntary = sum(1 for r in results if r["outcome"] == "voluntary")
+    forced_submissions = sum(1 for r in results if r["outcome"] == "forced")
+
+    for i, result in enumerate(results, start=1):
+        outcome = result["outcome"]
+        answer_preview = str(result["final_answer"])[:100]
+
+        if outcome == "voluntary":
             evidence.append(
-                f"DIAGNOSTIC [{diagnostic['code']}]: {diagnostic['detail']}"
+                f"Trial {i}: PASS — submitted voluntarily: {answer_preview}"
+            )
+        elif outcome == "forced":
+            evidence.append(
+                f"Trial {i}: PARTIAL — submitted only after forced finalization: "
+                f"{answer_preview}"
             )
         else:
             evidence.append(
-                "DIAGNOSTIC [submission_text_unlocatable]: the ready-text match "
-                "was seen in a message but no occurrence could be located — "
-                "report this as a harness bug, not a model verdict."
+                f"Trial {i}: FAIL — no submission (forced finalization)"
             )
 
-    if forced:
-        evidence.append("WARNING: forced finalization — model did not submit voluntarily.")
+        if result["diagnostic"] is not None:
+            diagnostics.append({"trial": i, **result["diagnostic"]})
+            evidence.append(
+                f"Trial {i}: DIAGNOSTIC [{result['diagnostic']['code']}]: "
+                f"{result['diagnostic']['detail']}"
+            )
+        elif result["unlocatable"]:
+            evidence.append(
+                f"Trial {i}: DIAGNOSTIC [submission_text_unlocatable]: the "
+                "ready-text match was seen in a message but no occurrence could "
+                "be located — report this as a harness bug, not a model verdict."
+            )
+        elif outcome == "none" and not result["has_answer_ready"]:
+            evidence.append(
+                f"Trial {i}: answer['ready'] = True never appeared in the output."
+            )
 
-    score = 15 if (has_final_answer and not forced) else (8 if has_final_answer else 0)
+    score, passed = _score_p4_trials([r["outcome"] for r in results])
+    evidence.append(
+        f"Summary: {voluntary}/{trials} trials submitted voluntarily"
+        + (
+            f", {forced_submissions} only after forced finalization"
+            if forced_submissions else ""
+        )
+        + (" — majority voluntary" if passed else " — no majority voluntary")
+    )
+    if trials < DEFAULT_P4_TRIALS:
+        evidence.append(
+            f"NOTE: only {trials} of {DEFAULT_P4_TRIALS} trials ran "
+            f"({P4_TRIALS_ENV}={trials}); this sample is smaller than the "
+            "default, so a verdict drawn from it is correspondingly less stable."
+        )
+
     return {
         "score": score,
-        "max_score": 15,
+        "max_score": P4_MAX_SCORE,
         "evidence": evidence,
-        "passed": has_final_answer and not forced,
-        "diagnostic": diagnostic,
+        "passed": passed,
+        "diagnostic": diagnostics[0] if diagnostics else None,
+        "diagnostics": diagnostics,
+        "trials": trials,
+        "trial_results": [r["outcome"] for r in results],
+        "voluntary_trials": voluntary,
     }
 
 
