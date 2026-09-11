@@ -57,6 +57,9 @@ uv run python -m rlm_local.cli check Qwen3.5-4B-Abliterated \
     --endpoint https://lunacode:9010/v1 --quick
 ```
 
+`--quick` runs P1+P4+P6. Add `--weights p1-heavy` only to reproduce scores
+recorded before the 2026-09-11 reweight; see the operator guide §3.
+
 ### Install
 
 ```bash
@@ -217,6 +220,13 @@ knowing before you expose anything:
   dependency so a new route cannot forget it. Without a session secret the
   server refuses to start, because a guessable signing key would let anyone
   forge an authenticated session and bypass the token.
+- **State-changing requests are checked for cross-origin (CSRF) by default.**
+  A session cookie rides along on any request a browser makes, so
+  authentication alone does not authorise a `POST`. The default policy rejects a
+  request that claims another site's origin and allows one that claims none
+  (`curl`, a script), which is why automation keeps working;
+  `RLM_WEB_ORIGIN_CHECK=strict` requires an origin from everyone. See the
+  operator guide §6.
 
 Details and the reasoning: [Operator Guide](docs/operator-guide.md).
 
@@ -224,15 +234,18 @@ Details and the reasoning: [Operator Guide](docs/operator-guide.md).
 
 ```bash
 # Fast suite: unit + integration stubs, no server, no load-gate benchmarks
-uv run pytest tests/ -k "not slow and not load" -q
+uv run pytest -m "not slow and not load" -q
 
 # Everything, including tests that need a running llama-server and the
 # load-gate benchmarks (the latter build a 10k-page corpus — expect minutes)
-uv run pytest tests/ -q
+uv run pytest -q
 ```
 
-669 tests collected: 12 marked `slow` (real llama-server integration + load),
-5 of those also marked `load` (corpus benchmarks). The integration tests read
+756 tests collected: 12 marked `slow` (real llama-server integration + load),
+5 of those also marked `load` (corpus benchmarks). Select on the **markers**
+(`-m`), not on the names (`-k`): `-k` is a substring match, so `-k "not load"`
+also drops 20 tests that merely mention "load" in their name (`test_ingest_loads_file`,
+the upload-cap tests) without running them. The integration tests read
 `RLM_TEST_ENDPOINT` / `RLM_TEST_MODEL` and skip when the endpoint is
 unreachable, defaulting to the configured model in `src/rlm_local/config.py`.
 

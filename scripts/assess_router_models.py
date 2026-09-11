@@ -128,6 +128,9 @@ def main() -> int:
                     help="model IDs to skip, e.g. an already-assessed one")
     ap.add_argument("--full", action="store_true",
                     help="run all nine probes instead of the quick three")
+    ap.add_argument("--weights", default="default",
+                    help="named battery weighting (default: default; p1-heavy "
+                         "reproduces the scores recorded on 2026-09-11)")
     ap.add_argument("--screen", action="store_true",
                     help="one-turn protocol screen per model (cheap triage) "
                          "instead of the check battery")
@@ -204,7 +207,7 @@ def main() -> int:
             continue
 
         record: dict = {"model": model, "profile": args.profile,
-                        "quick": not args.full}
+                        "quick": not args.full, "weights": args.weights}
         # A transport-level failure here costs the whole model (the battery is
         # ~1.5 h on a slow host), and the transient ones are the router's own
         # restart/load window rather than anything about the model. Retry once
@@ -220,10 +223,12 @@ def main() -> int:
             )
             try:
                 result = check_model(backend, model,
-                                     quick=not args.full, profile=args.profile)
+                                     quick=not args.full, profile=args.profile,
+                                     weight_profile=args.weights)
                 record.update({
                     "score": result.get("score"),
                     "verdict": result.get("verdict"),
+                    "weights": result.get("weight_profile"),
                     "probes_passed": result.get("probes_passed"),
                     "probes_total": result.get("probes_total"),
                     "per_probe": {
@@ -234,6 +239,13 @@ def main() -> int:
                     },
                     "evidence": (result.get("evidence_lines") or [])[:12],
                 })
+                # A P4 that scores 0 while the transcript contains submission
+                # text is a disagreement worth keeping in the sweep record: the
+                # "where did the line go" finding is the whole point of the
+                # diagnostic (2026-09-11 assessment §3.1).
+                p4 = (result.get("per_probe") or {}).get("P4") or {}
+                if p4.get("diagnostic"):
+                    record["p4_diagnostic"] = p4["diagnostic"]
                 print(f"    score={record['score']}/100 verdict={record['verdict']} "
                       f"probes={record['probes_passed']}/{record['probes_total']}",
                       flush=True)

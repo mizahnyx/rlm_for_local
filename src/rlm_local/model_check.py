@@ -434,6 +434,189 @@ def probe_p3_stderr_recovery(
     }
 
 
+# ── Submission diagnostics (P4) ───────────────────────────────────────────
+#
+# P4 used to answer a contradiction with a silent 0. On 2026-09-11
+# `Qwen3.5-2B-Instruct` put `answer['ready'] = True` into its message and the
+# loop still reported "No final answer detected" plus forced finalization — the
+# two signals disagreed and the report said nothing about why (assessment §3.1).
+#
+# A submission only counts when the *interpreter* runs the line, so the question
+# "where did the model put it?" has a mechanical answer: prose the parser never
+# extracts, a fence tag the parser never executes, or an executed block that
+# raised or never reached the line. These helpers compute that answer from the
+# trajectory alone, with no model in the loop, so they are unit-testable.
+
+#: Fence tags `parser.FENCE_RE` executes. An untagged fence counts: the regex
+#: makes the language tag optional, so ``` and ```repl behave identically.
+_EXECUTABLE_FENCE_TAGS = frozenset({"", "repl", "python"})
+
+DIAG_PROSE = "submission_text_outside_fence"
+DIAG_UNEXECUTABLE_TAG = "submission_text_in_unexecutable_fence"
+DIAG_BLOCK_RAISED = "submission_block_raised"
+DIAG_NOT_REACHED = "submission_not_reached_at_runtime"
+
+
+def _fence_regions(text: str) -> list[dict[str, Any]]:
+    """Span of every fenced block in ``text``, in document order.
+
+    Line-based rather than regex-based: a model that emits a fence puts it at the
+    start of a line, and spans are what the diagnostic needs to answer "was the
+    submission line inside a block, and which one?". An unclosed final fence is
+    returned with ``closed=False`` — the parser's stage 2 rescues it, so it still
+    executes.
+    """
+    regions: list[dict[str, Any]] = []
+    tag: str | None = None
+    body_start = 0
+    offset = 0
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            if tag is None:
+                rest = stripped[3:].strip()
+                tag = rest.split()[0] if rest else ""
+                body_start = offset + len(line) + 1
+            else:
+                # Inside a fence, any bare ``` line closes it. A closing fence
+                # never carries a language tag.
+                regions.append({
+                    "tag": tag,
+                    "body_start": body_start,
+                    "body_end": offset,
+                    "closed": True,
+                })
+                tag = None
+        offset += len(line) + 1
+    if tag is not None:
+        regions.append({
+            "tag": tag,
+            "body_start": body_start,
+            "body_end": len(text),
+            "closed": False,
+        })
+    return regions
+
+
+def _submission_sites(text: str) -> list[dict[str, Any]]:
+    """Locate every ``answer['ready'] = True`` occurrence in one message.
+
+    Each site records where the line sits: ``prose`` when no fence region
+    contains it, otherwise ``fence`` with the tag and whether the parser would
+    execute that tag.
+    """
+    regions = _fence_regions(text)
+    sites: list[dict[str, Any]] = []
+    for match in _ANSWER_READY_RE.finditer(text):
+        site: dict[str, Any] = {
+            "placement": "prose",
+            "tag": None,
+            "executable": False,
+        }
+        for region in regions:
+            if region["body_start"] <= match.start() < region["body_end"]:
+                site = {
+                    "placement": "fence",
+                    "tag": region["tag"],
+                    "executable": region["tag"] in _EXECUTABLE_FENCE_TAGS,
+                }
+                break
+        sites.append(site)
+    return sites
+
+
+def _diagnose_missing_submission(
+    assistants: list[dict[str, Any]],
+    repl_entries: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Explain why submission text in the transcript never became an answer.
+
+    Returns ``None`` when there is nothing to explain (no assistant message
+    carries the submission text at all). Otherwise a dict with a stable ``code``
+    and a human-readable ``detail``.
+
+    Precedence is by evidence quality, not by the order the text appears in: a
+    block the interpreter actually *ran* is authoritative, so it is diagnosed
+    before a stray prose mention of the same line. Only when the model never put
+    the line in an executable block does the placement itself become the
+    explanation:
+
+    1. text in an executed block whose cell raised a traceback;
+    2. text in an executed block that ran clean and still did not submit — the
+       line was not reached (a conditional, a loop, or a rebound ``answer``);
+    3. text inside a tag the parser never executes (``json``, ``bash``, …);
+    4. text outside every fence, which the parser never extracts at all.
+    """
+    candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for message in assistants:
+        content = message.get("content", "") or ""
+        for site in _submission_sites(content):
+            candidates.append((message, site))
+
+    if not candidates:
+        return None
+
+    def _turns(messages: list[dict[str, Any]]) -> str:
+        return ", ".join(
+            str(t) for t in sorted({m.get("turn") for m in messages}, key=str)
+        )
+
+    executed = [c for c in candidates if c[1]["executable"]]
+    for message, _site in executed:
+        turn = message.get("turn")
+        for entry in repl_entries:
+            if entry.get("turn") != turn:
+                continue
+            stderr = (entry.get("stderr") or "").strip()
+            if not stderr:
+                continue
+            tail = [ln for ln in stderr.splitlines() if ln.strip()]
+            return {
+                "code": DIAG_BLOCK_RAISED,
+                "detail": (
+                    f"submission line sits in an executed block (turn {turn}) "
+                    "whose cell raised before the submission ran: "
+                    f"{tail[-1] if tail else stderr}"
+                ),
+            }
+
+    if executed:
+        return {
+            "code": DIAG_NOT_REACHED,
+            "detail": (
+                "submission line sits in an executed block (turn "
+                f"{_turns([m for m, _ in executed])}) that produced no traceback "
+                "and no submission — the line was not reached at runtime (a "
+                "conditional, a loop, or `answer` rebound to something that is "
+                "not a dict)."
+            ),
+        }
+
+    wrong_tag = [c for c in candidates if c[1]["placement"] == "fence"]
+    if wrong_tag:
+        tags = sorted({str(c[1]["tag"]) for c in wrong_tag})
+        rendered = ", ".join(f"```{t}" for t in tags)
+        return {
+            "code": DIAG_UNEXECUTABLE_TAG,
+            "detail": (
+                f"submission line appears inside a {rendered} fence (turn "
+                f"{_turns([m for m, _ in wrong_tag])}) — only ```repl, "
+                "```python and untagged fences are executed, so the harness "
+                "discarded it."
+            ),
+        }
+
+    return {
+        "code": DIAG_PROSE,
+        "detail": (
+            "submission line appears outside any ``` fence (turn "
+            f"{_turns([m for m, _ in candidates])}) — the parser extracts only "
+            "fenced blocks (parser.py stages 1-2), so the line was never "
+            "executed and the turn was answered with a narration nudge instead."
+        ),
+    }
+
+
 # ── Probe P4: answer-dict submission ─────────────────────────────────────
 
 
@@ -483,6 +666,23 @@ def probe_p4_answer_submission(
     else:
         evidence.append("No final answer detected.")
 
+    # The contradiction that used to be scored silently: submission text is
+    # present, yet nothing submitted. Say where the line went instead of
+    # reporting two disagreeing booleans and a 0.
+    diagnostic: dict[str, Any] | None = None
+    if has_answer_ready and not has_final_answer:
+        diagnostic = _diagnose_missing_submission(assistants, repl_entries)
+        if diagnostic is not None:
+            evidence.append(
+                f"DIAGNOSTIC [{diagnostic['code']}]: {diagnostic['detail']}"
+            )
+        else:
+            evidence.append(
+                "DIAGNOSTIC [submission_text_unlocatable]: the ready-text match "
+                "was seen in a message but no occurrence could be located — "
+                "report this as a harness bug, not a model verdict."
+            )
+
     if forced:
         evidence.append("WARNING: forced finalization — model did not submit voluntarily.")
 
@@ -492,6 +692,7 @@ def probe_p4_answer_submission(
         "max_score": 15,
         "evidence": evidence,
         "passed": has_final_answer and not forced,
+        "diagnostic": diagnostic,
     }
 
 
@@ -787,19 +988,66 @@ PROBES: dict[str, Any] = {
     "P9": probe_p9_speed,
 }
 
-WEIGHTS: dict[str, int] = {
-    "P1": 20,
-    "P2": 15,
-    "P3": 15,
-    "P4": 15,
-    "P5": 10,
-    "P6": 15,
-    "P7": 5,
-    "P8": 5,
-    "P9": 0,
+WEIGHT_PROFILES: dict[str, dict[str, int]] = {
+    # Since the 2026-09-11 router sweep, P1 ("emits a valid ```repl block") is
+    # saturated: all ten models scored 20/20, down to the 0.8B ones. A probe
+    # every candidate passes cannot rank candidates, and its 20 points only
+    # compress the spread that P4 and P6 produce — the entire SUITABLE/MARGINAL
+    # split comes from those two. The default profile moves 10 points from P1
+    # onto them. `p1-heavy` is the pre-change weighting.
+    "default": {
+        "P1": 10,
+        "P2": 15,
+        "P3": 15,
+        "P4": 20,
+        "P5": 10,
+        "P6": 20,
+        "P7": 5,
+        "P8": 5,
+        "P9": 0,
+    },
+    # Kept so the scores recorded in
+    # docs/20260911-0050-router-model-assessment.md stay reproducible.
+    "p1-heavy": {
+        "P1": 20,
+        "P2": 15,
+        "P3": 15,
+        "P4": 15,
+        "P5": 10,
+        "P6": 15,
+        "P7": 5,
+        "P8": 5,
+        "P9": 0,
+    },
 }
 
+DEFAULT_WEIGHT_PROFILE = "default"
+
+#: The default profile, for callers and tests that just want "the weights".
+WEIGHTS: dict[str, int] = WEIGHT_PROFILES[DEFAULT_WEIGHT_PROFILE]
+
 QUICK_PROBES = ["P1", "P4", "P6"]
+
+
+def resolve_weights(profile: str = DEFAULT_WEIGHT_PROFILE) -> dict[str, int]:
+    """Return a copy of a named weight profile.
+
+    Raises:
+        ValueError: on an unknown profile name — a typo must not silently fall
+            back to a different scale and produce comparable-looking scores.
+    """
+    try:
+        return dict(WEIGHT_PROFILES[profile])
+    except KeyError:
+        raise ValueError(
+            f"unknown weight profile {profile!r}; "
+            f"choose from {', '.join(sorted(WEIGHT_PROFILES))}"
+        ) from None
+
+
+def _render_weights(weights: dict[str, int]) -> str:
+    """Render a weight map for a report line, e.g. ``P1 10, P4 20``."""
+    return ", ".join(f"{pid} {w}" for pid, w in weights.items()) or "none"
 
 
 # ── Scoring ───────────────────────────────────────────────────────────────
@@ -848,23 +1096,36 @@ def check_model(
     *,
     quick: bool = False,
     profile: str = "tiny",
+    weight_profile: str = DEFAULT_WEIGHT_PROFILE,
 ) -> dict[str, Any]:
     """Run the full probe battery against a model backend.
 
     Args:
         backend: ModelBackend instance to evaluate.
         model_id: Human-readable model identifier for reporting.
-        quick: If True, run P1+P4+P6 only (50-pt scale).
+        quick: If True, run P1+P4+P6 only. Their weights sum to 50 in every
+            profile; the score is normalised to 100 either way.
         profile: Hardware profile for completion() calls.
+        weight_profile: Named weighting from `WEIGHT_PROFILES`. Recorded in the
+            result, because a score means nothing without the scale it came
+            from.
 
     Returns:
-        Dict with keys: model_id, score, verdict, per_probe, evidence_lines.
+        Dict with keys: model_id, score, verdict, per_probe, evidence_lines,
+        weight_profile, weights.
+
+    Raises:
+        ValueError: on an unknown `weight_profile`.
     """
     import time as _time
     t0 = _time.perf_counter()
 
     probe_ids = QUICK_PROBES if quick else list(PROBES.keys())
-    weights = {k: WEIGHTS[k] for k in probe_ids}
+    weights = {
+        k: v
+        for k, v in resolve_weights(weight_profile).items()
+        if k in probe_ids
+    }
 
     per_probe: dict[str, dict[str, Any]] = {}
     all_evidence: list[str] = []
@@ -895,6 +1156,8 @@ def check_model(
         "probes_total": len(probe_ids),
         "per_probe": per_probe,
         "evidence_lines": all_evidence,
+        "weight_profile": weight_profile,
+        "weights": weights,
     }
 
 
@@ -929,6 +1192,7 @@ def save_check_report(
         f"model: {result['model_id']}",
         f"score: {result['score']}",
         f"verdict: {result['verdict']}",
+        f"weights: {result.get('weight_profile', DEFAULT_WEIGHT_PROFILE)}",
         f"date: {date_str}",
         "---",
         "",
@@ -939,6 +1203,10 @@ def save_check_report(
     body_lines.append(f"# Model Suitability Report: {result['model_id']}\n")
     body_lines.append(f"**Score:** {result['score']}/100")
     body_lines.append(f"**Verdict:** {result['verdict']}")
+    body_lines.append(
+        f"**Weights:** {result.get('weight_profile', DEFAULT_WEIGHT_PROFILE)} "
+        f"({_render_weights(result.get('weights', {}))})"
+    )
     body_lines.append(f"**Probes:** {result['probes_passed']}/{result['probes_total']} passed, "
                       f"{result['probes_failed']} failed")
     body_lines.append(f"**Time:** {result['elapsed_seconds']:.0f}s\n")

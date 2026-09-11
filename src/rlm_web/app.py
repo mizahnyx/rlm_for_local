@@ -12,6 +12,11 @@ walks the route table and fails if any API route lacks it. The gate is:
 * with `RLM_WEB_TOKEN` set — an authenticated session cookie is required;
 * without it — loopback callers only, and a missing peer address is rejected
   unless `RLM_WEB_ALLOW_TESTCLIENT=1` is set explicitly (dev only).
+
+A session cookie authenticates a *request*, not the page that caused it, so
+every state-changing route also carries `require_same_origin`, the CSRF control
+described below. `TestOriginCoverageByConstruction` walks the route table for
+that one too.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ import uuid
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -206,7 +212,165 @@ def require_auth(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Authentication required")
 
 
-@app.post("/login")
+# ── Cross-origin (CSRF) defence ────────────────────────────────────────────
+#
+# The console authenticates with a session cookie, and a cookie rides along on a
+# request another site causes the browser to make. Authentication therefore does
+# not authorise a POST by itself: without this check, any page the operator
+# visits could submit a job, ingest a file, or clear a chat session in the
+# console, and the only thing standing in the way was `SameSite=Lax` (recorded
+# as the open item in the 2026-09-10 validation §8.1).
+#
+# The check is on the request's *claimed* origin rather than on a hidden
+# anti-forgery token, because every state-changing route here is reachable both
+# from the server-rendered forms and from `fetch()`, and a token would have to be
+# threaded through every template and every call site.
+
+ORIGIN_CHECK_ENV = "RLM_WEB_ORIGIN_CHECK"
+ALLOWED_ORIGINS_ENV = "RLM_WEB_ALLOWED_ORIGINS"
+
+ORIGIN_CHECK_MODES = ("off", "same-origin", "strict")
+DEFAULT_ORIGIN_CHECK = "same-origin"
+
+
+def _origin_check_mode() -> str:
+    """The configured policy, defaulting to `same-origin`.
+
+    An unrecognised value falls back to the default rather than to `off`, so a
+    typo cannot silently disable the check at request time; `main()` rejects it
+    outright at startup.
+    """
+    raw = os.environ.get(ORIGIN_CHECK_ENV, "").strip().lower()
+    if not raw or raw not in ORIGIN_CHECK_MODES:
+        return DEFAULT_ORIGIN_CHECK
+    return raw
+
+
+def _normalize_origin(value: str) -> str:
+    """Canonical ``scheme://host:port`` for comparison, or "" when unusable.
+
+    Loopback aliases collapse to a single host: the console is regularly reached
+    as both `http://127.0.0.1:8778` and `http://localhost:8778`, and those are
+    the same server. A same-origin check that called them different origins
+    would lock the operator out of their own console. The scheme is kept, so an
+    http page is never treated as the https console.
+    """
+    try:
+        parts = urlsplit(value.strip())
+    except ValueError:
+        return ""
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return ""
+    host = parts.hostname.lower()
+    if host in _LOOPBACK_HOSTS:
+        host = "loopback"
+    try:
+        port = parts.port
+    except ValueError:
+        return ""
+    if port is None:
+        port = 443 if parts.scheme == "https" else 80
+    return f"{parts.scheme}://{host}:{port}"
+
+
+def _allowed_origins() -> frozenset[str]:
+    """Operator allowlist, normalized. Empty when unset."""
+    raw = os.environ.get(ALLOWED_ORIGINS_ENV, "")
+    return frozenset(
+        normalized
+        for normalized in (_normalize_origin(part) for part in raw.split(","))
+        if normalized
+    )
+
+
+def _request_origin(request: Request) -> str | None:
+    """The origin this request claims, or ``None`` when it claims none.
+
+    ``Origin`` is authoritative when present; a browser that withholds it still
+    sends ``Referer`` on the same request, so the referrer's origin is the
+    fallback. A *present but unusable* value — ``Origin: null`` from a sandboxed
+    iframe or a `file://` page, or anything unparseable — returns ``""``, which
+    is deliberately distinct from ``None`` so it fails closed instead of being
+    mistaken for "not a browser".
+    """
+    raw = request.headers.get("origin")
+    if raw is None:
+        raw = request.headers.get("referer")
+        if not raw:
+            return None
+    return _normalize_origin(raw)
+
+
+def _origin_allowed(
+    *,
+    supplied: str | None,
+    mode: str,
+    allowlist: frozenset[str],
+    own_origin: str,
+) -> tuple[bool, str]:
+    """Decide whether a request's claimed origin may act. Pure, so table-testable.
+
+    Returns ``(allowed, reason)``; ``reason`` is empty when allowed.
+
+    * ``off`` — the check is disabled entirely.
+    * ``same-origin`` (default) — a request that claims an origin must claim
+      *this* server's; a request that claims none is allowed, because that is
+      not a cross-site browser request (curl, a script, a typed URL).
+    * ``strict`` — an origin must be claimed *and* match. This is what you want
+      behind a proxy that strips ``Origin`` or when only browsers should reach
+      the console.
+
+    A non-empty `allowlist` replaces the same-origin comparison, and does **not**
+    implicitly include the console's own origin: that is the mode that also
+    resists DNS rebinding, where the attacker's page resolves to this server and
+    its ``Origin`` and ``Host`` agree. Add the console's own origin to the
+    allowlist explicitly.
+    """
+    if mode == "off":
+        return True, ""
+    if supplied is None:
+        if mode == "strict":
+            return False, "an Origin or Referer header is required in strict mode"
+        return True, ""
+    if not supplied:
+        return False, "the Origin/Referer header cannot be parsed as an origin"
+    if allowlist:
+        if supplied in allowlist:
+            return True, ""
+        return False, (
+            f"origin {supplied} is not in {ALLOWED_ORIGINS_ENV} "
+            "(include the console's own origin there too)"
+        )
+    if supplied == own_origin:
+        return True, ""
+    return False, f"origin {supplied} does not match this server ({own_origin})"
+
+
+def require_same_origin(request: Request) -> None:
+    """FastAPI dependency: block cross-origin state-changing requests (CSRF).
+
+    Ordered *before* `require_auth` on every route that carries both, so a
+    cross-site request is refused without the auth gate having to say whether a
+    session existed.
+    """
+    mode = _origin_check_mode()
+    if mode == "off":
+        return
+
+    allowed, reason = _origin_allowed(
+        supplied=_request_origin(request),
+        mode=mode,
+        allowlist=_allowed_origins(),
+        own_origin=_normalize_origin(str(request.base_url)),
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Cross-origin request rejected: {reason}.",
+        )
+
+
+@app.post("/login", dependencies=[Depends(require_same_origin)])
 async def login(request: Request, token: str = Form(...)):
     expected = os.environ.get("RLM_WEB_TOKEN", "")
     if not expected:
@@ -222,7 +386,7 @@ async def login(request: Request, token: str = Form(...)):
     return HTMLResponse("Invalid token", status_code=401)
 
 
-@app.get("/logout")
+@app.get("/logout", dependencies=[Depends(require_same_origin)])
 async def logout(request: Request):
     request.session.clear()
     return RedirectResponse(url="/login", status_code=303)
@@ -293,7 +457,8 @@ async def console(request: Request):
     return templates.TemplateResponse(request, "console.html")
 
 
-@app.post("/jobs", response_class=HTMLResponse, dependencies=[Depends(require_auth)])
+@app.post("/jobs", response_class=HTMLResponse,
+          dependencies=[Depends(require_same_origin), Depends(require_auth)])
 async def create_job(
     request: Request,
     query: str = Form(...),
@@ -414,7 +579,8 @@ def _get_vault_root() -> Path:
                 str(Path.home() / ".local" / "share" / "rlm-kernel" / "vault")))
 
 
-@app.post("/vault/ingest", dependencies=[Depends(require_auth)])
+@app.post("/vault/ingest",
+          dependencies=[Depends(require_same_origin), Depends(require_auth)])
 async def vault_ingest(request: Request, files: list[UploadFile] | None = None):
     """Ingest uploaded Markdown files into the vault as permanent pages."""
     if not files:
@@ -531,7 +697,8 @@ async def chat_page(request: Request):
     return templates.TemplateResponse(request, "chat.html", {"profile": "laptop"})
 
 
-@app.post("/chat/send", dependencies=[Depends(require_auth)])
+@app.post("/chat/send",
+          dependencies=[Depends(require_same_origin), Depends(require_auth)])
 async def chat_send(request: Request):
     """Queue a chat message and return a stream ID for SSE."""
     body = await request.json()
@@ -589,7 +756,8 @@ async def chat_events(request: Request, stream_id: str):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-@app.post("/chat/clear", dependencies=[Depends(require_auth)])
+@app.post("/chat/clear",
+          dependencies=[Depends(require_same_origin), Depends(require_auth)])
 async def chat_clear(request: Request):
     """Clear a chat session's context."""
     body = await request.json()
@@ -600,7 +768,8 @@ async def chat_clear(request: Request):
     return JSONResponse({"status": "ok"})
 
 
-@app.post("/chat/context", dependencies=[Depends(require_auth)])
+@app.post("/chat/context",
+          dependencies=[Depends(require_same_origin), Depends(require_auth)])
 async def chat_context(request: Request):
     """Return current chat session context."""
     body = await request.json()
@@ -749,6 +918,44 @@ def _require_production_secret() -> None:
         raise SystemExit(2)
 
 
+def _require_valid_origin_config() -> None:
+    """Refuse to start on an origin policy that cannot mean what was typed.
+
+    Both failures are silent at request time by design (`_origin_check_mode`
+    falls back to the default rather than to `off`, and an unusable allowlist
+    entry simply never matches), so the mistake has to be caught here or it
+    would look like the console rejecting a legitimate request for no reason.
+    """
+    import sys
+
+    raw_mode = os.environ.get(ORIGIN_CHECK_ENV, "").strip()
+    if raw_mode and raw_mode.lower() not in ORIGIN_CHECK_MODES:
+        print(
+            f"error: {ORIGIN_CHECK_ENV}={raw_mode!r} is not a valid mode.\n"
+            f"\nChoose one of: {', '.join(ORIGIN_CHECK_MODES)} "
+            f"(default {DEFAULT_ORIGIN_CHECK}).",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    raw_origins = os.environ.get(ALLOWED_ORIGINS_ENV, "")
+    unusable = [
+        part for part in raw_origins.split(",")
+        if part.strip() and not _normalize_origin(part)
+    ]
+    if unusable:
+        print(
+            f"error: {ALLOWED_ORIGINS_ENV} has entries that are not origins: "
+            f"{', '.join(repr(u) for u in unusable)}\n"
+            "\nEach entry needs a scheme, host and (if not 80/443) port, e.g.\n"
+            "    export "
+            f'{ALLOWED_ORIGINS_ENV}="http://127.0.0.1:8778,'
+            'https://lunacode.tail-scale.ts.net"',
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
     import uvicorn
@@ -771,6 +978,7 @@ def main(argv: list[str] | None = None) -> int:
         _install_session_middleware(https_only=True)
 
     _require_production_secret()
+    _require_valid_origin_config()
 
     uvicorn.run("rlm_web.app:app", **kwargs)
     return 0

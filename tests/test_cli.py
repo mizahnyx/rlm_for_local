@@ -190,6 +190,48 @@ class TestRemoteEndpoint:
             assert "model" in dests, f"{command} needs --model"
 
 
+class TestCheckWeights:
+    """The battery's scale is selectable, and a bad name is a usage error."""
+
+    def test_check_exposes_weights_and_honours_the_env_var(self, monkeypatch):
+        import argparse
+
+        monkeypatch.setenv("RLM_CHECK_WEIGHTS", "p1-heavy")
+        subparsers = next(
+            a for a in build_parser()._actions
+            if isinstance(a, argparse._SubParsersAction)
+        )
+        check = subparsers.choices["check"]
+        action = next(a for a in check._actions if a.dest == "weights")
+        assert action.default == "p1-heavy"
+
+    def test_check_weights_defaults_to_the_default_profile(self, monkeypatch):
+        import argparse
+
+        monkeypatch.delenv("RLM_CHECK_WEIGHTS", raising=False)
+        subparsers = next(
+            a for a in build_parser()._actions
+            if isinstance(a, argparse._SubParsersAction)
+        )
+        check = subparsers.choices["check"]
+        action = next(a for a in check._actions if a.dest == "weights")
+        assert action.default == "default"
+
+    def test_an_unknown_profile_exits_2_without_touching_the_network(
+        self, capsys, monkeypatch
+    ):
+        """A typo must not silently score on a different scale."""
+        def _explode(*a, **kw):  # pragma: no cover - must not be called
+            raise AssertionError("the CLI contacted the model server")
+
+        monkeypatch.setattr("httpx.Client.post", _explode)
+        rc = cli_main(["check", "some-model", "--weights", "p1-heavvy"])
+        assert rc == 2
+        err = capsys.readouterr().err
+        assert "unknown weight profile" in err
+        assert "default, p1-heavy" in err
+
+
 class TestSearch:
     def test_search_no_index_reports_rebuild(self, tmp_path, capsys):
         """rlm search on a vault with no index exits 1 and says what to run."""

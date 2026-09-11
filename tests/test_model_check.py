@@ -11,10 +11,20 @@ from typing import Any
 import pytest
 from rlm_local.model_backend import ModelBackend
 from rlm_local.model_check import (
+    DEFAULT_WEIGHT_PROFILE,
+    DIAG_BLOCK_RAISED,
+    DIAG_NOT_REACHED,
+    DIAG_PROSE,
+    DIAG_UNEXECUTABLE_TAG,
     PROBES,
+    QUICK_PROBES,
     WEIGHTS,
+    WEIGHT_PROFILES,
+    _diagnose_missing_submission,
     _extract_call_text,
+    _fence_regions,
     _normalize_for_match,
+    _submission_sites,
     check_model,
     probe_p1_protocol_emission,
     probe_p2_helper_calls,
@@ -25,6 +35,7 @@ from rlm_local.model_check import (
     probe_p7_smart_quotes,
     probe_p8_subcall_usage,
     probe_p9_speed,
+    resolve_weights,
     save_check_report,
 )
 
@@ -636,3 +647,298 @@ class TestBackendReuse:
         assert second["verdict"] == "SUITABLE"
         assert second["score"] == result["score"]
         assert backend.close_calls == 0
+
+
+# ── P4 submission diagnostics (2026-09-11 assessment §3.1) ───────────────
+#
+# The recorded defect: `Qwen3.5-2B-Instruct` reported "answer['ready'] = True
+# found in model output" *and* "No final answer detected" + forced finalization
+# in the same P4 run, and scored 0 without the report saying why the two signals
+# disagreed. These tests pin the explanation.
+
+
+def _assistant(content: str, turn: int = 1) -> dict[str, Any]:
+    """One `root_message` assistant entry, shaped as the logger writes it."""
+    return {"event": "root_message", "role": "assistant",
+            "content": content, "turn": turn}
+
+
+def _repl(turn: int, stderr: str = "",
+          final_answer: str | None = None) -> dict[str, Any]:
+    """One `repl_result` entry, shaped as the logger writes it."""
+    return {"event": "repl_result", "turn": turn, "stdout": "",
+            "stderr": stderr, "final_answer": final_answer, "warnings": []}
+
+
+class ProseSubmissionStub:
+    """Emits the submission line as prose — the recorded 2026-09-11 shape.
+
+    The model announces the submission without ever installing it, so P4 sees
+    submission text in the transcript, no final answer, and forced finalization.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        tier: str = "root",
+        max_tokens: int = 1500,
+        temperature: float = 0.0,
+        response_schema: dict[str, Any] | None = None,
+    ) -> str:
+        self.calls.append({"tier": tier, "message_count": len(messages)})
+        if tier == "sub":
+            return "not used"
+        return (
+            "I have determined the answer from the context.\n\n"
+            "I will now set answer['ready'] = True so the loop receives it."
+        )
+
+
+class TestSubmissionSiteDetection:
+    """Unit guards for the fence scanner the diagnostic is built on."""
+
+    def test_fence_regions_span_the_block_body(self):
+        text = "before\n```repl\nline one\nline two\n```\nafter"
+        regions = _fence_regions(text)
+        assert len(regions) == 1
+        region = regions[0]
+        assert region["tag"] == "repl"
+        assert region["closed"] is True
+        body = text[region["body_start"]:region["body_end"]]
+        assert body.strip() == "line one\nline two"
+
+    def test_unclosed_final_fence_is_reported_unclosed(self):
+        region = _fence_regions("```repl\nx")[0]
+        assert region["closed"] is False
+        assert region["tag"] == "repl"
+
+    def test_a_tag_with_trailing_words_uses_its_first_token(self):
+        assert _fence_regions("```repl extra\nx\n```")[0]["tag"] == "repl"
+
+    @pytest.mark.parametrize("tag", ["", "repl", "python"])
+    def test_tags_the_parser_executes_are_marked_executable(self, tag):
+        sites = _submission_sites(f"preamble\n```{tag}\nanswer['ready'] = True\n```")
+        assert sites == [{"placement": "fence", "tag": tag, "executable": True}]
+
+    def test_other_tags_are_marked_unexecutable(self):
+        sites = _submission_sites("```bash\necho \"answer['ready'] = True\"\n```")
+        assert sites[0]["placement"] == "fence"
+        assert sites[0]["tag"] == "bash"
+        assert sites[0]["executable"] is False
+
+    def test_prose_and_fence_placement_are_both_reported(self):
+        sites = _submission_sites(
+            "I set answer['ready'] = True\n"
+            "```repl\nanswer['ready'] = True\n```"
+        )
+        assert [s["placement"] for s in sites] == ["prose", "fence"]
+
+
+class TestP4SubmissionDiagnostics:
+    def test_prose_submission_text_is_located_outside_every_fence(self):
+        message = _assistant("I will set answer['ready'] = True now.", turn=2)
+        diagnostic = _diagnose_missing_submission([message], [])
+        assert diagnostic["code"] == DIAG_PROSE
+        assert "turn 2" in diagnostic["detail"]
+        assert "never executed" in diagnostic["detail"]
+
+    def test_unexecutable_fence_tag_is_named(self):
+        message = _assistant("```bash\necho \"answer['ready'] = True\"\n```", turn=1)
+        diagnostic = _diagnose_missing_submission([message], [_repl(1)])
+        assert diagnostic["code"] == DIAG_UNEXECUTABLE_TAG
+        assert "```bash" in diagnostic["detail"]
+
+    def test_raised_block_is_reported_with_the_exception(self):
+        message = _assistant(
+            "```repl\nanswer['content'] = 'x'\nanswer['ready'] = True\n```",
+            turn=3,
+        )
+        entries = [_repl(3, stderr=(
+            "Traceback (most recent call last):\n"
+            "  File \"<cell>\", line 1, in <module>\n"
+            "NameError: name 'answer' is not defined"
+        ))]
+        diagnostic = _diagnose_missing_submission([message], entries)
+        assert diagnostic["code"] == DIAG_BLOCK_RAISED
+        assert "NameError: name 'answer' is not defined" in diagnostic["detail"]
+
+    def test_clean_block_that_never_submits_says_the_line_was_not_reached(self):
+        message = _assistant("```repl\nanswer['ready'] = True\n```", turn=4)
+        diagnostic = _diagnose_missing_submission([message], [_repl(4)])
+        assert diagnostic["code"] == DIAG_NOT_REACHED
+        assert "not reached at runtime" in diagnostic["detail"]
+        assert "turn 4" in diagnostic["detail"]
+
+    @pytest.mark.parametrize("tag", ["", "repl", "python"])
+    def test_a_block_the_parser_executed_is_never_blamed_on_its_tag(self, tag):
+        """``` / ```repl / ```python all execute, so the tag is not the excuse."""
+        message = _assistant(f"```{tag}\nanswer['ready'] = True\n```", turn=1)
+        diagnostic = _diagnose_missing_submission([message], [_repl(1)])
+        assert diagnostic["code"] == DIAG_NOT_REACHED
+
+    def test_unclosed_fence_counts_as_executed(self):
+        """Parser stage 2 rescues an unclosed fence, so it still runs."""
+        message = _assistant("```repl\nanswer['ready'] = True", turn=1)
+        diagnostic = _diagnose_missing_submission([message], [_repl(1)])
+        assert diagnostic["code"] == DIAG_NOT_REACHED
+
+    def test_an_executed_block_outranks_a_stray_prose_mention(self):
+        """Evidence quality decides the order, not document order.
+
+        A block the interpreter ran is authoritative: if it ran clean and still
+        did not submit, the prose mention of the same line is not the reason.
+        """
+        message = _assistant(
+            "Setting answer['ready'] = True.\n\n"
+            "```repl\nanswer['ready'] = True\n```",
+            turn=1,
+        )
+        diagnostic = _diagnose_missing_submission([message], [_repl(1)])
+        assert diagnostic["code"] == DIAG_NOT_REACHED
+
+    def test_no_submission_text_is_not_a_contradiction(self):
+        assert _diagnose_missing_submission([_assistant("plain prose")], []) is None
+        assert _diagnose_missing_submission([], []) is None
+
+    def test_probe_scores_zero_and_attaches_the_diagnostic(self):
+        result = probe_p4_answer_submission(ProseSubmissionStub())
+        assert result["score"] == 0
+        assert result["passed"] is False
+        assert result["diagnostic"]["code"] == DIAG_PROSE
+        assert any(
+            line.startswith("DIAGNOSTIC [") for line in result["evidence"]
+        ), result["evidence"]
+
+    def test_a_real_submission_carries_no_diagnostic(self, good_backend):
+        result = probe_p4_answer_submission(good_backend)
+        assert result["passed"] is True
+        assert result["diagnostic"] is None
+
+    def test_a_model_that_never_mentions_the_line_carries_no_diagnostic(
+        self, bad_backend
+    ):
+        result = probe_p4_answer_submission(bad_backend)
+        assert result["diagnostic"] is None
+
+
+# ── Battery weighting (2026-09-11 assessment §3.1, §6) ───────────────────
+#
+# P1 is saturated on the router — every model scored 20/20, down to 0.8B — so
+# its weight moved onto P4 and P6, which produce the entire verdict spread.
+
+
+class TestWeightProfiles:
+    def test_default_full_battery_is_a_100_point_scale(self):
+        assert sum(WEIGHT_PROFILES[DEFAULT_WEIGHT_PROFILE].values()) == 100
+
+    def test_default_quick_battery_is_a_50_point_scale(self):
+        quick = sum(WEIGHT_PROFILES[DEFAULT_WEIGHT_PROFILE][p] for p in QUICK_PROBES)
+        assert quick == 50
+
+    def test_default_moves_weight_onto_the_discriminating_probes(self):
+        default = WEIGHT_PROFILES[DEFAULT_WEIGHT_PROFILE]
+        assert default["P1"] == 10
+        assert default["P4"] > WEIGHT_PROFILES["p1-heavy"]["P4"]
+        assert default["P6"] > WEIGHT_PROFILES["p1-heavy"]["P6"]
+
+    def test_p1_heavy_reproduces_the_recorded_assessment_scale(self):
+        """The dated 2026-09-11 scores must stay reproducible as recorded."""
+        assert WEIGHT_PROFILES["p1-heavy"] == {
+            "P1": 20, "P2": 15, "P3": 15, "P4": 15, "P5": 10,
+            "P6": 15, "P7": 5, "P8": 5, "P9": 0,
+        }
+
+    def test_weights_constant_is_the_default_profile(self):
+        assert WEIGHTS == WEIGHT_PROFILES[DEFAULT_WEIGHT_PROFILE]
+
+    @pytest.mark.parametrize("name", sorted(WEIGHT_PROFILES))
+    def test_every_profile_weights_every_probe(self, name):
+        """Guard: registering a probe without weighting it must fail loudly."""
+        assert set(WEIGHT_PROFILES[name]) == set(PROBES)
+
+    def test_unknown_profile_raises_instead_of_falling_back(self):
+        with pytest.raises(ValueError, match="unknown weight profile"):
+            resolve_weights("p1-heavvy")
+
+    def test_resolve_weights_returns_a_copy(self):
+        weights = resolve_weights(DEFAULT_WEIGHT_PROFILE)
+        weights["P1"] = 999
+        assert WEIGHT_PROFILES[DEFAULT_WEIGHT_PROFILE]["P1"] == 10
+
+    def test_protocol_only_model_is_penalised_harder_under_the_new_default(self):
+        from rlm_local.model_check import _score_model
+
+        protocol_only = {
+            "P1": {"score": 20, "max_score": 20},
+            "P4": {"score": 0, "max_score": 15},
+            "P6": {"score": 0, "max_score": 15},
+        }
+        old = _score_model(
+            protocol_only,
+            {p: WEIGHT_PROFILES["p1-heavy"][p] for p in QUICK_PROBES},
+        )
+        new = _score_model(
+            protocol_only,
+            {p: WEIGHT_PROFILES[DEFAULT_WEIGHT_PROFILE][p] for p in QUICK_PROBES},
+        )
+        assert old == 40.0
+        assert new == 20.0
+
+    def test_voluntary_submitter_separates_further_under_the_new_default(self):
+        from rlm_local.model_check import _score_model
+
+        submits_but_no_protocol = {
+            "P1": {"score": 0, "max_score": 20},
+            "P4": {"score": 15, "max_score": 15},
+            "P6": {"score": 15, "max_score": 15},
+        }
+        old = _score_model(
+            submits_but_no_protocol,
+            {p: WEIGHT_PROFILES["p1-heavy"][p] for p in QUICK_PROBES},
+        )
+        new = _score_model(
+            submits_but_no_protocol,
+            {p: WEIGHT_PROFILES[DEFAULT_WEIGHT_PROFILE][p] for p in QUICK_PROBES},
+        )
+        assert old == 60.0
+        assert new == 80.0
+
+
+class TestCheckModelScaleIsRecorded:
+    def test_result_records_the_profile_and_the_resolved_weights(self):
+        result = check_model(GoodModelStub(), model_id="scale", quick=True)
+        assert result["weight_profile"] == DEFAULT_WEIGHT_PROFILE
+        assert result["weights"] == {
+            p: WEIGHT_PROFILES[DEFAULT_WEIGHT_PROFILE][p] for p in QUICK_PROBES
+        }
+
+    def test_p1_heavy_can_still_be_selected_explicitly(self):
+        result = check_model(
+            GoodModelStub(), model_id="scale-old", quick=True,
+            weight_profile="p1-heavy",
+        )
+        assert result["weight_profile"] == "p1-heavy"
+        assert result["weights"] == {
+            p: WEIGHT_PROFILES["p1-heavy"][p] for p in QUICK_PROBES
+        }
+
+    def test_unknown_profile_fails_before_any_probe_runs(self):
+        backend = GoodModelStub()
+        with pytest.raises(ValueError):
+            check_model(
+                backend, model_id="scale-bad", quick=True,
+                weight_profile="does-not-exist",
+            )
+        assert backend.calls == []
+
+    def test_report_names_the_scale_it_was_scored_on(self):
+        result = check_model(GoodModelStub(), model_id="scale-report", quick=True)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            content = save_check_report(result, tmpdir).read_text(encoding="utf-8")
+        assert f"weights: {DEFAULT_WEIGHT_PROFILE}" in content
+        assert f"**Weights:** {DEFAULT_WEIGHT_PROFILE}" in content
+        assert "P4 20" in content

@@ -294,11 +294,23 @@ Prints the full page (frontmatter + body).
 ### `rlm check`
 
 ```bash
-rlm check <model-id> [--endpoint URL] [--quick] [--profile tiny]
+rlm check <model-id> [--endpoint URL] [--quick] [--weights PROFILE] [--profile tiny]
 ```
 
 Runs the 9-probe suitability battery. `--quick` runs P1+P4+P6 only (a 50-point
-scale) and takes a few minutes per probe against a local 4B model.
+scale reported out of 100) and takes a few minutes per probe against a local 4B
+model.
+
+**Weighting (`--weights`, or `RLM_CHECK_WEIGHTS`).** The battery is a weighted
+average, and the weights decide what the score can mean:
+
+| Profile | P1 | P4 | P6 | Use it when |
+|---|---|---|---|---|
+| `default` | 10 | 20 | 20 | Ranking models. P1 ("emits a valid `repl` block") is saturated on the local router — every model tested scored full marks, down to 0.8B — so its weight sits on P4 (voluntary submission) and P6 (needle retrieval), the two probes that actually separate a usable model from an unusable one (finding recorded in `docs/20260911-0050-router-model-assessment.md`). |
+| `p1-heavy` | 20 | 15 | 15 | Reproducing the scores recorded in `docs/20260911-0050-router-model-assessment.md`. Those numbers were produced on this scale; a score is meaningless without the scale it came from. |
+
+Every result records the profile and the resolved weights, and the persisted
+report carries them in its frontmatter, so old reports stay interpretable.
 
 Reports score, verdict, timing and per-probe evidence to stdout. It does **not**
 write a report file — redirect it yourself if you want to keep it:
@@ -306,6 +318,12 @@ write a report file — redirect it yourself if you want to keep it:
 ```bash
 rlm check Qwen3.5-4B-Abliterated --quick 2>&1 | tee model-check-$(date +%F).txt
 ```
+
+When P4 scores 0 *and* the transcript contains submission text, the probe now
+says where the line went instead of just reporting two disagreeing booleans:
+outside every fence, inside a fence tag the parser does not execute, in a block
+that raised, or in a block that ran clean and never reached the line. Those
+findings appear as `DIAGNOSTIC [code]` in the evidence.
 
 `--endpoint` is how you check a model served elsewhere (another LAN box, a
 Tailscale peer, a llama.cpp router); the default is
@@ -523,7 +541,8 @@ uv run python -m rlm_local.cli check <model-id>
 
 **Re-check cadence:** on model upgrade, on prompt change, or when you notice
 degradation. Record the run yourself — `rlm check` prints its report, it does not
-write a file (see §3).
+write a file (see §3). Record the weight profile with the score, or the number
+cannot be compared with an older run (see `--weights` in §3).
 
 ---
 
@@ -545,10 +564,30 @@ write a file (see §3).
   including both SSE streams — enforces it; adding a route without it fails a test.
   `RLM_WEB_ALLOW_TESTCLIENT=1` exists solely so the test suite's synthetic
   non-loopback client can reach the app, and it never overrides a configured token.
-- **No CSRF tokens (known gap).** The state-changing `POST` routes rely on the
-  `SameSite=Lax` session cookie rather than an anti-forgery token. That is
-  adequate for a single-user console on a tailnet, but if you expose it more
-  widely, front it with a proxy that enforces an origin check.
+- **Cross-origin (CSRF) protection — on by default.** A session cookie rides
+  along on any request the browser makes, so authentication alone does not
+  authorise a `POST`. Every state-changing route (`POST /jobs`, `/vault/ingest`,
+  `/chat/send`, `/chat/clear`, `/chat/context`, `/login`, and `GET /logout`)
+  carries an origin check as a route dependency; adding another one without it
+  fails a test. Modes, from `RLM_WEB_ORIGIN_CHECK`:
+
+  | Value | Behaviour |
+  |---|---|
+  | `same-origin` (default) | A request that claims an `Origin` (or `Referer`) must claim this server's. A request that claims neither — `curl`, a script, a typed URL — is allowed, which is why this mode does not break automation. |
+  | `strict` | An origin must be claimed *and* match. Use it behind a proxy, or when only browsers should reach the console. |
+  | `off` | No check. For a console that is genuinely loopback-only; the server refuses to start on any other value, so a typo cannot disable it silently. |
+
+  `Origin: null` (a sandboxed iframe, a `file://` page) always fails closed, and
+  the request's own origin may also be named explicitly in
+  `RLM_WEB_ALLOWED_ORIGINS` (comma-separated, e.g.
+  `http://127.0.0.1:8778,https://lunacode.tail-scale.ts.net`). Setting that
+  allowlist replaces the same-origin comparison and does **not** implicitly
+  include this server — that is what also resists DNS rebinding, where the
+  attacker's page resolves to your console and its `Origin` and `Host` agree.
+  An unusable entry (no scheme, or a bare hostname) makes the server exit 2 at
+  startup rather than silently never matching. `localhost`, `127.0.0.1` and
+  `[::1]` are treated as one origin, so opening the console on both names does
+  not lock you out.
 - **Tailscale scope:** the web frontend binds `0.0.0.0` but only the Tailscale
   interface is reachable from outside your LAN. Verify with `tailscale status`.
 - **Self-signed certs:** browsers and phones will warn. Either use the

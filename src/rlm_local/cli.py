@@ -104,6 +104,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_check.add_argument("--quick", action="store_true")
     p_check.add_argument("--profile", default="tiny")
+    p_check.add_argument(
+        "--weights",
+        default=os.environ.get("RLM_CHECK_WEIGHTS", "default"),
+        help=("named battery weighting (default: default; use p1-heavy to "
+              "reproduce the scores recorded on 2026-09-11) [env RLM_CHECK_WEIGHTS]"),
+    )
 
     # ── vault ────────────────────────────────────────────────────────────
     p_vault = sub.add_parser("vault", help="Vault management (pass-through to rlm-kernel)")
@@ -459,13 +465,19 @@ def _cmd_check(args: argparse.Namespace) -> int:
             verify=False,
         )
         try:
-            result = check_model(backend, args.model_id, quick=args.quick, profile=args.profile)
+            result = check_model(
+                backend, args.model_id,
+                quick=args.quick, profile=args.profile,
+                weight_profile=args.weights,
+            )
         finally:
             backend.close()
 
         print(f"Model: {args.model_id}")
         print(f"Score: {result['score']}/100")
         print(f"Verdict: {result['verdict']}")
+        print(f"Weights: {result['weight_profile']} "
+              f"({', '.join(f'{p} {w}' for p, w in result['weights'].items())})")
         print(f"Probes: {result['probes_passed']}/{result['probes_total']} passed, "
               f"{result['probes_failed']} failed")
         print(f"Time: {result['elapsed_seconds']:.0f}s")
@@ -485,6 +497,10 @@ def _cmd_check(args: argparse.Namespace) -> int:
         print(f"Model check unavailable: {e}", file=sys.stderr)
         print("Install the dependencies (uv sync) and retry.", file=sys.stderr)
         return 1
+    except ValueError as e:
+        # An unknown --weights value: a usage error, not a missing dependency.
+        print(f"{e}", file=sys.stderr)
+        return 2
 # ── vault ─────────────────────────────────────────────────────────────────
 
 def _cmd_vault(args: argparse.Namespace) -> int:

@@ -373,6 +373,153 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         "            ts = time.time_ns()",
         ["tests/test_logger.py::TestDefaultLocation::test_logger_does_not_use_the_system_temp_dir"],
     ),
+    # ── R26: the P4 disagreement diagnostic (2026-09-11 assessment §3.1) ────
+    (
+        "R26 the P4 diagnostic is never produced",
+        "src/rlm_local/model_check.py",
+        "    if has_answer_ready and not has_final_answer:",
+        "    if False:",
+        [
+            "tests/test_model_check.py::TestP4SubmissionDiagnostics"
+            "::test_probe_scores_zero_and_attaches_the_diagnostic",
+        ],
+    ),
+    (
+        "R26 every fence tag counts as executable",
+        "src/rlm_local/model_check.py",
+        "                    \"executable\": region[\"tag\"] in _EXECUTABLE_FENCE_TAGS,",
+        "                    \"executable\": True,",
+        [
+            "tests/test_model_check.py::TestSubmissionSiteDetection"
+            "::test_other_tags_are_marked_unexecutable",
+            "tests/test_model_check.py::TestP4SubmissionDiagnostics"
+            "::test_unexecutable_fence_tag_is_named",
+        ],
+    ),
+    (
+        "R26 an executed block stops outranking a stray prose mention",
+        "src/rlm_local/model_check.py",
+        "    executed = [c for c in candidates if c[1][\"executable\"]]",
+        "    executed = []",
+        [
+            "tests/test_model_check.py::TestP4SubmissionDiagnostics"
+            "::test_an_executed_block_outranks_a_stray_prose_mention",
+            "tests/test_model_check.py::TestP4SubmissionDiagnostics"
+            "::test_raised_block_is_reported_with_the_exception",
+        ],
+    ),
+    # ── R27: battery weighting (2026-09-11 assessment §3.1, §6) ────────────
+    (
+        "R27 the default battery reverts to the saturated P1-heavy weights",
+        "src/rlm_local/model_check.py",
+        "    \"default\": {\n"
+        "        \"P1\": 10,\n"
+        "        \"P2\": 15,\n"
+        "        \"P3\": 15,\n"
+        "        \"P4\": 20,\n"
+        "        \"P5\": 10,\n"
+        "        \"P6\": 20,",
+        "    \"default\": {\n"
+        "        \"P1\": 20,\n"
+        "        \"P2\": 15,\n"
+        "        \"P3\": 15,\n"
+        "        \"P4\": 15,\n"
+        "        \"P5\": 10,\n"
+        "        \"P6\": 15,",
+        [
+            "tests/test_model_check.py::TestWeightProfiles"
+            "::test_default_moves_weight_onto_the_discriminating_probes",
+            "tests/test_model_check.py::TestWeightProfiles"
+            "::test_protocol_only_model_is_penalised_harder_under_the_new_default",
+            "tests/test_model_check.py::TestWeightProfiles"
+            "::test_voluntary_submitter_separates_further_under_the_new_default",
+        ],
+    ),
+    (
+        "R27 a score no longer records the scale it came from",
+        "src/rlm_local/model_check.py",
+        "        \"weight_profile\": weight_profile,",
+        "        \"weight_profile\": \"unknown\",",
+        [
+            "tests/test_model_check.py::TestCheckModelScaleIsRecorded"
+            "::test_result_records_the_profile_and_the_resolved_weights",
+        ],
+    ),
+    # ── R28: cross-origin (CSRF) protection (2026-09-10 validation §8.1) ───
+    (
+        "R28 a state-changing route loses its origin dependency",
+        "src/rlm_web/app.py",
+        "@app.post(\"/jobs\", response_class=HTMLResponse,\n"
+        "          dependencies=[Depends(require_same_origin), Depends(require_auth)])",
+        "@app.post(\"/jobs\", response_class=HTMLResponse,\n"
+        "          dependencies=[Depends(require_auth)])",
+        [
+            "tests/test_web.py::TestOriginCoverageByConstruction"
+            "::test_every_state_changing_route_is_checked",
+            "tests/test_web.py::TestCrossOriginRequests"
+            "::test_cross_origin_post_is_rejected_with_a_live_session",
+        ],
+    ),
+    (
+        "R28 logout loses its origin dependency",
+        "src/rlm_web/app.py",
+        "@app.get(\"/logout\", dependencies=[Depends(require_same_origin)])",
+        "@app.get(\"/logout\")",
+        [
+            "tests/test_web.py::TestCrossOriginRequests"
+            "::test_logout_is_not_a_free_for_all",
+            "tests/test_web.py::TestOriginCoverageByConstruction"
+            "::test_every_state_changing_route_is_checked",
+        ],
+    ),
+    (
+        "R28 a mismatched origin is accepted (fail open)",
+        "src/rlm_web/app.py",
+        "    if supplied == own_origin:\n"
+        "        return True, \"\"\n"
+        "    return False, f\"origin {supplied} does not match this server ({own_origin})\"",
+        "    return True, \"\"",
+        [
+            "tests/test_web.py::TestOriginDecisionTable::test_policy",
+            "tests/test_web.py::TestCrossOriginRequests"
+            "::test_cross_origin_post_is_rejected_with_a_live_session",
+        ],
+    ),
+    (
+        "R28 Origin: null is treated as a client that claims no origin",
+        "src/rlm_web/app.py",
+        "    return _normalize_origin(raw)",
+        "    return _normalize_origin(raw) or None",
+        [
+            "tests/test_web.py::TestCrossOriginRequests::test_origin_null_fails_closed",
+        ],
+    ),
+    (
+        "R28 the allowlist implicitly trusts this server again",
+        "src/rlm_web/app.py",
+        "    if allowlist:\n        if supplied in allowlist:\n            return True, \"\"",
+        "    if allowlist:\n"
+        "        if supplied in allowlist or supplied == own_origin:\n"
+        "            return True, \"\"",
+        [
+            "tests/test_web.py::TestCrossOriginRequests"
+            "::test_allowlist_admits_the_named_origin_only",
+            "tests/test_web.py::TestOriginDecisionTable::test_policy",
+        ],
+    ),
+    (
+        "R28 strict mode accepts a request that claims no origin",
+        "src/rlm_web/app.py",
+        "    if supplied is None:\n"
+        "        if mode == \"strict\":\n"
+        "            return False, \"an Origin or Referer header is required in strict mode\"\n"
+        "        return True, \"\"",
+        "    if supplied is None:\n        return True, \"\"",
+        [
+            "tests/test_web.py::TestCrossOriginRequests::test_strict_mode_demands_an_origin",
+            "tests/test_web.py::TestOriginDecisionTable::test_policy",
+        ],
+    ),
 ]
 
 

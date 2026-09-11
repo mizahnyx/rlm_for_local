@@ -1740,7 +1740,7 @@ findings (S4/R20 and S3/R19).
 
 ```bash
 # Unit tests only (fast, no server required, no load-gate benchmarks)
-uv run pytest tests/ -k "not slow and not load" -v
+uv run pytest -m "not slow and not load" -v
 
 # All tests including integration (requires running llama-server)
 uv run pytest tests/ -v
@@ -1752,13 +1752,19 @@ uv run pytest tests/test_parser.py -v
 uv run pytest tests/rlm_kernel/ -v
 
 # Fallback parity check — verify kernel changes don't break rlm_local
-uv run pytest tests/ -k "not slow and not rlm_kernel" -v
+uv run pytest tests/ -m "not slow" -k "not rlm_kernel" -v
 ```
 
+Select the fast suite with **`-m`** (markers), not `-k` (names). `-k` is a
+substring match against the node id, so `-k "not slow and not load"` also drops
+20 tests that merely mention "load" in their name — `test_ingest_loads_file`,
+the upload-cap tests, `test_base_template_loads_no_scripts` — and reports them
+as "deselected" rather than running them.
+
 Load-gate benchmarks live in `tests/load/` and carry **both** markers
-(`slow` and `load`), so they are excluded by `-k "not slow"`, by
-`-k "not load"`, and by `-m "not load"`. Select them explicitly with
-`-m load` or `uv run pytest tests/load/test_load.py -v`.
+(`slow` and `load`), so they are excluded by `-m "not slow"` and by
+`-m "not load"`. Select them explicitly with `-m load` or
+`uv run pytest tests/load/test_load.py -v`.
 
 ### 16.2.1 Documentation checks
 
@@ -1804,12 +1810,49 @@ point-in-time records, so stale claims in them are history rather than defects.
 - **REPL tests** launch real subprocess workers and exercise the full TCP
   protocol, cell-id correlation, subcall proxying, and state persistence.
 
-### 16.4 Model-check probes (`model_check.py`) — known scoring weaknesses
+### 16.4 Model-check probes (`model_check.py`) — scoring and known weaknesses
 
-`rlm check <model>` runs the P1–P9 battery. Two probe behaviours are known,
-**documented, and deliberately not tightened** — tightening them changes score
-semantics and is an owner decision (deferred; see R15 of
-`docs/20260903-2107-remediation-plan.md`):
+`rlm check <model>` runs the P1–P9 battery: a weighted average, normalised to
+100, with verdict bands at ≥75 SUITABLE / 50–74 MARGINAL / <50 NOT SUITABLE.
+
+**Weighting is a named profile, not a constant** (`WEIGHT_PROFILES`, selected
+with `--weights` or `RLM_CHECK_WEIGHTS`, recorded in every result):
+
+| Profile | P1 | P2 | P3 | P4 | P5 | P6 | P7 | P8 | P9 |
+|---|---|---|---|---|---|---|---|---|---|
+| `default` | 10 | 15 | 15 | 20 | 10 | 20 | 5 | 5 | 0 (report-only) |
+| `p1-heavy` | 20 | 15 | 15 | 15 | 10 | 15 | 5 | 5 | 0 (report-only) |
+
+The default moved 10 points from P1 to P4 and P6 after the 2026-09-11 router
+sweep: **P1 is saturated** — all ten models on that router, down to 0.8B, scored
+20/20 — so its weight only compressed the spread produced by P4 (voluntary
+submission) and P6 (needle retrieval), which is where the entire SUITABLE /
+MARGINAL split came from. `p1-heavy` is the pre-change scale, kept so the scores
+in `docs/20260911-0050-router-model-assessment.md` stay reproducible. Because
+`_score_model` normalises by the total weight, a profile only matters through
+the *ratios* between probes: on the quick battery a model that passes P1 alone
+scores 40/100 under `p1-heavy` and 20/100 under `default`, while one that passes
+P4 and P6 but not P1 scores 60 vs 80.
+
+**P4 reports where a submission line went.** When submission text is present in
+the transcript and no submission executed, the probe used to report two
+disagreeing booleans and a 0. It now attaches a `DIAGNOSTIC [code]` naming the
+cause, ordered by evidence quality — a block the interpreter actually ran
+outranks a stray prose mention:
+
+| Code | Meaning |
+|---|---|
+| `submission_block_raised` | The line sits in an executed block whose cell raised (the traceback's last line is quoted). |
+| `submission_not_reached_at_runtime` | The block ran clean and never reached the line — a conditional, a loop, or `answer` rebound to a non-dict. |
+| `submission_text_in_unexecutable_fence` | The line is inside a fence tag the parser does not execute (only `repl`, `python` and untagged fences run). |
+| `submission_text_outside_fence` | The line is prose; the parser extracts only fenced blocks. |
+
+The score is unchanged by the diagnostic: a model that did not submit scores 0,
+now with a reason.
+
+Two further probe behaviours are known, **documented, and deliberately not
+tightened** — tightening them changes score semantics and is an owner decision
+(deferred; see R15 of `docs/20260903-2107-remediation-plan.md`):
 
 - **P2 — escaped characters (fixed).** The paren lexer used to skip a backslash
   without skipping the character it escapes, so a helper call containing an

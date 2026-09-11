@@ -45,6 +45,8 @@ for the `rlm-kernel` implementation against its specification
 | 2026-09-03 21:07 | `20260903-2107-remediation-plan.md` | The remediation plan (items R1–R25) those findings became |
 | 2026-09-03 21:07 | `20260903-2107-agent-memory-landscape-report.md`, `20260903-2107-memanto-vs-rlm-behaviour-as-content.md` | Companion research and comparison reports |
 | 2026-09-10 07:30 | `20260910-0730-remediation-validation.md` | **This cycle's validation** — waves 0–4 enacted, 641 tests green, 30/30 guards proven non-vacuous, LIVE needle + load gate + `rlm check` recorded, deviations stated |
+| 2026-09-11 00:50 | `20260911-0050-router-model-assessment.md` | Router model sweep — stage-1 protocol screen, stage-2 suitability verdicts (five models scored 100/100 besides the baseline), the P1-saturation finding, host tuning note |
+| 2026-09-11 12:19 | `20260911-1219-assessment-follow-ups-hardening.md` | That assessment's follow-ups enacted: cross-origin (CSRF) check on every state-changing route, a real P4 disagreement diagnostic, battery reweighting off the saturated probe |
 
 ## Status
 
@@ -71,3 +73,15 @@ quality gate rather than containment; `answer`/`context` are not restored after
 each cell; P3's scoring weaknesses; `schema` shadowing a pydantic attribute) are
 listed in §7 of `20260910-0730-remediation-validation.md` rather than left
 implied.
+
+The **model-suitability work that followed** is a separate, still-open thread:
+the router sweep in `20260911-0050-router-model-assessment.md` answered which
+models can drive the harness, and its follow-ups — the CSRF check, the P4
+disagreement diagnostic, the battery reweight — are enacted in
+`20260911-1219-assessment-follow-ups-hardening.md`. What remains open is
+listed in §6 of that hardening report
+(`20260911-1219-assessment-follow-ups-hardening.md`) rather than implied: P3's
+scoring weaknesses, the `--screen` triage that is not a gate, the two models
+skipped after failing it, the host-side `max_instances` risk, and the one thing
+not verified live — that the P4 diagnostic names the right cause for the model
+whose contradiction motivated it.

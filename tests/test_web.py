@@ -9,14 +9,21 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from rlm_web.app import app
+from rlm_web.app import (
+    _normalize_origin,
+    _origin_allowed,
+    app,
+)
 
 
 _ENV_KEYS = (
     "RLM_WEB_TOKEN",
+    "RLM_WEB_SECRET",
     "RLM_WEB_SSL_KEY",
     "RLM_WEB_SSL_CERT",
     "RLM_WEB_ALLOW_TESTCLIENT",
+    "RLM_WEB_ORIGIN_CHECK",
+    "RLM_WEB_ALLOWED_ORIGINS",
 )
 
 
@@ -739,3 +746,317 @@ class TestBoundedStores:
         assert _jobs._maxlen == MAX_STORED_ENTRIES
         assert _chat_sessions._maxlen == MAX_STORED_ENTRIES
         assert MAX_STORED_ENTRIES == 100
+
+
+# ── Cross-origin (CSRF) protection ─────────────────────────────────────────
+#
+# Open item in the 2026-09-10 validation §8.1: the console authenticated with a
+# session cookie and relied on `SameSite=Lax` alone, so nothing stopped a page
+# the operator visited from POSTing to a console they were logged into.
+
+_HOME = "http://testserver"  # what TestClient uses as base_url
+_EVIL = "https://evil.example"
+
+_JOB_FORM = {"query": "what is 2+2", "context": "2+2=4"}
+
+
+class TestOriginNormalization:
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "http://localhost:8778",
+            "http://127.0.0.1:8778",
+            "http://[::1]:8778",
+            "http://LOCALHOST:8778",
+            "http://localhost:8778/",
+        ],
+    )
+    def test_loopback_aliases_are_one_origin(self, value):
+        """The console is reached as both `localhost` and `127.0.0.1`.
+
+        Treating those as different origins would lock the operator out of their
+        own console, which is how a CSRF fix usually gets reverted.
+        """
+        assert _normalize_origin(value) == "http://loopback:8778"
+
+    def test_default_ports_are_made_explicit(self):
+        assert _normalize_origin("https://console.example") == "https://console.example:443"
+        assert _normalize_origin("http://console.example") == "http://console.example:80"
+
+    def test_the_scheme_is_part_of_the_origin(self):
+        assert _normalize_origin("https://console.example") != _normalize_origin(
+            "http://console.example"
+        )
+
+    def test_a_path_and_query_are_ignored(self):
+        assert _normalize_origin("https://evil.example/page?q=1") == "https://evil.example:443"
+
+    @pytest.mark.parametrize(
+        "value",
+        ["", "null", "not a url", "console.example", "/relative", "ftp://x.example"],
+    )
+    def test_unusable_values_normalize_to_empty(self, value):
+        assert _normalize_origin(value) == ""
+
+    def test_unknown_mode_falls_back_to_the_default_not_to_off(self, monkeypatch):
+        """A typo must not silently disable the check."""
+        import rlm_web.app as webapp
+
+        monkeypatch.setenv("RLM_WEB_ORIGIN_CHECK", "on")
+        assert webapp._origin_check_mode() == "same-origin"
+
+    def test_mode_is_case_insensitive(self, monkeypatch):
+        import rlm_web.app as webapp
+
+        monkeypatch.setenv("RLM_WEB_ORIGIN_CHECK", "STRICT")
+        assert webapp._origin_check_mode() == "strict"
+
+
+class TestOriginDecisionTable:
+    """`_origin_allowed` is pure, so the whole policy is one table."""
+
+    OWN = f"{_HOME}:80"
+
+    @pytest.mark.parametrize(
+        "supplied,mode,allowlist,expected",
+        [
+            # same-origin (default): a claimed origin must be this server's.
+            (None, "same-origin", frozenset(), True),
+            (OWN, "same-origin", frozenset(), True),
+            (_EVIL, "same-origin", frozenset(), False),
+            # a claim that cannot be parsed (Origin: null) always fails closed
+            ("", "same-origin", frozenset(), False),
+            # strict: an origin must be claimed and match
+            (None, "strict", frozenset(), False),
+            (_EVIL, "strict", frozenset(), False),
+            # off: documented escape hatch
+            (None, "off", frozenset(), True),
+            (_EVIL, "off", frozenset(), True),
+            ("", "off", frozenset(), True),
+            # allowlist replaces the same-origin comparison, and does not
+            # implicitly include this server (DNS-rebinding-safe)
+            (_EVIL, "same-origin", frozenset({_EVIL}), True),
+            (OWN, "same-origin", frozenset({_EVIL}), False),
+        ],
+    )
+    def test_policy(self, supplied, mode, allowlist, expected):
+        allowed, _reason = _origin_allowed(
+            supplied=supplied, mode=mode, allowlist=allowlist, own_origin=self.OWN,
+        )
+        assert allowed is expected
+
+    def test_every_refusal_says_why(self):
+        for supplied, mode, allowlist in [
+            (_EVIL, "same-origin", frozenset()),
+            (None, "strict", frozenset()),
+            ("", "same-origin", frozenset()),
+            (self.OWN, "same-origin", frozenset({_EVIL})),
+        ]:
+            allowed, reason = _origin_allowed(
+                supplied=supplied, mode=mode, allowlist=allowlist,
+                own_origin=self.OWN,
+            )
+            assert allowed is False
+            assert reason, f"refusal for {supplied!r} in {mode} had no reason"
+
+
+class TestCrossOriginRequests:
+    def test_cross_origin_post_is_rejected_with_a_live_session(self):
+        """The attack: the operator is logged in, another site causes the POST.
+
+        A session cookie rides along on any request the browser makes, so the
+        auth gate alone would have accepted this one.
+        """
+        os.environ["RLM_WEB_TOKEN"] = "sekrit"
+        try:
+            with TestClient(app) as c:
+                login = c.post("/login", data={"token": "sekrit"})
+                assert login.status_code in (200, 303), login.status_code
+                resp = c.post("/jobs", data=_JOB_FORM, headers={"Origin": _EVIL})
+                assert resp.status_code == 403, resp.status_code
+                assert "Cross-origin" in resp.text
+        finally:
+            del os.environ["RLM_WEB_TOKEN"]
+
+    def test_same_origin_post_still_works(self, client):
+        resp = client.post(
+            "/jobs", data=_JOB_FORM, headers={"Origin": _HOME},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303, resp.status_code
+
+    def test_a_client_that_claims_no_origin_is_allowed(self, client):
+        """curl, a script, or a typed URL is not a cross-site browser request."""
+        resp = client.post("/jobs", data=_JOB_FORM, follow_redirects=False)
+        assert resp.status_code == 303, resp.status_code
+
+    def test_origin_null_fails_closed(self, client):
+        """A sandboxed iframe or `file://` page sends `Origin: null`."""
+        resp = client.post("/jobs", data=_JOB_FORM, headers={"Origin": "null"})
+        assert resp.status_code == 403, resp.status_code
+
+    def test_referer_is_checked_when_origin_is_absent(self, client):
+        """Browsers that withhold `Origin` on a same-origin POST still send it."""
+        evil = client.post("/jobs", data=_JOB_FORM, headers={"Referer": f"{_EVIL}/page"})
+        assert evil.status_code == 403, evil.status_code
+        same = client.post(
+            "/jobs", data=_JOB_FORM, headers={"Referer": f"{_HOME}/"},
+            follow_redirects=False,
+        )
+        assert same.status_code == 303, same.status_code
+
+    def test_strict_mode_demands_an_origin(self, client, monkeypatch):
+        monkeypatch.setenv("RLM_WEB_ORIGIN_CHECK", "strict")
+        assert client.post("/jobs", data=_JOB_FORM).status_code == 403
+        with_origin = client.post(
+            "/jobs", data=_JOB_FORM, headers={"Origin": _HOME},
+            follow_redirects=False,
+        )
+        assert with_origin.status_code == 303, with_origin.status_code
+
+    def test_off_disables_the_check(self, client, monkeypatch):
+        monkeypatch.setenv("RLM_WEB_ORIGIN_CHECK", "off")
+        resp = client.post(
+            "/jobs", data=_JOB_FORM, headers={"Origin": _EVIL},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303, resp.status_code
+
+    def test_allowlist_admits_the_named_origin_only(self, client, monkeypatch):
+        monkeypatch.setenv("RLM_WEB_ALLOWED_ORIGINS", "https://console.example")
+        admitted = client.post(
+            "/jobs", data=_JOB_FORM, headers={"Origin": "https://console.example"},
+            follow_redirects=False,
+        )
+        assert admitted.status_code == 303, admitted.status_code
+        refused = client.post("/jobs", data=_JOB_FORM, headers={"Origin": _HOME})
+        assert refused.status_code == 403, refused.status_code
+
+    @pytest.mark.parametrize(
+        "path,request_body",
+        [
+            ("/chat/send", {"json": {"message": "hi"}}),
+            ("/chat/clear", {"json": {}}),
+            ("/chat/context", {"json": {}}),
+            ("/vault/ingest", {}),
+        ],
+    )
+    def test_every_state_changing_endpoint_is_covered(self, client, path, request_body):
+        # NB: the parameter is not called `payload` — the node id would then
+        # contain "load" and `-k "not slow and not load"`, the documented fast
+        # command, would silently deselect it.
+        resp = client.post(path, headers={"Origin": _EVIL}, **request_body)
+        assert resp.status_code == 403, f"{path} -> {resp.status_code}"
+
+    def test_logout_is_not_a_free_for_all(self, client):
+        """Logout changes state and was reachable by any cross-site `<img>`."""
+        resp = client.get("/logout", headers={"Referer": f"{_EVIL}/x"})
+        assert resp.status_code == 403, resp.status_code
+        same_origin = client.get(
+            "/logout", headers={"Origin": _HOME}, follow_redirects=False
+        )
+        assert same_origin.status_code == 303, same_origin.status_code
+
+    def test_reads_are_not_origin_checked(self, client):
+        """Only state-changing routes carry the check; reads carry auth."""
+        assert client.get("/", headers={"Origin": _EVIL}).status_code == 200
+
+
+class TestOriginCoverageByConstruction:
+    """A new state-changing route must not be able to forget the CSRF check."""
+
+    #: GET routes that change state and so are checked as well.
+    STATE_CHANGING_GETS = {"/logout"}
+
+    @classmethod
+    def _unchecked(cls, application) -> list[str]:
+        from fastapi.routing import APIRoute
+
+        from rlm_web.app import require_same_origin
+
+        missing: list[str] = []
+        for route in application.routes:
+            if not isinstance(route, APIRoute):
+                continue
+            if route.path.startswith("/static"):
+                continue
+            state_changing = (
+                "POST" in (route.methods or set())
+                or route.path in cls.STATE_CHANGING_GETS
+            )
+            if not state_changing:
+                continue
+            calls = [d.call for d in route.dependant.dependencies]
+            if require_same_origin not in calls:
+                missing.append(route.path)
+        return missing
+
+    def test_every_state_changing_route_is_checked(self):
+        assert self._unchecked(app) == []
+
+    def test_at_least_one_state_changing_route_exists(self):
+        """Non-vacuity: an empty route table would pass the check above."""
+        assert self._unchecked(app) == [] and any(
+            "POST" in (getattr(r, "methods", None) or set()) for r in app.routes
+        )
+
+    def test_the_guard_actually_finds_unprotected_routes(self):
+        from fastapi import Depends, FastAPI
+
+        from rlm_web.app import require_same_origin
+
+        probe = FastAPI()
+
+        @probe.post("/protected", dependencies=[Depends(require_same_origin)])
+        async def _a():  # pragma: no cover - not called
+            return {}
+
+        @probe.post("/unprotected")
+        async def _b():  # pragma: no cover - not called
+            return {}
+
+        assert self._unchecked(probe) == ["/unprotected"]
+
+
+class TestOriginConfigStartupValidation:
+    """A policy that cannot mean what was typed must not start a server."""
+
+    @staticmethod
+    def _start(argv: list[str] | None = None) -> tuple[int, list[dict]]:
+        import uvicorn
+
+        import rlm_web.app as webapp
+
+        started: list[dict] = []
+        original = uvicorn.run
+        uvicorn.run = lambda *a, **kw: started.append(kw)
+        try:
+            return webapp.main(argv or []), started
+        finally:
+            uvicorn.run = original
+
+    def test_unknown_mode_refuses_to_start(self, monkeypatch):
+        monkeypatch.setenv("RLM_WEB_ORIGIN_CHECK", "on")
+        os.environ.pop("RLM_WEB_TOKEN", None)
+        with pytest.raises(SystemExit) as exc:
+            self._start()
+        assert exc.value.code == 2
+
+    def test_unusable_allowlist_entry_refuses_to_start(self, monkeypatch):
+        monkeypatch.setenv("RLM_WEB_ALLOWED_ORIGINS", "console.example")
+        os.environ.pop("RLM_WEB_TOKEN", None)
+        with pytest.raises(SystemExit) as exc:
+            self._start()
+        assert exc.value.code == 2
+
+    def test_a_valid_policy_starts(self, monkeypatch):
+        monkeypatch.setenv("RLM_WEB_ORIGIN_CHECK", "strict")
+        monkeypatch.setenv(
+            "RLM_WEB_ALLOWED_ORIGINS",
+            "https://console.example,http://127.0.0.1:8778",
+        )
+        os.environ.pop("RLM_WEB_TOKEN", None)
+        os.environ.pop("RLM_WEB_SECRET", None)
+        rc, started = self._start()
+        assert rc == 0
+        assert started, "uvicorn should have been started"
