@@ -1684,7 +1684,7 @@ the search returns no results and the CLI tells you to rebuild it.
 
 ### 16.1 Test Suite Structure
 
-669 tests collected; 12 marked `slow` (real-model integration + load corpus).
+756 tests collected; 12 marked `slow` (real-model integration + load corpus).
 
 ```
 tests/
