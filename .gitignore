@@ -25,6 +25,10 @@ k4_prog3_candidate.txt
 logs/k4-gepa-checkpoints/
 logs/trajectories/
 
-# Sandbox temp roots
+# Sandbox temp roots. `.tmp_*` is the convention for scratch work whenever a
+# root cannot be cleaned up in-session (the sandbox forbids deleting some
+# modes); the validation docs have referred to this rule since 2026-09-10, and
+# until now only the two roots below were actually covered.
+.tmp_*/
 .tmp_pytest/
 .tmp_rt/

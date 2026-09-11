@@ -15,6 +15,7 @@ from rlm_local.model_check import (
     DIAG_BLOCK_RAISED,
     DIAG_NOT_REACHED,
     DIAG_PROSE,
+    DIAG_TEXT_NOT_CODE,
     DIAG_UNEXECUTABLE_TAG,
     PROBES,
     QUICK_PROBES,
@@ -25,6 +26,7 @@ from rlm_local.model_check import (
     _fence_regions,
     _normalize_for_match,
     _submission_sites,
+    _text_kind_at,
     check_model,
     probe_p1_protocol_emission,
     probe_p2_helper_calls,
@@ -722,7 +724,9 @@ class TestSubmissionSiteDetection:
     @pytest.mark.parametrize("tag", ["", "repl", "python"])
     def test_tags_the_parser_executes_are_marked_executable(self, tag):
         sites = _submission_sites(f"preamble\n```{tag}\nanswer['ready'] = True\n```")
-        assert sites == [{"placement": "fence", "tag": tag, "executable": True}]
+        assert sites == [{
+            "placement": "fence", "tag": tag, "executable": True, "in_text": None,
+        }]
 
     def test_other_tags_are_marked_unexecutable(self):
         sites = _submission_sites("```bash\necho \"answer['ready'] = True\"\n```")
@@ -736,6 +740,94 @@ class TestSubmissionSiteDetection:
             "```repl\nanswer['ready'] = True\n```"
         )
         assert [s["placement"] for s in sites] == ["prose", "fence"]
+
+
+class TestQuotedSubmissionText:
+    """A live trajectory (`Qwen3.5-2B-Instruct`, 2026-09-11) showed a small model
+    writing the submission *as text*: the ready-line regex matches, the
+    interpreter only prints it, and the class "the line was not reached" would be
+    the wrong explanation. `_text_kind_at` tells the two apart."""
+
+    @pytest.mark.parametrize(
+        "block,kind",
+        [
+            # real statements
+            ("answer['ready'] = True", None),
+            ("answer['content'] = 'x'\nanswer['ready'] = True", None),
+            ("answer['content'] = \"it's fine\"\nanswer['ready'] = True", None),
+            # text, not code
+            ("print(\"answer['ready'] = True\")", "string"),
+            ("s = 'answer[\\'ready\\'] = True'", "string"),
+            ("s = '''answer['ready'] = True'''", "string"),
+            ("# answer['ready'] = True", "comment"),
+            ("print('ok')  # answer['ready'] = True", "comment"),
+        ],
+    )
+    def test_placement_within_a_block(self, block, kind):
+        offset = block.index("answer[")
+        assert _text_kind_at(block, offset) == kind
+
+    def test_a_closed_string_does_not_poison_what_follows(self):
+        block = "label = 'submission'\nanswer['ready'] = True"
+        assert _text_kind_at(block, block.index("answer[")) is None
+
+    def test_an_escaped_quote_does_not_end_the_string_early(self):
+        block = "s = 'it\\'s answer[\\'ready\\'] = True'"
+        assert _text_kind_at(block, block.index("answer[")) == "string"
+
+    def test_a_fenced_print_of_the_line_is_diagnosed_as_text(self):
+        message = _assistant(
+            "```repl\nprint(\"answer['ready'] = True\")\n```", turn=5
+        )
+        diagnostic = _diagnose_missing_submission([message], [_repl(5)])
+        assert diagnostic["code"] == DIAG_TEXT_NOT_CODE
+        assert "not as a statement" in diagnostic["detail"]
+        assert "turn 5" in diagnostic["detail"]
+
+    def test_a_commented_out_line_is_diagnosed_as_text(self):
+        message = _assistant(
+            "```repl\nanswer['content'] = 'x'\n# answer['ready'] = True\n```",
+            turn=6,
+        )
+        diagnostic = _diagnose_missing_submission([message], [_repl(6)])
+        assert diagnostic["code"] == DIAG_TEXT_NOT_CODE
+        assert "comment" in diagnostic["detail"]
+
+    def test_text_outranks_a_traceback_in_the_same_cell(self):
+        """The line never being a statement is the actionable fact.
+
+        A raise elsewhere in the cell does not change that, and reporting the
+        traceback would send the reader looking in the wrong place.
+        """
+        message = _assistant(
+            "```repl\nprint(\"answer['ready'] = True\")\nraise RuntimeError('x')\n```",
+            turn=7,
+        )
+        diagnostic = _diagnose_missing_submission(
+            [message], [_repl(7, stderr="RuntimeError: x")]
+        )
+        assert diagnostic["code"] == DIAG_TEXT_NOT_CODE
+
+    def test_a_real_statement_still_gets_the_runtime_diagnosis(self):
+        """The new check must not swallow the ordinary cases."""
+        message = _assistant("```repl\nanswer['ready'] = True\n```", turn=8)
+        assert _diagnose_missing_submission(
+            [message], [_repl(8, stderr="NameError: name 'answer' is not defined")]
+        )["code"] == DIAG_BLOCK_RAISED
+        assert _diagnose_missing_submission([message], [_repl(8)])["code"] == DIAG_NOT_REACHED
+
+    def test_prose_apostrophes_cannot_poison_a_block_scan(self):
+        """`_text_kind_at` runs over the block body, never the whole message.
+
+        Scanning a whole message would open a string at the first prose
+        apostrophe ("Earth's") and mislabel every later block as text.
+        """
+        message = _assistant(
+            "The ocean is Earth's largest.\n\n```repl\nanswer['ready'] = True\n```",
+            turn=9,
+        )
+        diagnostic = _diagnose_missing_submission([message], [_repl(9)])
+        assert diagnostic["code"] == DIAG_NOT_REACHED
 
 
 class TestP4SubmissionDiagnostics:

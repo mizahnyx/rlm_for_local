@@ -1684,7 +1684,7 @@ the search returns no results and the CLI tells you to rebuild it.
 
 ### 16.1 Test Suite Structure
 
-756 tests collected; 12 marked `slow` (real-model integration + load corpus).
+771 tests collected; 12 marked `slow` (real-model integration + load corpus).
 
 ```
 tests/
@@ -1842,10 +1842,16 @@ outranks a stray prose mention:
 
 | Code | Meaning |
 |---|---|
-| `submission_block_raised` | The line sits in an executed block whose cell raised (the traceback's last line is quoted). |
-| `submission_not_reached_at_runtime` | The block ran clean and never reached the line — a conditional, a loop, or `answer` rebound to a non-dict. |
+| `submission_block_raised` | The line is in an executed block whose cell raised (the traceback's last line is quoted). |
+| `submission_not_reached_at_runtime` | The line is a real statement in a block that ran clean and never reached it — a conditional, a loop, a rebound `answer`, or an earlier block in the same turn that ended the turn first. |
+| `submission_text_is_quoted_or_commented` | The line is *text* inside the block — in a string literal (`print("answer['ready'] = True")`) or after a `#`. The regex matches it, the interpreter never runs it as a statement. Observed live in `Qwen3.5-2B-Instruct`. |
 | `submission_text_in_unexecutable_fence` | The line is inside a fence tag the parser does not execute (only `repl`, `python` and untagged fences run). |
 | `submission_text_outside_fence` | The line is prose; the parser extracts only fenced blocks. |
+
+Precedence is by evidence quality: an executed block outranks a stray prose
+mention of the same line, and within an executed block the text/code verdict
+outranks a traceback elsewhere in the cell — the line never being a statement is
+the actionable fact.
 
 The score is unchanged by the diagnostic: a model that did not submit scores 0,
 now with a reason.

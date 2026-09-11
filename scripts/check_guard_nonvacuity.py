@@ -408,6 +408,36 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_raised_block_is_reported_with_the_exception",
         ],
     ),
+    (
+        "R26 the string/comment lexer stops distinguishing text from code",
+        "src/rlm_local/model_check.py",
+        "    if state == \"comment\":\n"
+        "        return \"comment\"\n"
+        "    if state in (\"string\", \"triple\"):\n"
+        "        return \"string\"\n"
+        "    return None",
+        "    return None",
+        [
+            "tests/test_model_check.py::TestQuotedSubmissionText"
+            "::test_placement_within_a_block",
+            "tests/test_model_check.py::TestQuotedSubmissionText"
+            "::test_a_fenced_print_of_the_line_is_diagnosed_as_text",
+            "tests/test_model_check.py::TestQuotedSubmissionText"
+            "::test_a_commented_out_line_is_diagnosed_as_text",
+        ],
+    ),
+    (
+        "R26 the text/code verdict is computed but never recorded on a site",
+        "src/rlm_local/model_check.py",
+        "                    \"in_text\": _text_kind_at(body, match.start() - region[\"body_start\"]),",
+        "                    \"in_text\": None,",
+        [
+            "tests/test_model_check.py::TestQuotedSubmissionText"
+            "::test_a_fenced_print_of_the_line_is_diagnosed_as_text",
+            "tests/test_model_check.py::TestQuotedSubmissionText"
+            "::test_text_outranks_a_traceback_in_the_same_cell",
+        ],
+    ),
     # ── R27: battery weighting (2026-09-11 assessment §3.1, §6) ────────────
     (
         "R27 the default battery reverts to the saturated P1-heavy weights",

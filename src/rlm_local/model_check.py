@@ -453,8 +453,73 @@ _EXECUTABLE_FENCE_TAGS = frozenset({"", "repl", "python"})
 
 DIAG_PROSE = "submission_text_outside_fence"
 DIAG_UNEXECUTABLE_TAG = "submission_text_in_unexecutable_fence"
+DIAG_TEXT_NOT_CODE = "submission_text_is_quoted_or_commented"
 DIAG_BLOCK_RAISED = "submission_block_raised"
 DIAG_NOT_REACHED = "submission_not_reached_at_runtime"
+
+
+def _text_kind_at(block: str, offset: int) -> str | None:
+    """Is ``offset`` inside a Python string literal or a comment?
+
+    Returns ``"string"``, ``"comment"``, or ``None`` for real code.
+
+    Best-effort lexer, not a parser: it walks the cell tracking quote state
+    (single, double, triple, with backslash escapes) and ``#`` comments. It
+    exists because of what a live trajectory showed — a small model writing the
+    submission *as text* (``print("answer['ready'] = True")``), which the
+    ready-line regex matches while the interpreter only prints it. Nothing
+    submits, no traceback appears, and "the line was not reached at runtime"
+    would then be the wrong explanation for the right class.
+
+    It must be run over the *block body*, never over a whole message: prose
+    apostrophes would open a string that never closes and poison everything
+    after them.
+    """
+    state = "code"
+    quote = ""
+    i = 0
+    while i < offset and i < len(block):
+        ch = block[i]
+        if state == "comment":
+            if ch == "\n":
+                state = "code"
+            i += 1
+            continue
+        if state == "triple":
+            if block.startswith(quote * 3, i):
+                state = "code"
+                i += 3
+                continue
+            i += 1
+            continue
+        if state == "string":
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                state = "code"
+            i += 1
+            continue
+        # state == "code"
+        if ch == "#":
+            state = "comment"
+            i += 1
+            continue
+        if ch in "\"'":
+            if block.startswith(ch * 3, i):
+                state, quote = "triple", ch
+                i += 3
+            else:
+                state, quote = "string", ch
+                i += 1
+            continue
+        i += 1
+
+    if state == "comment":
+        return "comment"
+    if state in ("string", "triple"):
+        return "string"
+    return None
 
 
 def _fence_regions(text: str) -> list[dict[str, Any]]:
@@ -502,8 +567,9 @@ def _submission_sites(text: str) -> list[dict[str, Any]]:
     """Locate every ``answer['ready'] = True`` occurrence in one message.
 
     Each site records where the line sits: ``prose`` when no fence region
-    contains it, otherwise ``fence`` with the tag and whether the parser would
-    execute that tag.
+    contains it, otherwise ``fence`` with the tag, whether the parser would
+    execute that tag, and — for a fenced site — whether the occurrence is real
+    code or merely text inside a string/comment in that block.
     """
     regions = _fence_regions(text)
     sites: list[dict[str, Any]] = []
@@ -512,13 +578,16 @@ def _submission_sites(text: str) -> list[dict[str, Any]]:
             "placement": "prose",
             "tag": None,
             "executable": False,
+            "in_text": None,
         }
         for region in regions:
             if region["body_start"] <= match.start() < region["body_end"]:
+                body = text[region["body_start"]:region["body_end"]]
                 site = {
                     "placement": "fence",
                     "tag": region["tag"],
                     "executable": region["tag"] in _EXECUTABLE_FENCE_TAGS,
+                    "in_text": _text_kind_at(body, match.start() - region["body_start"]),
                 }
                 break
         sites.append(site)
@@ -541,11 +610,18 @@ def _diagnose_missing_submission(
     the line in an executable block does the placement itself become the
     explanation:
 
-    1. text in an executed block whose cell raised a traceback;
-    2. text in an executed block that ran clean and still did not submit — the
-       line was not reached (a conditional, a loop, or a rebound ``answer``);
-    3. text inside a tag the parser never executes (``json``, ``bash``, …);
-    4. text outside every fence, which the parser never extracts at all.
+    1. an executed block in which the line is *text*, not code — inside a string
+       literal or after a ``#`` (the interpreter never sees it as a statement);
+    2. an executed block whose cell raised a traceback;
+    3. an executed block that ran clean and still did not submit — the line was
+       not reached at runtime (a conditional, a loop, a rebound ``answer``, or an
+       earlier block in the same turn that ended the turn first);
+    4. text inside a tag the parser never executes (``json``, ``bash``, …);
+    5. text outside every fence, which the parser never extracts at all.
+
+    (1) outranks (2) deliberately: a traceback elsewhere in the cell does not
+    change the fact that *this* line was never a statement, and that fact is the
+    actionable one.
     """
     candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for message in assistants:
@@ -562,6 +638,23 @@ def _diagnose_missing_submission(
         )
 
     executed = [c for c in candidates if c[1]["executable"]]
+
+    quoted = [c for c in executed if c[1]["in_text"]]
+    if quoted:
+        kinds = sorted({str(c[1]["in_text"]) for c in quoted})
+        rendered = " and ".join(kinds)
+        return {
+            "code": DIAG_TEXT_NOT_CODE,
+            "detail": (
+                f"submission line sits inside a {rendered} in an executed block "
+                f"(turn {_turns([m for m, _ in quoted])}), not as a statement — "
+                "the interpreter never runs it as code, so `answer['ready']` is "
+                "still False when the cell ends and P4 sees submission text with "
+                "no submission. The model is describing the submission instead "
+                "of performing it."
+            ),
+        }
+
     for message, _site in executed:
         turn = message.get("turn")
         for entry in repl_entries:
@@ -584,11 +677,13 @@ def _diagnose_missing_submission(
         return {
             "code": DIAG_NOT_REACHED,
             "detail": (
-                "submission line sits in an executed block (turn "
+                "submission line is a real statement in an executed block (turn "
                 f"{_turns([m for m, _ in executed])}) that produced no traceback "
-                "and no submission — the line was not reached at runtime (a "
-                "conditional, a loop, or `answer` rebound to something that is "
-                "not a dict)."
+                "and no submission — it was not reached at runtime. The harness "
+                "cannot tell which of these it was: a conditional or loop body "
+                "that did not run, `answer` rebound to something that is not a "
+                "dict, or an earlier block in the same turn that ended the turn "
+                "first."
             ),
         }
 

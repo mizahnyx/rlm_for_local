@@ -117,6 +117,15 @@ executes and must not be blamed on placement.
 comes with a reason. Any change to P4's score semantics would be an owner
 decision (the same posture as P3's documented weaknesses).
 
+**Added later the same day (2026-09-11 13:59):** a fifth code,
+`submission_text_is_quoted_or_commented` — the line is text inside a string
+literal or after a `#`, which the regex matches and the interpreter never runs as
+a statement. A live confirmation run
+(`20260911-1359-p4-live-confirmation.md`) found this model writing code *as text*
+elsewhere in the same battery, which the four codes above would have reported
+under the wrong explanation. That verdict now outranks a traceback in the same
+cell.
+
 **Evidence.** `ProseSubmissionStub` is not a mock: it drives the real completion
 loop, the real parser, a real REPL subprocess and the real trajectory logger,
 and the assertion is on the diagnostic the probe attaches. What is *not* claimed:
@@ -193,7 +202,9 @@ silently skipped by the `-k` form as well.
 ## 5. Guard non-vacuity
 
 Eleven mutations were added to `scripts/check_guard_nonvacuity.py`; all eleven
-went red as required (`41 mutations total`, every target present exactly once):
+went red as required (`41 mutations total`, every target present exactly once).
+Two more were added later the same day with the text/code check, bringing the
+table to **43 mutations** (see `20260911-1359-p4-live-confirmation.md` §4).
 
 | Mutation | Guard it proves |
 |---|---|
@@ -208,6 +219,8 @@ went red as required (`41 mutations total`, every target present exactly once):
 | R28 `Origin: null` is treated as claiming no origin | The fail-closed distinction. |
 | R28 the allowlist implicitly trusts this server | The DNS-rebinding property. |
 | R28 strict mode accepts a request that claims no origin | The `strict` mode's whole purpose. |
+| R26 the string/comment lexer stops distinguishing text from code *(added 13:59)* | The lexer, not just its wiring. |
+| R26 the text/code verdict is computed but never recorded on a site *(added 13:59)* | The wiring from lexer to diagnostic. |
 
 ## 6. What remains open
 
@@ -218,6 +231,11 @@ went red as required (`41 mutations total`, every target present exactly once):
   scale — 60/100 under `p1-heavy` becomes ≈47 under `default`, i.e. NOT
   SUITABLE rather than MARGINAL, which is a verdict change worth seeing on the
   record rather than calculating.
+  **Closed later the same day:** `20260911-1359-p4-live-confirmation.md` — the
+  run returned 46.7/NOT SUITABLE (predicted 46.7, same per-probe outcome), the
+  diagnostic fired on the contradiction, and the follow-up investigation found
+  that this model's P4 is not stable across runs, so it added
+  `submission_text_is_quoted_or_commented`.
 - **P3's scoring weaknesses** stay documented, not fixed (validation §7,
   local manual §16.4): "no stderr ⇒ full credit" and a non-time-ordered recovery
   scan. Tightening them is an owner decision.

@@ -47,6 +47,7 @@ for the `rlm-kernel` implementation against its specification
 | 2026-09-10 07:30 | `20260910-0730-remediation-validation.md` | **This cycle's validation** — waves 0–4 enacted, 641 tests green, 30/30 guards proven non-vacuous, LIVE needle + load gate + `rlm check` recorded, deviations stated |
 | 2026-09-11 00:50 | `20260911-0050-router-model-assessment.md` | Router model sweep — stage-1 protocol screen, stage-2 suitability verdicts (five models scored 100/100 besides the baseline), the P1-saturation finding, host tuning note |
 | 2026-09-11 12:19 | `20260911-1219-assessment-follow-ups-hardening.md` | That assessment's follow-ups enacted: cross-origin (CSRF) check on every state-changing route, a real P4 disagreement diagnostic, battery reweighting off the saturated probe |
+| 2026-09-11 13:59 | `20260911-1359-p4-live-confirmation.md` | Live confirmation of that diagnostic on the model it came from: 46.7/NOT SUITABLE (predicted), the contradiction reproduced, and the finding that P4 is single-trial — one probe run swings this model's verdict a full band |
 
 ## Status
 
@@ -82,6 +83,10 @@ disagreement diagnostic, the battery reweight — are enacted in
 listed in §6 of that hardening report
 (`20260911-1219-assessment-follow-ups-hardening.md`) rather than implied: P3's
 scoring weaknesses, the `--screen` triage that is not a gate, the two models
-skipped after failing it, the host-side `max_instances` risk, and the one thing
-not verified live — that the P4 diagnostic names the right cause for the model
-whose contradiction motivated it.
+skipped after failing it, and the host-side `max_instances` risk.
+
+The one item that *was* verified live — the P4 diagnostic, on the model whose
+contradiction motivated it — is recorded in
+`20260911-1359-p4-live-confirmation.md`, including what it turned up beyond the
+confirmation: the verdict moved as predicted, and P4's single-trial sampling
+means one probe run can swing a model's verdict a full band.
