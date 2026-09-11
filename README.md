@@ -231,7 +231,7 @@ uv run pytest tests/ -k "not slow and not load" -q
 uv run pytest tests/ -q
 ```
 
-655 tests collected: 12 marked `slow` (real llama-server integration + load),
+669 tests collected: 12 marked `slow` (real llama-server integration + load),
 5 of those also marked `load` (corpus benchmarks). The integration tests read
 `RLM_TEST_ENDPOINT` / `RLM_TEST_MODEL` and skip when the endpoint is
 unreachable, defaulting to the configured model in `src/rlm_local/config.py`.

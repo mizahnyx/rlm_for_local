@@ -19,7 +19,7 @@ target, reached remotely.
 
 | Claim | Result |
 |---|---|
-| Fast suite green at ≥271 tests | **643 passed, 12 deselected** (655 collected) — floor 271 exceeded, `0 failed` |
+| Fast suite green at ≥271 tests | **657 passed, 12 deselected** (669 collected) — floor 271 exceeded, `0 failed` |
 | Every guard test proven non-vacuous | **30 of 30** guard mutations went red when the guard was removed |
 | No new harness strings outside `templates.py` | enforced by `tests/test_templates.py::TestTemplateDiscipline` (fails on any unreferenced constant) |
 | Manuals updated in the same change | yes — see §6 |
@@ -130,10 +130,10 @@ R11–R14 were implemented by a delegated agent working only in `src/rlm_kernel/
 
 ```
 $ .venv/Scripts/python.exe -m pytest tests/ -k "not slow" -p no:cacheprovider -q
-643 passed, 12 deselected, 2 warnings in 245.70s (0:04:05)
+657 passed, 12 deselected, 2 warnings in 260.97s (0:04:20)
 ```
 
-`655 tests collected`; 12 are marked `slow` (real-model integration and the
+`669 tests collected`; 12 are marked `slow` (real-model integration and the
 load-gate corpus benchmarks) and 5 of those also carry the new `load` marker, so
 the README's documented `-k "not slow and not load"` command now means what it
 says.
