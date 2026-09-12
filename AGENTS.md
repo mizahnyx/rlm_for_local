@@ -34,6 +34,28 @@ exist, written down in one place so they stop being re-derived per session.
    record the item in the roadmap's ledger as `owner call`.
 7. **A score means nothing without its scale.** Any reported model verdict states
    the weight profile, the sampling, and the host state it came from.
+8. **The source corpus is read-only — enforced, not intended.** Every operation
+   over the big file corpus (mounting, crawling, extracting, indexing, answering,
+   wiki generation) must be strictly non-mutating. Because model-authored REPL
+   cells run as the harness user with no `open` jail (DG2/DG10), *our code cannot
+   be the boundary*: the boundary is the mount, and our code is defence in depth.
+   The three layers, in order of authority:
+
+   | Layer | Mechanism | What it actually guarantees |
+   |---|---|---|
+   | 1. OS / mount | Read-only bind mount (`mount -o remount,ro,bind`), a drive mounted `ro`, a read-only NFS/SMB export, `borg`/`restic mount`, or a dedicated user with no write access to the tree | The only real guarantee. Holds even against a model cell calling `os.remove`. |
+   | 2. Mount layer in code | A provider protocol with **no write verbs at all** (`list`/`stat`/`read` only), reads via `os.open(..., O_RDONLY)`, path containment + symlink-escape refusal | Removes the accident: no ingest code path *can* write, and none can be asked to. |
+   | 3. Derived state elsewhere | Index, CAS, vault, checkpoints and logs live under a separate root, asserted at startup to be **outside** the corpus root (fail hard if it is inside) | Stops the one mistake that would silently write into the backup. |
+
+   And it must be *proved*, not asserted: a pre/post manifest check (paths, sizes,
+   mtimes, and hashes of a sample), a `find <corpus> -newer <marker>` scan that
+   must come back empty after a run, and a recorded `mount` line showing `ro`.
+   Note for that scan: reading updates **atime**, not mtime — compare mtime
+   (`find -newer` does) or mount `noatime`, otherwise every check reports a
+   false positive. Streaming is part of the constraint: the corpus is never
+   copied into the vault, and no code path may materialize a whole directory into
+   memory (`--context-dir` does exactly that today and is unusable at corpus
+   scale).
 
 ## 2. Commands
 
