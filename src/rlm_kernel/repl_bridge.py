@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import Any
 
 from rlm_kernel.schema import HelperDef, PageKind
+# The message the worker and this bridge must agree on word for word (CL3): the
+# worker asks for a search and prints whatever the harness returns, so the
+# "nothing found" text is one constant, not two copies.
+from rlm_local.templates import WORKER_SEARCH_NO_RESULTS
 
 
 @dataclass
@@ -64,17 +68,40 @@ class KernelBridge:
             pass
         return defs
 
-    def get_helper_summaries(self) -> list[str]:
-        """Get one-line summaries of active helpers for prompt assembly."""
+    def get_helper_summaries(self, limit: int = 30) -> list[str]:
+        """One-line summaries of active helpers, for prompt assembly (DG9).
+
+        This was a dead method — a test called it, nothing else did — while
+        `prompts.load_system_prompt_from_vault` built the same section itself,
+        including an index-backed path. The assembly now calls this instead, so
+        the "which helpers does the model see" rule lives in one place:
+
+        * active pages only — a demoted helper stops being advertised;
+        * the SQL index when it exists, a vault walk when it does not;
+        * capped, because the prompt's helper section is progressive disclosure
+          and a vault with hundreds of helpers must not crowd out the contract.
+        """
+        lines: list[str] = []
         try:
-            helpers = self.vault.list(kind="helper")
+            if self.index_path.exists():
+                from rlm_kernel.index import Index
+
+                idx = Index(self.index_path)
+                try:
+                    paths = idx.list_paths(kind="helper", status="active")
+                finally:
+                    idx.close()
+                pages = [self.vault.get(path) for path in paths]
+                pages = [p for p in pages if p is not None]
+            else:
+                pages = [
+                    p for p in self.vault.list(kind="helper")
+                    if p.frontmatter.status.value == "active"
+                ]
         except Exception:
             return []
 
-        lines: list[str] = []
-        for page in helpers:
-            if page.frontmatter.status.value != "active":
-                continue
+        for page in pages[:limit]:
             lines.append(f"  {page.name}: {page.frontmatter.summary}")
         return lines
 
@@ -96,7 +123,7 @@ class KernelBridge:
             return f"Error: search failed: {e}"
 
         if not results:
-            return "(no results)"
+            return WORKER_SEARCH_NO_RESULTS
 
         lines: list[str] = []
         for i, r in enumerate(results):

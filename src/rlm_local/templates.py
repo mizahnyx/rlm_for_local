@@ -122,3 +122,24 @@ REPL_WORKER_RESTARTED = (
     "All REPL variables (including any partial results) were lost."
 )
 
+# ---------------------------------------------------------------------------
+# Worker-side messages (R4.1, CL3)
+# ---------------------------------------------------------------------------
+# These are emitted by the sandboxed worker program, which is a string in
+# `repl.py`; they are defined here and injected into that program so the
+# harness's message layer has one home. Two of them are also emitted on the
+# harness side of the same protocol (`search`, `propose`), where the worker and
+# `repl_bridge` must agree word for word.
+
+WORKER_INVALID_REGEX = "Error: invalid regex: {error}"
+WORKER_NO_HARNESS_RESPONSE = "Error: no response from harness"
+WORKER_SEARCH_NO_RESULTS = "(no results)"
+WORKER_PROPOSE_FAILED = "Error: propose failed"
+
+WORKER_MESSAGES: dict[str, str] = {
+    "invalid_regex": WORKER_INVALID_REGEX,
+    "no_harness_response": WORKER_NO_HARNESS_RESPONSE,
+    "search_no_results": WORKER_SEARCH_NO_RESULTS,
+    "propose_failed": WORKER_PROPOSE_FAILED,
+}
+

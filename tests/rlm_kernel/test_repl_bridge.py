@@ -116,6 +116,48 @@ class TestHelperDefinitions:
         assert all(line.startswith("  ") and ":" in line for line in lines)
         assert not any("old-helper" in line for line in lines)
 
+    def test_helper_summaries_are_capped(self, seeded_bridge):
+        """Progressive disclosure: the helper section must not crowd out the contract."""
+        bridge, vault, idx_path = seeded_bridge
+        for i in range(40):
+            _add_helper(vault, f"extra-helper-{i}")
+        rebuild_index(vault, idx_path).close()
+
+        assert len(bridge.get_helper_summaries(limit=5)) == 5
+        assert len(bridge.get_helper_summaries()) == 30
+
+    def test_helper_summaries_use_the_index_when_one_exists(
+        self, seeded_bridge, monkeypatch
+    ):
+        """The index-backed path is what keeps a large vault off the hot path (C1).
+
+        Asserted by making the vault walk fail: if the summaries still come back,
+        they did not come from walking the vault.
+        """
+        bridge, _, _ = seeded_bridge
+
+        def _no_walk(*args, **kwargs):
+            raise AssertionError("vault.list() used despite an index existing")
+
+        monkeypatch.setattr(bridge.vault, "list", _no_walk)
+
+        lines = bridge.get_helper_summaries()
+
+        assert len(lines) == len(HELPER_NAMES)
+
+    def test_helper_summaries_fall_back_to_the_walk_without_an_index(self, temp_vault):
+        """No index yet (a fresh vault) still advertises its helpers."""
+        from rlm_kernel.repl_bridge import KernelBridge
+
+        vault = LocalVault(temp_vault, init_git=False)
+        for name in ("alpha", "beta"):
+            _add_helper(vault, name)
+        bridge = KernelBridge(vault=vault, index_path=temp_vault / ".index" / "meta.sqlite")
+
+        lines = bridge.get_helper_summaries()
+
+        assert [line.split(":")[0].strip() for line in lines] == ["alpha", "beta"]
+
 
 class TestSearchProxy:
     def test_search_returns_numbered_lines(self, seeded_bridge):
@@ -130,7 +172,11 @@ class TestSearchProxy:
     def test_search_without_match_reports_no_results(self, seeded_bridge):
         bridge, _, _ = seeded_bridge
 
-        assert bridge.handle_search("xyzzynotpresent") == "(no results)"
+        # Compared against the shared constant, not a literal: the worker and the
+        # bridge are two sides of one protocol and the text must be one string.
+        from rlm_local.templates import WORKER_SEARCH_NO_RESULTS
+
+        assert bridge.handle_search("xyzzynotpresent") == WORKER_SEARCH_NO_RESULTS
 
     def test_search_detail_full_includes_body(self, seeded_bridge):
         bridge, _, _ = seeded_bridge

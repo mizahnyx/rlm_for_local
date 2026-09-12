@@ -176,17 +176,19 @@ class TestTemplates:
 # ── R8 — vault few-shots must actually reach the prompt ────────────────────
 
 class _FakeFrontmatter:
-    def __init__(self, status="active"):
+    def __init__(self, status="active", summary="A one-line summary."):
         self.status = type("S", (), {"value": status})()
+        self.summary = summary
 
 
 class _FakePage:
-    def __init__(self, body, kind="fewshot", status="active", path="fewshot/x.md"):
+    def __init__(self, body, kind="fewshot", status="active", path="fewshot/x.md",
+                 name=None):
         self.body = body
         self.kind = type("K", (), {"value": kind})()
         self.frontmatter = _FakeFrontmatter(status)
         self.path = path
-        self.name = path.rsplit("/", 1)[-1].removesuffix(".md")
+        self.name = name or path.rsplit("/", 1)[-1].removesuffix(".md")
 
 
 class _FakeVault:
@@ -197,6 +199,22 @@ class _FakeVault:
         if kind is None:
             return list(self._pages)
         return [p for p in self._pages if p.kind.value == kind]
+
+    def get(self, path):
+        """No contract pages in these fixtures: the prompt falls back to the
+        packaged SYSTEM_PROMPT and appends the helper section under test."""
+        return None
+
+
+#: The prompt_vars every prompt-assembly path needs (see Profile.prompt_vars).
+_PROMPT_VARS = {
+    "repl_cap": 2000,
+    "sub_budget": 8000,
+    "max_turns": 12,
+    "example_chunking_idiom": "chunk()",
+    "root_ctx_size": 8192,
+    "sub_ctx_size": 8192,
+}
 
 
 QUERY_ANSWER_BODY = """\
@@ -224,6 +242,64 @@ answer['content'] = hits[0]
 answer['ready'] = True
 ```
 """
+
+
+class TestHelperSectionSourceOfTruth:
+    """DG9 — the prompt's helper section has one source.
+
+    `KernelBridge.get_helper_summaries` had no production caller while
+    `load_system_prompt_from_vault` built the same section itself (including the
+    index-backed path), so the "which helpers does the model see" rule existed
+    twice and only one copy was exercised.
+    """
+
+    def test_the_prompt_asks_the_bridge_for_helper_lines(self):
+        from rlm_local.prompts import load_system_prompt_from_vault
+
+        class _Bridge:
+            index_path = None  # the bridge decides how to list; the caller does not
+
+            def get_helper_summaries(self, limit: int = 30):
+                return ["  sentinel: from the bridge"]
+
+        prompt = load_system_prompt_from_vault(
+            _PROMPT_VARS, vault=_FakeVault([]), bridge=_Bridge(),
+        )
+
+        assert "Available helpers:" in prompt
+        assert "  sentinel: from the bridge" in prompt
+
+    def test_without_a_bridge_the_vault_is_walked(self):
+        from rlm_local.prompts import load_system_prompt_from_vault
+
+        helper = _FakePage(
+            "## Signature\n```python\ndef widget():\n```\n\n"
+            "## Implementation\n```python\ndef widget():\n    return 1\n```\n",
+            kind="helper",
+            name="widget",
+            path="helper/widget.md",
+        )
+        prompt = load_system_prompt_from_vault(_PROMPT_VARS, vault=_FakeVault([helper]))
+
+        assert "  widget:" in prompt
+
+    def test_the_vault_walk_keeps_the_cap(self):
+        """The no-bridge path caps its own list, like the bridge path does."""
+        from rlm_local.prompts import load_system_prompt_from_vault
+
+        helpers = [
+            _FakePage(
+                "## Signature\n```python\ndef h():\n```\n\n"
+                "## Implementation\n```python\ndef h():\n    return 1\n```\n",
+                kind="helper",
+                name=f"helper-{i:03d}",
+                path=f"helper/helper-{i:03d}.md",
+            )
+            for i in range(40)
+        ]
+        prompt = load_system_prompt_from_vault(_PROMPT_VARS, vault=_FakeVault(helpers))
+
+        assert prompt.count("  helper-") == 30
 
 
 class TestVaultFewShots:

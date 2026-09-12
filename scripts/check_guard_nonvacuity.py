@@ -775,6 +775,95 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_status_widens_the_search_to_the_history",
         ],
     ),
+    # ── DG8/DG9: inert and dead code (roadmap item 9) ─────────────────────
+    (
+        "DG9 the helper summaries ignore their cap",
+        "src/rlm_kernel/repl_bridge.py",
+        "        for page in pages[:limit]:",
+        "        for page in pages:",
+        [
+            "tests/rlm_kernel/test_repl_bridge.py::TestHelperDefinitions"
+            "::test_helper_summaries_are_capped",
+        ],
+    ),
+    (
+        "DG9 the helper summaries always walk the vault",
+        "src/rlm_kernel/repl_bridge.py",
+        "        lines: list[str] = []\n"
+        "        try:\n"
+        "            if self.index_path.exists():",
+        "        lines: list[str] = []\n"
+        "        try:\n"
+        "            if False:",
+        [
+            "tests/rlm_kernel/test_repl_bridge.py::TestHelperDefinitions"
+            "::test_helper_summaries_use_the_index_when_one_exists",
+        ],
+    ),
+    (
+        "DG9 the prompt builds the helper section itself again",
+        "src/rlm_local/prompts.py",
+        "        if bridge is not None:\n            helper_lines = bridge.get_helper_summaries()",
+        "        if False:\n            helper_lines = bridge.get_helper_summaries()",
+        [
+            "tests/test_prompts.py::TestHelperSectionSourceOfTruth"
+            "::test_the_prompt_asks_the_bridge_for_helper_lines",
+        ],
+    ),
+    # ── CL3: the worker's messages come from templates.py (roadmap item 10) ─
+    (
+        "CL3 the worker carries its own copies of the harness messages",
+        "src/rlm_local/repl.py",
+        "    \"_MSG = \" + json.dumps(WORKER_MESSAGES) + \"\\n\\n\"",
+        "    \"_MSG = \" + json.dumps({\n"
+        "        \"invalid_regex\": \"Error: invalid regex: {error}\",\n"
+        "        \"no_harness_response\": \"Error: no response from harness\",\n"
+        "        \"search_no_results\": \"(no results)\",\n"
+        "        \"propose_failed\": \"Error: propose failed\",\n"
+        "    }) + \"\\n\\n\"",
+        [
+            "tests/test_templates.py::TestNoInlineHarnessStrings"
+            "::test_pattern_absent_from_src",
+            "tests/test_templates.py::TestTemplateDiscipline::test_no_dead_templates",
+        ],
+    ),
+    (
+        "CL3 the bridge stops using the shared no-results message",
+        "src/rlm_kernel/repl_bridge.py",
+        "        if not results:\n            return WORKER_SEARCH_NO_RESULTS",
+        "        if not results:\n            return \"no results\"",
+        [
+            "tests/rlm_kernel/test_repl_bridge.py::TestSearchProxy"
+            "::test_search_without_match_reports_no_results",
+        ],
+    ),
+    # ── CL4: slot-subset validation at the gate (roadmap item 11) ─────────
+    (
+        "CL4 unknown slots are accepted again",
+        "src/rlm_kernel/gate.py",
+        "    unknown = sorted(set(slots) - known)",
+        "    unknown = []",
+        [
+            "tests/rlm_kernel/test_gate.py::TestSlotSubsetValidation"
+            "::test_a_formatted_contract_with_an_unknown_slot_is_rejected",
+            "tests/rlm_kernel/test_gate.py::TestSlotSubsetValidation"
+            "::test_promotion_refuses_the_page",
+        ],
+    ),
+    (
+        "CL4 every page is slot-checked, including the shipped templates",
+        "src/rlm_kernel/gate.py",
+        "    candidates = {page.path, f\"{page.frontmatter.kind.value}/{page.name}.md\"}\n"
+        "    if not (candidates & _formatted_contract_paths()):\n"
+        "        return",
+        "    if False:\n        return",
+        [
+            "tests/rlm_kernel/test_gate.py::TestSlotSubsetValidation"
+            "::test_a_template_page_with_its_own_slots_is_not_flagged",
+            "tests/rlm_kernel/test_gate.py::TestSlotSubsetValidation"
+            "::test_every_seeded_page_still_validates",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
@@ -809,9 +898,18 @@ def main() -> int:
             continue
         path = ROOT / rel
         original = path.read_text(encoding="utf-8")
-        if old not in original:
+        occurrences = original.count(old)
+        if occurrences == 0:
             print(f"SKIP  {label}: mutation target not found in {rel}")
             failures.append(f"{label} (target not found)")
+            continue
+        if occurrences > 1:
+            # An ambiguous target is worse than a missing one: `replace(..., 1)`
+            # would edit the first occurrence, which may be a different function
+            # entirely, and the guard would then look vacuous when it is fine.
+            print(f"SKIP  {label}: mutation target appears {occurrences}x in {rel} "
+                  "— add surrounding context to make it unique")
+            failures.append(f"{label} (ambiguous target, {occurrences} occurrences)")
             continue
 
         path.write_text(original.replace(old, new, 1), encoding="utf-8")

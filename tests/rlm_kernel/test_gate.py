@@ -367,6 +367,96 @@ class TestBodyLengthCapUnits:
         assert report.passed, report.errors
 
 
+class TestSlotSubsetValidation:
+    """CL4 — a slot the runtime cannot fill used to promote happily.
+
+    `validate` treated a page's slots as advisory: it warned about duplicates and
+    said nothing about names. A contract page that invented `{new_slot}` promoted,
+    then raised `KeyError` inside prompt assembly, where a broad `except` swallowed
+    it and used the packaged prompt — so the vault silently kept a page that could
+    never take effect.
+    """
+
+    @staticmethod
+    def _contract_page(name: str, body: str, kind=PageKind.CONTRACT) -> Page:
+        fm = Frontmatter(
+            schema=1, kind=kind, name=name, title="A contract",
+            summary="Contract under test.", status=PageStatus.PENDING,
+        )
+        return Page(frontmatter=fm, body=body, path=f"quarantine/{name}.md")
+
+    def test_a_formatted_contract_with_an_unknown_slot_is_rejected(self, temp_vault):
+        vault = LocalVault(temp_vault, init_git=False)
+        page = self._contract_page(
+            "repl-contract", "# Contract\n\nYou have {max_turns} turns and {new_slot}."
+        )
+
+        report = validate(page, vault=vault)
+
+        assert not report.passed
+        assert any("new_slot" in e for e in report.errors), report.errors
+
+    def test_known_slots_pass(self, temp_vault):
+        vault = LocalVault(temp_vault, init_git=False)
+        page = self._contract_page(
+            "repl-contract",
+            "# Contract\n\nCap {repl_cap}, budget {sub_budget}, "
+            "{max_turns} turns, idiom {example_chunking_idiom}.",
+        )
+
+        report = validate(page, vault=vault)
+
+        assert report.passed, report.errors
+
+    def test_a_template_page_with_its_own_slots_is_not_flagged(self, temp_vault):
+        """The false-positive guard, and the reason the check is scoped.
+
+        `contract/templates/*` pages carry `templates.py` slots (`{turn}`,
+        `{used}`, `{budget}`) that `prompt_vars` never fills, and their bodies are
+        appended verbatim. A global subset check would reject the pages the vault
+        ships with.
+        """
+        vault = LocalVault(temp_vault, init_git=False)
+        page = self._contract_page(
+            "turn-header", "Turn {turn}/{max_turns}.", kind=PageKind.TEMPLATE,
+        )
+
+        report = validate(page, vault=vault)
+
+        assert report.passed, report.errors
+
+    def test_every_seeded_page_still_validates(self, temp_vault):
+        """Control at the level that matters: the shipped vault is unaffected."""
+        from rlm_kernel.seed import seed_vault
+
+        vault = LocalVault(temp_vault, init_git=False)
+        seed_vault(vault)
+
+        offenders = []
+        for page in vault.list():
+            if page.kind.value not in ("contract", "template"):
+                continue
+            report = validate(page, vault=vault)
+            slot_errors = [e for e in report.errors if "slot variable" in e]
+            if slot_errors:
+                offenders.append((page.path, slot_errors))
+
+        assert offenders == [], offenders
+
+    def test_promotion_refuses_the_page(self, temp_vault):
+        """The check has to be at the gate, not in a report nobody reads."""
+        from rlm_kernel.gate import promote
+
+        vault = LocalVault(temp_vault, init_git=False)
+        page = self._contract_page("repl-contract", "# Contract\n\n{invented}")
+        vault.put(page, "quarantine/repl-contract.md")
+
+        stored = vault.get("quarantine/repl-contract.md")
+        with pytest.raises(Exception):
+            promote(vault, stored)
+        assert not vault.exists("contract/repl-contract.md")
+
+
 # ── ValidationReport ─────────────────────────────────────────────────────────
 
 class TestValidationReport:

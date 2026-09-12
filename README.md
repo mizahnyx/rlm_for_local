@@ -245,7 +245,7 @@ uv run pytest -m "not slow and not load" -q
 uv run pytest -q
 ```
 
-800 tests collected: 12 marked `slow` (real llama-server integration + load),
+872 tests collected: 12 marked `slow` (real llama-server integration + load),
 5 of those also marked `load` (corpus benchmarks). Select on the **markers**
 (`-m`), not on the names (`-k`): `-k` is a substring match, so `-k "not load"`
 also drops 20 tests that merely mention "load" in their name (`test_ingest_loads_file`,

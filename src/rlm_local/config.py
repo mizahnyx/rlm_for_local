@@ -37,7 +37,6 @@ class Profile:
     # Turn limits
     max_turns: int = 15
     max_concurrent_subcalls: int = 2
-    max_depth: int = 1
     cell_timeout: float = 60.0
 
     # Context store

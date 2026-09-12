@@ -1283,6 +1283,17 @@ The optimizer:
 
 **Target options**: `prologue`, `how-to-work`, `nudges`, `fewshots`, `helper-docs`.
 
+**Only two of the five can change behaviour today** (DG6). `how-to-work` is
+assembled into the system prompt and `helper-docs` supplies the helper one-liners
+and code injected into the REPL; `prologue`, `nudges` and `fewshots` are read by
+the runtime from `rlm_local.templates` constants, not from the vault, so a page
+under those targets is **introspection-only** — optimizing it produces a
+better-written page and no behavioural change. Vault-template loading was
+deliberately deferred (R3-D10), and wiring it is a feature project rather than a
+defect fix, so it is recorded in the roadmap ledger as DG6 instead of being
+implied to work. An optimization run against one of those three is not a failure;
+it is a measurement of nothing, which is why the target list says which is which.
+
 ### 9.4 Few-Shot Bootstrap
 
 ```python
@@ -1449,7 +1460,10 @@ rlm-kernel optimize --target how-to-work [--vault PATH]
 ```
 
 Runs GEPA optimization on the specified text artifact. Options:
-`prologue`, `how-to-work`, `nudges`, `fewshots`, `helper-docs`.
+`prologue`, `how-to-work`, `nudges`, `fewshots`, `helper-docs` — of which only
+`how-to-work` and `helper-docs` are live today (§9.3, DG6: the other three pages
+are introspection-only, since the runtime reads those texts from
+`rlm_local.templates`).
 
 ---
 

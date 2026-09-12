@@ -45,6 +45,7 @@ from rlm_local.templates import (
     CELL_STDOUT_TRUNCATED,
     CELL_TIMEOUT_ERROR,
     REPL_WORKER_RESTARTED,
+    WORKER_MESSAGES,
 )
 
 # ── Result envelope ────────────────────────────────────────────────────────
@@ -123,7 +124,15 @@ def _truncate_middle(text: str, cap: int) -> str:
 
 # ── REPL worker script (runs in subprocess) ────────────────────────────────
 
-_WORKER_SCRIPT = r"""
+# The worker's own messages come from `templates.py` (R4.1/CL3) and are injected
+# as a literal dict at the top of the program, so the harness's message layer has
+# one home instead of a second copy living inside the sandboxed worker.
+_WORKER_MESSAGE_HEADER = (
+    "# Harness messages (R4.1): defined in rlm_local.templates, injected here.\n"
+    "_MSG = " + json.dumps(WORKER_MESSAGES) + "\n\n"
+)
+
+_WORKER_SCRIPT = _WORKER_MESSAGE_HEADER + r"""
 import json, os, re, socket, struct, sys, traceback
 from io import StringIO
 
@@ -249,7 +258,7 @@ class _FileContext:
         try:
             regex = re.compile(pattern)
         except re.error as e:
-            return ['Error: invalid regex pattern: %s' % e]
+            return [_MSG['invalid_regex'].format(error=e)]
         hits = []
         with open(self._path, 'rb') as f:
             for raw in f:
@@ -310,23 +319,23 @@ def _decode_one(raw, offset):
 def _harness_llm_query(prompt, schema=None):
     _send({"cmd": "subcall", "prompt": prompt, "schema": schema, "cell_id": _cell_id})
     resp = _recv()
-    return resp.get("response", "Error: no response from harness")
+    return resp.get('response', _MSG['no_harness_response'])
 
 def _harness_llm_query_batched(prompts, schema=None):
     _send({"cmd": "subcall_batched", "prompts": prompts, "schema": schema, "cell_id": _cell_id})
     resp = _recv()
-    return resp.get("responses", ["Error: no response from harness"] * len(prompts))
+    return resp.get('responses', [_MSG['no_harness_response']] * len(prompts))
 
 def _harness_search(query, k=5, kinds=None):
     _send({"cmd": "search", "query": query, "k": k, "kinds": kinds, "cell_id": _cell_id})
     resp = _recv()
-    return resp.get("result", "(no results)")
+    return resp.get('result', _MSG['search_no_results'])
 
 def _harness_propose(kind, name, body, rationale=""):
     _send({"cmd": "propose", "kind": kind, "name": name, "body": body,
            "rationale": rationale, "cell_id": _cell_id})
     resp = _recv()
-    return resp.get("result", "Error: propose failed")
+    return resp.get('result', _MSG['propose_failed'])
 
 # Inject into globals so exec'd code can use them
 llm_query = _harness_llm_query
@@ -390,7 +399,7 @@ def grep(pattern, max_hits=50):
     try:
         regex = re.compile(pattern)
     except re.error as e:
-        print(f"Error: invalid regex: {e}")
+        print(_MSG['invalid_regex'].format(error=e))
         return []
     hits = []
     if hasattr(context, 'grep'):
@@ -637,7 +646,7 @@ def main():
             _send({"cmd": "search", "query": query, "k": k, "kinds": kinds,
                    "cell_id": _cell_id})
             resp = _recv()
-            result_text = resp.get("result", "(no results)")
+            result_text = resp.get('result', _MSG['search_no_results'])
             _send({
                 "type": "result",
                 "cell_id": _cell_id,
@@ -654,7 +663,7 @@ def main():
             _send({
                 "type": "result",
                 "cell_id": _cell_id,
-                "stdout": resp.get("result", "Error: propose failed"),
+                "stdout": resp.get('result', _MSG['propose_failed']),
                 "stderr": "",
                 "final_answer": None,
             })

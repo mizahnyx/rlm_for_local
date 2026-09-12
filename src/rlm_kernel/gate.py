@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from rlm_kernel.schema import (
     Frontmatter,
@@ -461,6 +461,57 @@ def _check_signature_match(
     warnings.append("Signature block does not contain a function definition")
 
 
+def _formatted_contract_paths() -> set[str]:
+    """Contract paths whose bodies are `.format(**prompt_vars)`-ed at runtime (CL4).
+
+    Imported lazily and defensively: this is the only kernel→rlm_local dependency
+    in validation, and a standalone kernel install without `rlm_local` must still
+    be able to validate pages (the check is simply skipped there).
+    """
+    try:
+        from rlm_local.prompts import FORMATTED_CONTRACT_PATHS
+
+        return set(FORMATTED_CONTRACT_PATHS)
+    except Exception:
+        return set()
+
+
+def _check_slot_names(page: Page, slots: Iterable[str], errors: list[str]) -> None:
+    """Reject slots the runtime cannot fill, for pages that get rendered (CL4).
+
+    An evolved contract page that invents `{new_slot}` used to promote happily and
+    then raise `KeyError` during prompt assembly — caught by the caller's broad
+    `except`, so the promoted page was *silently ignored* and the packaged prompt
+    used instead. Failing validation is the honest outcome: the author is told
+    rather than the vault quietly keeping a page that can never take effect.
+
+    Scoped deliberately: only pages that would land on a formatted contract path
+    are checked. The `contract/templates/*` pages use `templates.py` slots
+    (`{turn}`, `{used}`, `{budget}` …) that `prompt_vars` never fills, and are
+    appended verbatim — checking them would be a false positive, and a gate that
+    cries wolf gets switched off.
+    """
+    candidates = {page.path, f"{page.frontmatter.kind.value}/{page.name}.md"}
+    if not (candidates & _formatted_contract_paths()):
+        return
+
+    try:
+        from rlm_local.config import load_config
+
+        known = set(load_config().prompt_vars())
+    except Exception:
+        return
+
+    unknown = sorted(set(slots) - known)
+    if unknown:
+        errors.append(
+            f"Unknown slot variable(s) {unknown}: this page is rendered with "
+            f"prompt_vars, which provides {sorted(known)}. A slot the runtime "
+            "does not fill raises KeyError at prompt assembly, and the page is "
+            "then silently ignored (CL4)."
+        )
+
+
 def _validate_contract_or_template(
     page: Page, errors: list[str], warnings: list[str]
 ) -> None:
@@ -488,6 +539,7 @@ def _validate_contract_or_template(
             if slot in seen:
                 warnings.append(f"Duplicate slot variable: '{slot}'")
             seen.add(slot)
+        _check_slot_names(page, slots, errors)
 
 
 def _validate_definition_or_note(

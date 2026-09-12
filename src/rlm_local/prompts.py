@@ -183,6 +183,21 @@ def build_messages(
 
 # ── Vault-first loading (K0, §5.2) ────────────────────────────────────────
 
+CONTRACT_PAGE_PATH = "contract/repl-contract.md"
+HOW_TO_WORK_PAGE_PATH = "contract/how-to-work.md"
+
+#: Contract pages whose body is rendered with `profile.prompt_vars()`.
+#:
+#: Named here because it is a *rule*, not an implementation detail: a page on this
+#: list must use only the slots the runtime actually fills, or assembly raises
+#: `KeyError` (which is caught, so the page is silently ignored and the packaged
+#: prompt is used instead). The gate's slot-subset check (CL4) reads this list
+#: rather than guessing — which is what keeps it from rejecting the template
+#: pages, whose slots belong to `templates.py` and are never filled from
+#: `prompt_vars`.
+FORMATTED_CONTRACT_PATHS: tuple[str, ...] = (CONTRACT_PAGE_PATH,)
+
+
 def load_system_prompt_from_vault(
     prompt_vars: dict,
     vault: object | None = None,
@@ -211,40 +226,35 @@ def load_system_prompt_from_vault(
     try:
         parts: list[str] = []
 
-        # 1. REPL contract
-        repl_page = vault.get("contract/repl-contract.md")
+        # 1. REPL contract — the one page rendered with prompt_vars
+        # (FORMATTED_CONTRACT_PATHS): a slot it uses that the runtime does not
+        # fill would raise here, and the fallback below would hide it.
+        repl_page = vault.get(CONTRACT_PAGE_PATH)
         if repl_page is not None:
             parts.append(repl_page.body.format(**prompt_vars))
         else:
             parts.append(SYSTEM_PROMPT.format(**prompt_vars))
 
-        # 2. How to work
-        howto_page = vault.get("contract/how-to-work.md")
+        # 2. How to work — appended verbatim, so its braces are literal text
+        howto_page = vault.get(HOW_TO_WORK_PAGE_PATH)
         if howto_page is not None:
             parts.append(howto_page.body)
 
-        # 3. Helper one-liners — index-backed when bridge available (C1)
-        if bridge is not None and bridge.index_path.exists():
-            from rlm_kernel.index import Index
-            idx = Index(bridge.index_path)
-            try:
-                paths = idx.list_paths(kind="helper", status="active")
-                helpers = []
-                for path in paths:
-                    page = vault.get(path)
-                    if page is not None:
-                        helpers.append(page)
-            finally:
-                idx.close()
+        # 3. Helper one-liners — one source of truth (DG9): the bridge's
+        # index-backed listing when a bridge is available, a vault walk when it
+        # is not. Both apply the same "active only, capped" rule.
+        if bridge is not None:
+            helper_lines = bridge.get_helper_summaries()
         else:
             helpers = vault.list(kind="helper")
-            helpers = [h for h in helpers if h.frontmatter.status.value == "active"]
+            helper_lines = [
+                f"  {h.name}: {h.frontmatter.summary}"
+                for h in helpers
+                if h.frontmatter.status.value == "active"
+            ][:30]
 
-        if helpers:
-            lines = ["\nAvailable helpers:"]
-            for h in helpers[:30]:  # progressive-disclosure cap (~30 lines)
-                lines.append(f"  {h.name}: {h.frontmatter.summary}")
-            parts.append("\n".join(lines))
+        if helper_lines:
+            parts.append("\n".join(["\nAvailable helpers:"] + helper_lines))
 
         return "\n\n".join(parts)
     except Exception:

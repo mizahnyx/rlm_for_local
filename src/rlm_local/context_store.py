@@ -32,6 +32,8 @@ import tempfile
 from pathlib import Path
 from typing import Iterator, Sequence
 
+from rlm_local.templates import WORKER_INVALID_REGEX
+
 # Read block size for streaming operations that must not materialize the blob.
 _STREAM_BLOCK = 65536
 
@@ -158,7 +160,7 @@ class Context:
         try:
             regex = re.compile(pattern)
         except re.error as e:
-            return [f"Error: invalid regex pattern: {e}"]
+            return [WORKER_INVALID_REGEX.format(error=e)]
         hits: list[str] = []
         with open(self._path, "rb") as f:
             for raw in f:
@@ -330,7 +332,7 @@ class _InMemoryContext:
         try:
             regex = re.compile(pattern)
         except re.error as e:
-            return [f"Error: invalid regex pattern: {e}"]
+            return [WORKER_INVALID_REGEX.format(error=e)]
         for line in self._text.splitlines():
             if regex.search(line):
                 hits.append(line)
