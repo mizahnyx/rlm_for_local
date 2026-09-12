@@ -66,6 +66,29 @@ exist, written down in one place so they stop being re-derived per session.
    and substitutes a default is worse than no probe: it produces confident wrong
    answers, which is how a working mount got reported as broken.
 
+9. **Corpus-derived data does not leave the machine that holds the corpus.**
+   The census, any path listing, any per-file table, and any extract is
+   sensitive: it is a consolidated index of someone's private files, which is
+   *more* revealing than the tree itself. Therefore:
+
+   - **Analysis runs where the data is.** Scripts that read the corpus or its
+     census run on `lunacode`; they write their output to a local file under
+     `~/rlm-corpus-inventory/` (mode 0600, directory 0700) and print *only
+     aggregates* — counts, byte totals, distributions.
+   - **Aggregates may travel; identifiers may not.** Counts and sizes are fine in
+     a session, a commit message or a document. Directory names, file names, path
+     samples, symlink targets, per-directory sizes and "top N largest files"
+     listings are not — not in this conversation (it is sent to a model
+     provider), not in the repository (it is public), not in a commit message.
+   - **A record that needs names stays on the laptop.** The repository gets the
+     aggregate summary and a pointer to the local record; the full record lives
+     beside the data.
+   - **Artifacts are locked down after use**: `chmod 600` the census TSVs, and
+     decide deliberately whether to keep the walk (it contains every path in the
+     backup) or delete it once the aggregates are computed. Keeping it saves a
+     34-minute re-walk; it is also the single most sensitive derived file the
+     project produces.
+
 ## 2. Commands
 
 ```bash
