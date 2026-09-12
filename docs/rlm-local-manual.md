@@ -1887,32 +1887,41 @@ event while an end state is an interpretation of what was left behind.
 The diagnostic does not change a trial's credit: a trial in which nothing
 submitted scores 0 for that trial, now with a reason.
 
-Two further probe behaviours are known, **documented, and deliberately not
-tightened** — tightening them changes score semantics and is an owner decision
-(deferred; see R15 of `docs/20260903-2107-remediation-plan.md`):
+### 16.4.1 Probe scoring that was tightened on 2026-09-12
 
-- **P2 — escaped characters (fixed).** The paren lexer used to skip a backslash
-  without skipping the character it escapes, so a helper call containing an
-  escaped quote (`grep('… isn\'t …')`) was truncated at a `)` inside the string
-  and reported as `INVALID (unbalanced)`, costing points for correct code. Fixed:
-  the lexer now skips the escaped character too
-  (`_extract_call_text`, pinned by `tests/test_model_check.py::TestParenLexerEscape`).
-  *Residual, deliberately unchanged:* a call that is never closed extracts as the
-  empty string, and `_balanced_parens("")` is `True` — so an unterminated call
-  still counts as valid.
-- **P3 — stderr recovery (weak, NOT tightened).** P3 measures absence of failure
-  rather than recovery ability:
-  1. **No stderr ⇒ 15/15.** A model that never executes any code emits no error
-     and therefore earns full credit. Emitting nothing is scored exactly like
-     recovering.
-  2. **The recovery scan is not time-ordered.** Any balanced `grep(` call in
-     *any* assistant message counts as recovery, including one made *before* the
-     failing turn.
-  P3's 15 points are therefore not evidence of recovery ability. Both behaviours
-  are pinned by
-  `tests/test_model_check.py::TestProbeP3::test_bad_model_gets_full_credit_documented_weakness`
-  and `::test_pre_error_grep_counts_as_recovery_documented_weakness`, so any
-  future tightening is a deliberate, test-visible change.
+Three probe behaviours used to be documented, deferred weaknesses. They were
+tightened as roadmap items 4 and 5 (`docs/20260912-1155-roadmap.md`), on the
+owner's decision, because each one moved score semantics. The old behaviour and
+the reasoning for deferring it stay on the record in the 2026-09-10 validation
+(§7) and the 2026-09-03 analysis (F15) — they are history now, not description.
+
+- **P2 — an unterminated call is no longer valid (BS3).** `_extract_call_text`
+  returns `""` for a call that is never closed, and `_balanced_parens("")` is
+  `True`, so `grep('never closed` used to cost the model nothing. P2 now requires
+  a call it can actually delimit. `_balanced_parens` itself still returns `True`
+  for the empty string: it is a predicate about parens, and emptiness is the
+  caller's business.
+  *(The earlier P2 defect in the same area — an escaped quote inside a call
+  truncating the extraction at a `)` in the string — was fixed during the
+  remediation; `tests/test_model_check.py::TestParenLexerEscape` still pins it.)*
+- **P3 — no free credit for a model that executes nothing (BS1).** A model that
+  never ran a cell scored 15/15, exactly like a model that recovered from an
+  error. It now scores 0: emitting nothing is not recovering. Cells that all run
+  clean still score 15/15 — executing working code is not a failure to recover.
+- **P3 — recovery is time-ordered and behavioural (BS2).** The scan used to
+  accept a balanced `grep(` call from *any* assistant message, including one made
+  before the failing turn. Recovery is now "a cell *after* the failure ran
+  without a traceback", which needs no regex and measures the behaviour rather
+  than a proxy for it. A valid helper call after the failure is still reported,
+  as a supporting signal.
+
+Effect on recorded numbers: the sweep's quick batteries (P1+P4+P6) are unaffected.
+Full-battery scores recorded before 2026-09-12 are on the old P2/P3 semantics, and
+P3 in particular was worth 15 unearned points to a model that produced no code —
+so those composites are not comparable with new ones. The change is pinned by
+`tests/test_model_check.py::TestProbeP3`,
+`::TestProbeP2NowRejectsUnterminatedCalls` and `::TestTurnOrdering`, and its
+falsifiability by four new mutations in `scripts/check_guard_nonvacuity.py`.
 
 ### 16.5 Needle and eval-pattern matching
 

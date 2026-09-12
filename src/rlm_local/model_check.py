@@ -303,7 +303,13 @@ def probe_p2_helper_calls(
             for m in pattern.finditer(content):
                 # Extract the call from the match start to its closing paren
                 call_text = _extract_call_text(content, m.start())
-                valid = _balanced_parens(call_text)
+                # BS3 (tightened 2026-09-12): an unterminated call extracts as ""
+                # and `_balanced_parens("")` is True, which used to score it
+                # *valid* — so `grep('never closed` counted as a correct helper
+                # call. Emptiness is the caller's business: `_balanced_parens` is
+                # a predicate about parens, and a call the lexer cannot delimit is
+                # not a call.
+                valid = bool(call_text.strip()) and _balanced_parens(call_text)
                 helper_calls.append((name, call_text[:80], valid))
 
     if not helper_calls:
@@ -330,40 +336,58 @@ def probe_p2_helper_calls(
 # ── Probe P3: stderr recovery ────────────────────────────────────────────
 
 
+def _turn_after(candidate: Any, reference: Any) -> bool:
+    """Is ``candidate`` a turn strictly after ``reference``?
+
+    Turns are 1-based display turns. A missing or non-integer turn cannot be
+    shown to come after anything, so it counts as *not* after — the conservative
+    direction when the question is "did the model recover?" (BS2).
+    """
+    if not isinstance(candidate, int) or not isinstance(reference, int):
+        return False
+    return candidate > reference
+
+
 def probe_p3_stderr_recovery(
     backend: ModelBackend,
     model_id: str = "",
     profile: str = "tiny",
 ) -> dict[str, Any]:
-    """P3: stderr recovery — model encounters a REPL error and recovers.
+    """P3: stderr recovery — after a cell raises, does the model get past it?
 
-    Score: 15 pts (max).  If no stderr events occur at all, model gets full
-    credit (no recovery was necessary).  If stderr occurs and the next response
-    corrects the issue, full credit.  If stderr occurs with no recovery, zero.
+    Score: 15 pts (max).
 
-    Known weakness (F15 — documented, deliberately NOT tightened)
-    -------------------------------------------------------------
-    This probe measures *absence of failure*, not recovery ability:
+    Three outcomes, and the difference between the first two is the whole point:
 
-    1. **No-stderr ⇒ 15/15.** A model that never executes any code (or whose
-       cells all succeed trivially) never emits a stderr event and therefore
-       scores full marks. Emitting nothing is scored exactly like recovering.
-    2. **Pre-error ``grep(`` calls count as recovery.** The recovery check below
-       scans *all* assistant messages for a balanced ``grep(`` call; it does not
-       require the call to come after the failing turn. A model that called
-       ``grep`` before its error is credited with "recovery" it never performed.
+    * **No cell executed at all → 0/15.** The model never ran code, so recovery
+      was never exercised. Emitting nothing is *not* recovering.
+    * **Cells executed, none raised → 15/15.** Nothing to recover from, and the
+      model demonstrably executed working code.
+    * **A cell raised → 15/15 only if a later cell ran clean.** That is the
+      behavioural measurement of "recovered": the error streak ended. Every cell
+      after the failure raising again (or no cell following it, e.g. forced
+      finalization) scores 0/15.
 
-    Consequence: P3's 15 points are not evidence that the model can recover from
-    an error, and a probe-battery score that depends on P3 should be read with
-    that in mind. Tightening the scoring (e.g. requiring a stderr event, or
-    requiring the corrected call to appear *after* the failing turn) changes
-    score semantics and is therefore an **owner decision, deferred** — see
-    R15 in ``docs/20260903-2107-remediation-plan.md`` and §16 of
-    ``docs/rlm-local-manual.md``. The behaviour is pinned by
-    ``tests/test_model_check.py::TestProbeP3::test_bad_model_gets_full_credit_documented_weakness``
-    and
-    ``::test_pre_error_grep_counts_as_recovery_documented_weakness``
-    so any future scoring change is deliberate.
+    Tightened 2026-09-12 (roadmap BS1/BS2)
+    --------------------------------------
+    The previous scoring measured *absence of failure* rather than recovery, in
+    two documented ways (F15), and both are now fixed:
+
+    1. **No-stderr ⇒ 15/15** gave a model that emitted no code the same score as
+       a model that recovered. A model with no cells now scores 0.
+    2. **The recovery scan was not time-ordered.** It accepted a balanced
+       ``grep(`` call from *any* assistant message, including one made *before*
+       the failing turn, so a model that never corrected anything was credited
+       with "recovery". Recovery is now a property of a *later* cell.
+
+    The old behaviour and the reason it was deferred are recorded in
+    ``docs/20260910-0730-remediation-validation.md`` §7 and §16.4 of
+    ``docs/rlm-local-manual.md``; this change was authorised as roadmap item 4
+    (``docs/20260912-1155-roadmap.md``), because it moves score semantics.
+
+    A valid helper call appearing after the failure is still reported, as
+    supporting evidence — it is a *signal* of a deliberate correction, while the
+    clean-cell measurement is the behaviour itself.
     """
     query = (
         "Find lines in the context that mention 'important'. "
@@ -380,55 +404,81 @@ def probe_p3_stderr_recovery(
     repl_entries = _repl_results(lines)
     assistants = _assistant_messages(lines)
 
-    stderr_events = [r for r in repl_entries if r.get("stderr", "").strip()]
+    evidence_lines: list[str] = []
 
-    if not stderr_events:
+    if not repl_entries:
+        return {
+            "score": 0,
+            "max_score": 15,
+            "evidence": [
+                "No cell executed — the model never ran code, so recovery was "
+                "never exercised. Emitting nothing is not recovering."
+            ],
+            "passed": False,
+        }
+
+    failing = [r for r in repl_entries if (r.get("stderr") or "").strip()]
+    if not failing:
         return {
             "score": 15,
             "max_score": 15,
-            "evidence": ["No stderr events — no recovery needed."],
+            "evidence": [
+                f"{len(repl_entries)} cell(s) ran without a traceback — nothing "
+                "to recover from."
+            ],
             "passed": True,
         }
 
-    # Check recovery: after stderr, does the next assistant response contain
-    # a corrected call (grep with a different pattern, or fixed syntax)?
-    recovered = False
-    evidence_lines: list[str] = []
-
-    for se in stderr_events:
-        stderr_text = se.get("stderr", "")
-        turn = se.get("turn", "?")
-        # Show the actual exception, not just Traceback header
-        for line in stderr_text.split("\n"):
+    for entry in failing:
+        turn = entry.get("turn", "?")
+        for line in (entry.get("stderr") or "").split("\n"):
             stripped = line.strip()
             if stripped and not stripped.startswith("File "):
                 evidence_lines.append(f"Turn {turn} stderr: {stripped[:200]}")
                 break
         else:
             evidence_lines.append(f"Turn {turn} stderr: (empty)")
-    # grep call
-    stderr_indices = [
-        i for i, r in enumerate(repl_entries) if r.get("stderr", "").strip()
-    ]
-    if stderr_indices:
-        last_stderr_idx = stderr_indices[-1]
-        for a in assistants:
-            content = a.get("content", "")
-            if _GREP_CALL_RE.search(content) and _balanced_parens(content):
-                recovered = True
-                evidence_lines.append(
-                    "Recovery: corrected grep call found in subsequent response."
-                )
-                break
 
-    if not recovered:
+    # Recovery is a *later* cell that ran clean (BS2: time-ordered).
+    first_failure_turn = failing[0].get("turn")
+    later_clean = [
+        r for r in repl_entries
+        if _turn_after(r.get("turn"), first_failure_turn)
+        and not (r.get("stderr") or "").strip()
+    ]
+    recovered = bool(later_clean)
+    if recovered:
         evidence_lines.append(
-            "No recovery observed — model did not correct after stderr."
+            f"Recovery: turn {later_clean[0].get('turn')} ran clean after the "
+            f"failure on turn {first_failure_turn}."
+        )
+    else:
+        evidence_lines.append(
+            f"No recovery: no cell after the failure on turn {first_failure_turn} "
+            "ran without a traceback."
         )
 
-    score = 15 if recovered else 0
+    # Supporting evidence only: a valid helper call after the failure.
+    correcting_call = None
+    for message in assistants:
+        if not _turn_after(message.get("turn"), first_failure_turn):
+            continue
+        content = message.get("content", "") or ""
+        for match in _GREP_CALL_RE.finditer(content):
+            call_text = _extract_call_text(content, match.start())
+            if call_text and _balanced_parens(call_text):
+                correcting_call = call_text[:80]
+                break
+        if correcting_call:
+            break
+    evidence_lines.append(
+        f"Corrected helper call after the failure: {correcting_call}"
+        if correcting_call
+        else "No valid helper call after the failure (supporting signal only)."
+    )
+
     return {
-        "score": score,
+        "score": 15 if recovered else 0,
         "max_score": 15,
         "evidence": evidence_lines,
         "passed": recovered,

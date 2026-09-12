@@ -626,6 +626,63 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_pathological_answer_cannot_break_the_result",
         ],
     ),
+    # ── BS1/BS2: P3 measures recovery, not absence of failure (roadmap 4) ──
+    (
+        "BS1 a model that never executes a cell gets full credit again",
+        "src/rlm_local/model_check.py",
+        "    if not repl_entries:\n"
+        "        return {\n"
+        "            \"score\": 0,\n"
+        "            \"max_score\": 15,\n"
+        "            \"evidence\": [\n"
+        "                \"No cell executed — the model never ran code, so recovery was \"\n"
+        "                \"never exercised. Emitting nothing is not recovering.\"\n"
+        "            ],\n"
+        "            \"passed\": False,\n"
+        "        }",
+        "    if not repl_entries:\n"
+        "        return {\n"
+        "            \"score\": 15,\n"
+        "            \"max_score\": 15,\n"
+        "            \"evidence\": [\"No stderr events — no recovery needed.\"],\n"
+        "            \"passed\": True,\n"
+        "        }",
+        [
+            "tests/test_model_check.py::TestProbeP3"
+            "::test_a_model_that_never_executes_scores_zero",
+        ],
+    ),
+    (
+        "BS2 the recovery scan ignores turn order again",
+        "src/rlm_local/model_check.py",
+        "        if _turn_after(r.get(\"turn\"), first_failure_turn)\n"
+        "        and not (r.get(\"stderr\") or \"\").strip()",
+        "        if not (r.get(\"stderr\") or \"\").strip()",
+        [
+            "tests/test_model_check.py::TestProbeP3"
+            "::test_a_pre_error_grep_no_longer_counts_as_recovery",
+        ],
+    ),
+    (
+        "BS2 a cell at the failing turn counts as coming after it",
+        "src/rlm_local/model_check.py",
+        "    return candidate > reference",
+        "    return candidate >= reference",
+        [
+            "tests/test_model_check.py::TestTurnOrdering"
+            "::test_turn_after_is_strictly_later",
+        ],
+    ),
+    (
+        "BS3 an unterminated helper call is scored valid again",
+        "src/rlm_local/model_check.py",
+        "                valid = bool(call_text.strip()) and _balanced_parens(call_text)",
+        "                valid = _balanced_parens(call_text)",
+        [
+            "tests/test_model_check.py::TestProbeP2NowRejectsUnterminatedCalls"
+            "::test_an_unterminated_call_is_scored_invalid",
+        ],
+    ),
 ]
 
 

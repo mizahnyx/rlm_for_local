@@ -33,6 +33,7 @@ from rlm_local.model_check import (
     _score_p4_trials,
     _submission_sites,
     _text_kind_at,
+    _turn_after,
     check_model,
     probe_p1_protocol_emission,
     probe_p2_helper_calls,
@@ -294,8 +295,109 @@ class ErrorAfterGrepStub:
         )
 
 
+class RecoveringStub:
+    """P3's positive case: raises on the first cell, then runs clean.
+
+    The harness sends the traceback-derived nudge after a failed cell; a model
+    that responds to it with code that works has recovered, and P3 should say so.
+    """
+
+    def __init__(self) -> None:
+        self._call_count = 0
+        self.calls: list[dict[str, Any]] = []
+
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        tier: str = "root",
+        max_tokens: int = 1500,
+        temperature: float = 0.0,
+        response_schema: dict[str, Any] | None = None,
+    ) -> str:
+        self.calls.append({"tier": tier, "message_count": len(messages)})
+        if tier == "sub":
+            return "not used"
+        self._call_count += 1
+        if self._call_count == 1:
+            return (
+                "Let me try that.\n\n"
+                "```repl\n"
+                "hits = grep('important'\n"
+                "```"
+            )
+        return (
+            "Let me fix the call.\n\n"
+            "```repl\n"
+            "hits = grep('important')\n"
+            "print(len(hits))\n"
+            "```"
+        )
+
+
+class ErrorOnlyStub:
+    """Raises on every cell and never gets past it: no recovery to measure."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        tier: str = "root",
+        max_tokens: int = 1500,
+        temperature: float = 0.0,
+        response_schema: dict[str, Any] | None = None,
+    ) -> str:
+        self.calls.append({"tier": tier, "message_count": len(messages)})
+        if tier == "sub":
+            return "not used"
+        return (
+            "Trying again.\n\n"
+            "```repl\n"
+            "raise RuntimeError('still broken')\n"
+            "```"
+        )
+
+
+class UnterminatedCallStub:
+    """Emits one helper call it never closes, then gives up.
+
+    Exactly one call appears in the transcript (the stub does not repeat the
+    broken block while the loop nudges it), so P2's per-call deduction is
+    unambiguous: one invalid call costs 5 of 15.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self._call_count = 0
+
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        tier: str = "root",
+        max_tokens: int = 1500,
+        temperature: float = 0.0,
+        response_schema: dict[str, Any] | None = None,
+    ) -> str:
+        self.calls.append({"tier": tier, "message_count": len(messages)})
+        if tier == "sub":
+            return "not used"
+        self._call_count += 1
+        if self._call_count == 1:
+            return (
+                "Let me search the context.\n\n"
+                "```repl\n"
+                "hits = grep('important'\n"  # never closed
+                "print(hits)\n"
+                "```"
+            )
+        return "I could not complete the search from the available information."
+
+
 class BadModelStub:
-    """Stub that returns prose without ```repl blocks, smart quotes, wrong answers."""
 
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
@@ -419,15 +521,29 @@ class TestParenLexerEscape:
         assert _extract_call_text(cell, cell.index("grep")) == "grep('a (b) c')"
 
     def test_unterminated_call_yields_empty_string(self):
-        """Documented current behaviour: an unclosed call extracts as "".
+        """An unclosed call extracts as "" — and is no longer scored valid.
 
-        NOTE: `_balanced_parens("")` is True, so an unterminated call is
-        currently scored *valid* by P2. That is a second, separate weakness of
-        the probe's scoring (not the escape bug fixed here); it is recorded
-        here so it cannot regress silently, and left as-is because tightening
-        probe scoring is an owner decision (see P3 note in the module).
+        `_balanced_parens("")` is still True, because it is a predicate about
+        parens and nothing else; the caller now has to ask whether there was a
+        call at all. Before BS3 (tightened 2026-09-12) `grep('never closed`
+        counted as a correct helper call, costing the model nothing.
         """
         assert _extract_call_text("grep('never closed", 0) == ""
+
+
+class TestProbeP2NowRejectsUnterminatedCalls:
+    """BS3 — the residual documented next to the F15 lexer fix."""
+
+    def test_an_unterminated_call_is_scored_invalid(self):
+        result = probe_p2_helper_calls(UnterminatedCallStub())
+        assert result["score"] == 10, result["evidence"]  # 15 − 5 per invalid call
+        assert result["passed"] is False
+        assert any("INVALID" in line for line in result["evidence"])
+
+    def test_a_balanced_call_is_still_valid(self, good_backend):
+        result = probe_p2_helper_calls(good_backend)
+        assert result["score"] == 15, result["evidence"]
+        assert result["passed"] is True
 
 
 class TestProbeP3:
@@ -437,43 +553,67 @@ class TestProbeP3:
         assert result["score"] == 15
         assert result["passed"] is True
 
-    def test_bad_model_gets_full_credit_documented_weakness(self, bad_backend):
-        """P3 scores 15/15 for a model that never executes any code — ON PURPOSE.
+    def test_a_model_that_never_executes_scores_zero(self, bad_backend):
+        """BS1, tightened 2026-09-12: emitting nothing is not recovering.
 
-        This pins the *documented* P3 weakness (F15; probe docstring
-        "Known weakness", manual §16), it does not bless a bug: a model that
-        emits no ```repl block produces no stderr event at all, and P3's first
-        branch grants full credit whenever there was nothing to recover from.
-        Emitting nothing is therefore scored exactly like recovering.
-
-        Tightening this scoring changes score semantics and is an owner
-        decision, deferred (R15). The assertions below make that deferral
-        explicit: if someone tightens P3, this test goes red and the change has
-        to be deliberate.
+        This test used to pin the opposite — the F15 weakness in which a model
+        that produced no code at all scored the same 15/15 as one that recovered.
+        Roadmap item 4 tightened it; the old behaviour and its rationale stay on
+        the record in `20260910-0730-remediation-validation.md` §7 rather than
+        being rewritten here.
         """
         result = probe_p3_stderr_recovery(bad_backend)
-        assert result["score"] == 15
+        assert result["score"] == 0
         assert result["max_score"] == 15
-        assert result["passed"] is True
+        assert result["passed"] is False
+        assert any("never ran code" in line for line in result["evidence"])
+
+    def test_cells_that_all_succeed_keep_full_credit(self, good_backend):
+        """Executing working code is not a failure to recover."""
+        result = probe_p3_stderr_recovery(good_backend)
+        assert result["score"] == 15
         assert any(
-            "No stderr events" in line for line in result["evidence"]
+            "nothing to recover from" in line for line in result["evidence"]
         ), result["evidence"]
 
-    def test_pre_error_grep_counts_as_recovery_documented_weakness(self):
-        """Second documented P3 weakness: the recovery scan is not time-ordered.
+    def test_a_pre_error_grep_no_longer_counts_as_recovery(self):
+        """BS2: recovery is a *later* cell, not an earlier call.
 
-        P3 searches *all* assistant messages for a balanced ``grep(`` call, so a
-        call made *before* the failing turn is credited as "recovery" the model
-        never performed (F15). This stub greps once, then errors on every
-        subsequent turn and never corrects anything — under the current
-        (documented, deferred) scoring it still reports recovery and 15/15.
+        `ErrorAfterGrepStub` greps once, then raises on every later turn and never
+        corrects anything. The old scan credited the pre-error grep and scored
+        15/15 (pinned as a documented weakness); it now scores 0.
         """
         result = probe_p3_stderr_recovery(ErrorAfterGrepStub())
+        assert result["score"] == 0, result["evidence"]
+        assert result["passed"] is False
+        assert any("No recovery" in line for line in result["evidence"])
+
+    def test_a_cell_that_runs_clean_after_the_failure_is_recovery(self):
+        result = probe_p3_stderr_recovery(RecoveringStub())
         assert result["score"] == 15, result["evidence"]
         assert result["passed"] is True
-        assert any(
-            "Recovery" in line for line in result["evidence"]
-        ), result["evidence"]
+        assert any("ran clean after the failure" in line for line in result["evidence"])
+
+    def test_a_failure_with_no_following_cell_is_not_recovery(self):
+        result = probe_p3_stderr_recovery(ErrorOnlyStub())
+        assert result["score"] == 0, result["evidence"]
+        assert any("No recovery" in line for line in result["evidence"])
+
+
+class TestTurnOrdering:
+    @pytest.mark.parametrize(
+        "candidate,reference,expected",
+        [
+            (5, 4, True),
+            (4, 4, False),
+            (3, 4, False),
+            (None, 4, False),
+            (5, None, False),
+            ("5", 4, False),
+        ],
+    )
+    def test_turn_after_is_strictly_later(self, candidate, reference, expected):
+        assert _turn_after(candidate, reference) is expected
 
 
 class TestProbeP4:
