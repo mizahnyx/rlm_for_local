@@ -720,6 +720,57 @@ same interface and be swappable via configuration.
 
 ---
 
+## 5A. Corpus Mounts (read-only)
+
+`rlm_kernel.mounts` is the read-only view over a source corpus — the external
+backup, in the current deployment. It exists because the owner's constraint is that
+**every operation over the corpus is strictly non-mutating**, and that constraint
+cannot rest on application code: model-authored REPL cells run as the harness user
+with no `open` jail (DG2/DG10), so the real boundary is the mount — see layer 1 of
+`AGENTS.md` §1.8 (`cryptsetup open --readonly` plus a `ro` filesystem mount). This
+module is layer 2 — it removes the accident:
+
+```python
+from rlm_kernel.mounts import LocalTreeMount, assert_derived_outside_corpus
+
+corpus = LocalTreeMount("/srv/corpus")
+assert_derived_outside_corpus("/srv/corpus", "/srv/rlm-vault")   # layer 3
+
+for entry in corpus.iter_files(suffixes=(".md", ".txt", ".html")):   # streaming
+    if entry.size > 4_000_000:
+        continue
+    text = corpus.read_text(entry.rel, max_bytes=200_000)            # bounded
+```
+
+**There is no write verb.** No `write`, `upload`, `unlink`, `rename`, `mkdir`,
+`chmod` or `truncate` exists on the mount, so no ingest path *can* mutate the
+corpus and no caller can ask it to; a test tokenises this module and fails if a
+write-shaped call appears in it (comments and string literals excluded — a guard
+that trips on prose gets fixed by editing prose).
+
+**Containment.** Every path resolves *inside* the root after symlink resolution, so
+a link pointing out of the tree is refused rather than followed. The escape tests
+use paths that really exist outside the root, because a test pointing at a
+nonexistent path is satisfied by the missing-file check instead of by containment —
+which is exactly how the first version of those tests was vacuous, until the
+mutation table caught it.
+
+**Streaming.** The primitive is `open_readonly()`, returning a read-only handle,
+with `max_bytes` capping even chunked reads; `iter_entries()` is a generator. A
+tree of millions of files cannot be materialised — the project's own census reached
+4.1M entries without finishing.
+
+**Derived state lives outside** (layer 3). `assert_derived_outside_corpus` refuses a
+vault, index or CAS path inside the corpus at startup, rather than discovering it
+at write time, when the damage is the point. It also refuses the inverse (a corpus
+nested inside the vault).
+
+Verified by `tests/rlm_kernel/test_mounts.py` (29 tests) and four mutations in
+`scripts/check_guard_nonvacuity.py` — containment removed, `max_bytes` ignored,
+the derived-root guard disabled, and a write method smuggled onto the mount.
+
+---
+
 ## 6. The REPL Bridge
 
 The `KernelBridge` is the integration point between the kernel's vault and

@@ -864,6 +864,58 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_every_seeded_page_still_validates",
         ],
     ),
+    # ── RO2: the corpus mount is read-only by construction (roadmap 7) ─────
+    (
+        "RO2 path containment is not enforced",
+        "src/rlm_kernel/mounts.py",
+        "        if not candidate.is_relative_to(self._root):",
+        "        if False:",
+        [
+            "tests/rlm_kernel/test_mounts.py::TestContainment"
+            "::test_escaping_paths_are_refused",
+            "tests/rlm_kernel/test_mounts.py::TestContainment"
+            "::test_the_outside_content_is_never_returned",
+        ],
+    ),
+    (
+        "RO2 reads are unbounded",
+        "src/rlm_kernel/mounts.py",
+        "        if max_bytes is not None:\n"
+        "            return _BoundedReader(handle, max_bytes)\n"
+        "        return handle",
+        "        return handle",
+        [
+            "tests/rlm_kernel/test_mounts.py::TestStreaming"
+            "::test_max_bytes_caps_the_read",
+            "tests/rlm_kernel/test_mounts.py::TestStreaming"
+            "::test_the_cap_holds_for_chunked_reads",
+        ],
+    ),
+    (
+        "RO2 derived state may live inside the corpus",
+        "src/rlm_kernel/mounts.py",
+        "    if derived == corpus or derived.is_relative_to(corpus):",
+        "    if False:",
+        [
+            "tests/rlm_kernel/test_mounts.py::TestDerivedStatePlacement"
+            "::test_a_vault_inside_the_corpus_is_refused",
+        ],
+    ),
+    (
+        "RO2 the mount grows a write method",
+        "src/rlm_kernel/mounts.py",
+        "    def exists(self, rel: str) -> bool:",
+        "    def touch(self, rel: str) -> None:\n"
+        "        (self._root / rel).touch()\n"
+        "\n"
+        "    def exists(self, rel: str) -> bool:",
+        [
+            "tests/rlm_kernel/test_mounts.py::TestReadOnlyByConstruction"
+            "::test_the_mount_has_no_write_methods",
+            "tests/rlm_kernel/test_mounts.py::TestReadOnlyByConstruction"
+            "::test_the_module_has_no_write_shaped_api",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

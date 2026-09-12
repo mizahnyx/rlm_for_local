@@ -57,6 +57,15 @@ exist, written down in one place so they stop being re-derived per session.
    memory (`--context-dir` does exactly that today and is unusable at corpus
    scale).
 
+   **Corollary — a check that cannot see the truth must say "unknown".** The
+   first version of `mount-luks-usb-ro.sh` verified the block layer with
+   `$(blockdev --getro /dev/mapper/... 2>/dev/null || echo 0)`, which turns a
+   permission error (the device node is `root:disk 0660`) into the value `0` and
+   reports a read-only disk as writable. It now reads `/sys/class/block/<dm>/ro`
+   and returns `?` when it cannot tell. Any probe that swallows its own failure
+   and substitutes a default is worse than no probe: it produces confident wrong
+   answers, which is how a working mount got reported as broken.
+
 ## 2. Commands
 
 ```bash
