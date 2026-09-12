@@ -591,6 +591,41 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_an_unusable_value_falls_back_to_more_trials_not_fewer",
         ],
     ),
+    # ── VD2: the cell-end `answer` state (2026-09-12 roadmap item 2) ────────
+    (
+        "VD2 the REPL stops reporting the cell-end answer state",
+        "src/rlm_local/repl.py",
+        "                \"answer_state\": _answer_state(),",
+        "                \"answer_state\": None,",
+        [
+            "tests/test_model_check.py::TestCellEndAnswerState"
+            "::test_a_real_cell_reports_its_final_answer_state",
+            "tests/test_model_check.py::TestCellEndAnswerState"
+            "::test_an_intact_scaffold_sharpens_the_not_reached_wording",
+        ],
+    ),
+    (
+        "VD2 a rebound answer is no longer diagnosed",
+        "src/rlm_local/model_check.py",
+        "            if not state.get(\"is_dict\"):",
+        "            if False:",
+        [
+            "tests/test_model_check.py::TestCellEndAnswerState"
+            "::test_a_rebound_answer_is_diagnosed_as_rebound",
+        ],
+    ),
+    (
+        "VD2 the worker's submission read is unguarded again",
+        "src/rlm_local/repl.py",
+        "            except Exception:\n"
+        "                # Model code owns `answer` once a cell has run, and this read is",
+        "            except ZeroDivisionError:\n"
+        "                # Model code owns `answer` once a cell has run, and this read is",
+        [
+            "tests/test_model_check.py::TestCellEndAnswerState"
+            "::test_a_pathological_answer_cannot_break_the_result",
+        ],
+    ),
 ]
 
 

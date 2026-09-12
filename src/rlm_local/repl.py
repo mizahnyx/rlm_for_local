@@ -56,6 +56,14 @@ class REPLResult:
     stderr: str = ""
     final_answer: str | None = None
     warnings: list[str] = field(default_factory=list)
+    answer_state: dict[str, Any] | None = None
+    """The scaffold `answer` as it stood when the cell ended (VD2).
+
+    None when the harness has no state to report — a timed-out cell, or a result
+    that did not come from executing a cell. Deliberately data rather than a
+    verdict: `model_check` decides what it means when a model claimed to submit
+    and did not.
+    """
 
 
 # ── Wire protocol ─────────────────────────────────────────────────────────
@@ -322,6 +330,35 @@ propose = _harness_propose
 
 answer = {"content": "", "ready": False}
 context = None
+
+
+def _answer_state():
+    '''The scaffold `answer` as it stands when a cell ends (VD2).
+
+    Reported as data, never as a verdict: P4 needs it to tell "the submission
+    line never ran" from "it ran and did not take effect", and only the harness
+    knows what either means.
+
+    Every read is defensive. Model code owns `answer` once a cell starts, so a
+    pathological value (an object whose __eq__ or __bool__ raises) must not be
+    able to stop the cell's result from being sent — that would turn a
+    diagnostic into a timeout for the model.
+    '''
+    try:
+        if not isinstance(answer, dict):
+            return {"is_dict": False, "type": type(answer).__name__}
+        content = answer.get("content")
+        return {
+            "is_dict": True,
+            "keys": sorted(str(k) for k in list(answer.keys())[:20]),
+            "ready": bool(answer.get("ready")),
+            "content_set": content not in (None, ""),
+            "content_len": len(content) if isinstance(content, str) else None,
+        }
+    except Exception as e:
+        return {"is_dict": isinstance(answer, dict), "error": type(e).__name__}
+
+
 _SHOW_VARS_IGNORE = frozenset({"answer", "context", "__builtins__", "llm_query", "llm_query_batched",
                                 "search", "propose",
                                 "_harness_llm_query", "_harness_llm_query_batched",
@@ -419,8 +456,18 @@ def main():
                 sys.stderr = old_err
 
             final_answer = None
-            if isinstance(answer, dict) and answer.get("ready"):
-                final_answer = answer.get("content", "")
+            try:
+                if isinstance(answer, dict) and bool(answer.get("ready")):
+                    content = answer.get("content", "")
+                    final_answer = content if isinstance(content, str) else str(content)
+            except Exception:
+                # Model code owns `answer` once a cell has run, and this read is
+                # on the critical path for *sending the result at all*: an
+                # unusable value here used to escape the loop and strand the
+                # cell, which the harness could only report as a timeout (and
+                # which cost the model its REPL state on restart). Treat an
+                # uninspectable `answer` as "not ready" and report the state.
+                final_answer = None
 
             _send({
                 "type": "result",
@@ -428,6 +475,7 @@ def main():
                 "stdout": cap_buf.getvalue(),
                 "stderr": err_buf.getvalue(),
                 "final_answer": final_answer,
+                "answer_state": _answer_state(),
             })
 
         elif cmd == "init":
@@ -669,6 +717,7 @@ class REPLSandbox:
         stdout = msg.get("stdout", "")
         stderr = msg.get("stderr", "")
         final_answer = msg.get("final_answer")
+        answer_state = msg.get("answer_state")
 
         if len(stdout) > self._stdout_cap:
             stdout = stdout[: self._stdout_cap] + CELL_STDOUT_TRUNCATED.format(
@@ -678,7 +727,10 @@ class REPLSandbox:
             stderr = _truncate_middle(stderr, self._stdout_cap)
 
         self._consecutive_timeouts = 0
-        return REPLResult(stdout=stdout, stderr=stderr, final_answer=final_answer)
+        return REPLResult(
+            stdout=stdout, stderr=stderr, final_answer=final_answer,
+            answer_state=answer_state if isinstance(answer_state, dict) else None,
+        )
 
     def _on_timeout(self, cell_id: int) -> REPLResult:
         """Handle a cell that exceeded `cell_timeout` (R4)."""

@@ -114,7 +114,15 @@ class TrajectoryLogger:
         })
 
     def log_repl_result(self, turn: int, stdout: str, stderr: str,
-                        final_answer: str | None, warnings: list[str]) -> None:
+                        final_answer: str | None, warnings: list[str],
+                        answer_state: dict[str, Any] | None = None) -> None:
+        """Record one cell's outcome.
+
+        `answer_state` is the scaffold `answer` as it stood when the cell ended
+        (VD2). It is optional because not every caller has one — a timed-out cell
+        has no reliable state — and a consumer that needs it must treat None as
+        "unknown", never as "unchanged".
+        """
         self._write({
             "event": "repl_result",
             "timestamp": time.time(),
@@ -123,6 +131,7 @@ class TrajectoryLogger:
             "stderr": stderr,
             "final_answer": final_answer,
             "warnings": warnings,
+            "answer_state": answer_state,
         })
 
     def log_subcall(self, turn: int, index: int, prompt: str, response: str,

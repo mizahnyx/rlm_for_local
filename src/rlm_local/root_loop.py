@@ -240,6 +240,7 @@ class RootLoop:
                         repl_result.stderr,
                         repl_result.final_answer,
                         repl_result.warnings,
+                        repl_result.answer_state,
                     )
 
                 # ── §5.6 stage 4: stderr self-correction (R5) ─────────────

@@ -10,11 +10,15 @@ from typing import Any
 
 import pytest
 from rlm_local.model_backend import ModelBackend
+from rlm_local.logger import TrajectoryLogger
+from rlm_local.repl import REPLSandbox
 from rlm_local.model_check import (
     DEFAULT_WEIGHT_PROFILE,
+    DIAG_ANSWER_REBOUND,
     DIAG_BLOCK_RAISED,
     DIAG_NOT_REACHED,
     DIAG_PROSE,
+    DIAG_STATE_INCONSISTENT,
     DIAG_TEXT_NOT_CODE,
     DIAG_UNEXECUTABLE_TAG,
     PROBES,
@@ -853,6 +857,168 @@ class TestSubmissionSiteDetection:
         assert [s["placement"] for s in sites] == ["prose", "fence"]
 
 
+class TestCellEndAnswerState:
+    """VD2 — the scaffold `answer` as it stood when the cell ended.
+
+    Without it, P4's last unresolved case was "the block ran clean and did not
+    submit", which the harness could only explain with a list of possibilities
+    (`20260912-0219-p4-multi-trial-live-confirmation.md` §5). The REPL now
+    reports the state, so the diagnostic can name the actual one.
+    """
+
+    def test_a_real_cell_reports_its_final_answer_state(self):
+        """End to end through a real worker process, not a stub."""
+        repl = REPLSandbox(cell_timeout=20.0)
+        repl.start(None, None)
+        try:
+            result = repl.execute(
+                "answer['content'] = 'Paris'\nanswer['ready'] = True"
+            )
+        finally:
+            repl.shutdown()
+
+        assert result.final_answer == "Paris"
+        assert result.answer_state == {
+            "is_dict": True,
+            "keys": ["content", "ready"],
+            "ready": True,
+            "content_set": True,
+            "content_len": 5,
+        }
+
+    def test_a_cell_that_leaves_the_scaffold_alone_reports_ready_false(self):
+        repl = REPLSandbox(cell_timeout=20.0)
+        repl.start(None, None)
+        try:
+            result = repl.execute("print('no submission here')")
+        finally:
+            repl.shutdown()
+
+        assert result.final_answer is None
+        assert result.answer_state["ready"] is False
+        assert result.answer_state["content_set"] is False
+        assert result.answer_state["content_len"] == 0
+
+    def test_a_rebound_answer_is_visible_in_the_state(self):
+        """The case the old diagnostic could not distinguish."""
+        repl = REPLSandbox(cell_timeout=20.0)
+        repl.start(None, None)
+        try:
+            result = repl.execute("answer = 'I submit'")
+        finally:
+            repl.shutdown()
+
+        assert result.answer_state == {"is_dict": False, "type": "str"}
+
+    def test_a_raising_cell_still_reports_state(self):
+        repl = REPLSandbox(cell_timeout=20.0)
+        repl.start(None, None)
+        try:
+            result = repl.execute("answer['content'] = 'x'\nraise RuntimeError('boom')")
+        finally:
+            repl.shutdown()
+
+        assert "RuntimeError" in result.stderr
+        assert result.answer_state["is_dict"] is True
+        assert result.answer_state["ready"] is False
+
+    def test_a_pathological_answer_cannot_break_the_result(self):
+        """Model code owns `answer`; a diagnostic must not become a timeout.
+
+        A value whose comparison raises would break a naive inspector, and the
+        worker would never send its result — the model would see a cell timeout
+        instead of the state report.
+        """
+        repl = REPLSandbox(cell_timeout=20.0)
+        repl.start(None, None)
+        try:
+            result = repl.execute(
+                "class Nasty:\n"
+                "    def __eq__(self, other):\n"
+                "        raise RuntimeError('nope')\n"
+                "    def __bool__(self):\n"
+                "        raise RuntimeError('nope')\n"
+                "    def __len__(self):\n"
+                "        raise RuntimeError('nope')\n"
+                "answer['content'] = Nasty()\n"
+                "answer['ready'] = Nasty()"
+            )
+        finally:
+            repl.shutdown()
+
+        assert isinstance(result.answer_state, dict), result.answer_state
+        assert "is_dict" in result.answer_state
+
+    def test_the_logger_records_the_state(self, tmp_path):
+        """The trajectory carries it, so a past run can be re-diagnosed."""
+        logger = TrajectoryLogger(tmp_path / "traj.jsonl")
+        logger.log_repl_result(3, "out", "", None, [], {"is_dict": True, "ready": False})
+
+        record = json.loads(
+            (tmp_path / "traj.jsonl").read_text(encoding="utf-8").strip().splitlines()[0]
+        )
+        assert record["answer_state"] == {"is_dict": True, "ready": False}
+
+    def test_a_rebound_answer_is_diagnosed_as_rebound(self):
+        message = _assistant("```repl\nanswer = 'I submit'\nanswer['ready'] = True\n```", turn=4)
+        entry = _repl(4)
+        entry["answer_state"] = {"is_dict": False, "type": "str"}
+        diagnostic = _diagnose_missing_submission([message], [entry])
+        assert diagnostic["code"] == DIAG_ANSWER_REBOUND
+        assert "was a str, not a dict" in diagnostic["detail"]
+
+    def test_an_intact_scaffold_sharpens_the_not_reached_wording(self):
+        """The state turns a list of possibilities into a definite statement."""
+        message = _assistant("```repl\nanswer['ready'] = True\n```", turn=5)
+        entry = _repl(5)
+        entry["answer_state"] = {
+            "is_dict": True, "keys": ["content", "ready"], "ready": False,
+            "content_set": False, "content_len": 0,
+        }
+        diagnostic = _diagnose_missing_submission([message], [entry])
+        assert diagnostic["code"] == DIAG_NOT_REACHED
+        assert "genuinely never ran" in diagnostic["detail"]
+        assert "cannot tell" not in diagnostic["detail"]
+
+    def test_no_state_keeps_the_honest_hedge(self):
+        message = _assistant("```repl\nanswer['ready'] = True\n```", turn=6)
+        diagnostic = _diagnose_missing_submission([message], [_repl(6)])
+        assert diagnostic["code"] == DIAG_NOT_REACHED
+        assert "cannot tell" in diagnostic["detail"]
+
+    def test_a_ready_answer_with_no_submission_is_a_harness_inconsistency(self):
+        """`ready` True *is* what the REPL derives a submission from.
+
+        Seeing one without the other cannot be explained as model behaviour, so
+        the diagnostic says so instead of inventing a cause.
+        """
+        message = _assistant("```repl\nanswer['ready'] = True\n```", turn=7)
+        entry = _repl(7)
+        entry["answer_state"] = {
+            "is_dict": True, "keys": ["content", "ready"], "ready": True,
+            "content_set": True, "content_len": 4,
+        }
+        diagnostic = _diagnose_missing_submission([message], [entry])
+        assert diagnostic["code"] == DIAG_STATE_INCONSISTENT
+        assert "harness inconsistency" in diagnostic["detail"]
+
+    def test_an_unreadable_answer_is_reported_as_a_harness_limitation(self):
+        message = _assistant("```repl\nanswer['ready'] = True\n```", turn=8)
+        entry = _repl(8)
+        entry["answer_state"] = {"is_dict": True, "error": "RuntimeError"}
+        diagnostic = _diagnose_missing_submission([message], [entry])
+        assert diagnostic["code"] == DIAG_STATE_INCONSISTENT
+        assert "RuntimeError" in diagnostic["detail"]
+
+    def test_a_traceback_still_outranks_a_rebound_answer(self):
+        """Ordering is documented: an observed event before an interpretation."""
+        message = _assistant("```repl\nanswer['ready'] = True\n```", turn=9)
+        entry = _repl(9, stderr="RuntimeError: boom")
+        entry["answer_state"] = {"is_dict": False, "type": "str"}
+        diagnostic = _diagnose_missing_submission([message], [entry])
+        assert diagnostic["code"] == DIAG_BLOCK_RAISED
+
+
 class TestQuotedSubmissionText:
     """A live trajectory (`Qwen3.5-2B-Instruct`, 2026-09-11) showed a small model
     writing the submission *as text*: the ready-line regex matches, the
@@ -970,10 +1136,17 @@ class TestP4SubmissionDiagnostics:
         assert "NameError: name 'answer' is not defined" in diagnostic["detail"]
 
     def test_clean_block_that_never_submits_says_the_line_was_not_reached(self):
+        """No end state available → the code, and an honest hedge.
+
+        The wording changed when VD2 landed: with no cell-end state the harness
+        genuinely cannot say *why* the line did not take effect, so it names the
+        possibilities instead of asserting one. `TestCellEndAnswerState` covers
+        the case where the state settles it.
+        """
         message = _assistant("```repl\nanswer['ready'] = True\n```", turn=4)
         diagnostic = _diagnose_missing_submission([message], [_repl(4)])
         assert diagnostic["code"] == DIAG_NOT_REACHED
-        assert "not reached at runtime" in diagnostic["detail"]
+        assert "cannot tell" in diagnostic["detail"]
         assert "turn 4" in diagnostic["detail"]
 
     @pytest.mark.parametrize("tag", ["", "repl", "python"])

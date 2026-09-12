@@ -456,6 +456,8 @@ DIAG_PROSE = "submission_text_outside_fence"
 DIAG_UNEXECUTABLE_TAG = "submission_text_in_unexecutable_fence"
 DIAG_TEXT_NOT_CODE = "submission_text_is_quoted_or_commented"
 DIAG_BLOCK_RAISED = "submission_block_raised"
+DIAG_ANSWER_REBOUND = "submission_answer_rebound"
+DIAG_STATE_INCONSISTENT = "submission_state_inconsistent"
 DIAG_NOT_REACHED = "submission_not_reached_at_runtime"
 
 
@@ -614,15 +616,24 @@ def _diagnose_missing_submission(
     1. an executed block in which the line is *text*, not code — inside a string
        literal or after a ``#`` (the interpreter never sees it as a statement);
     2. an executed block whose cell raised a traceback;
-    3. an executed block that ran clean and still did not submit — the line was
-       not reached at runtime (a conditional, a loop, a rebound ``answer``, or an
-       earlier block in the same turn that ended the turn first);
-    4. text inside a tag the parser never executes (``json``, ``bash``, …);
-    5. text outside every fence, which the parser never extracts at all.
+    3. an executed block whose cell ended with `answer` rebound to something that
+       is not a dict, so no submission could have taken effect (VD2 — this needs
+       the cell-end state the REPL now reports);
+    4. a cell that ended with `answer` ready yet recorded no submission, or whose
+       `answer` could not be inspected at all — a harness inconsistency rather
+       than a model verdict;
+    5. an executed block that ran clean and still did not submit — the line was
+       not reached at runtime (a conditional, a loop, or an earlier block in the
+       same turn that ended the turn first), stated with more confidence when the
+       cell-end state proves the scaffold survived the cell;
+    6. text inside a tag the parser never executes (``json``, ``bash``, …);
+    7. text outside every fence, which the parser never extracts at all.
 
     (1) outranks (2) deliberately: a traceback elsewhere in the cell does not
     change the fact that *this* line was never a statement, and that fact is the
-    actionable one.
+    actionable one. (3) and (4) sit after (2) because a traceback is an observed
+    event with its own evidence, while the end state is an interpretation of what
+    was left behind.
     """
     candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for message in assistants:
@@ -674,19 +685,82 @@ def _diagnose_missing_submission(
                 ),
             }
 
+    # VD2: the cell-end state separates the cases the trajectory alone could not.
+    # A rebound `answer` or a ready-but-unrecorded submission is a fact about the
+    # cell's final state; without it, "not reached at runtime" was the only thing
+    # the harness could honestly say.
+    for message, _site in executed:
+        turn = message.get("turn")
+        for entry in repl_entries:
+            if entry.get("turn") != turn:
+                continue
+            state = entry.get("answer_state")
+            if not isinstance(state, dict):
+                continue
+            if state.get("error"):
+                return {
+                    "code": DIAG_STATE_INCONSISTENT,
+                    "detail": (
+                        f"the scaffold `answer` could not be read at the end of "
+                        f"the cell (turn {turn}): {state['error']} raised while "
+                        "inspecting it. That is a model-side object the harness "
+                        "cannot interpret — report it as a harness limitation, not "
+                        "a model verdict."
+                    ),
+                }
+            if not state.get("is_dict"):
+                kind = state.get("type", "unknown")
+                return {
+                    "code": DIAG_ANSWER_REBOUND,
+                    "detail": (
+                        f"`answer` was a {kind}, not a dict, when the cell ended "
+                        f"(turn {turn}) — model code rebound the scaffold, so even "
+                        "a submission line that did run could not have taken "
+                        "effect. The cell must leave `answer` a dict."
+                    ),
+                }
+            if state.get("ready"):
+                return {
+                    "code": DIAG_STATE_INCONSISTENT,
+                    "detail": (
+                        f"the cell's `answer` was ready at the end (turn {turn}) "
+                        "yet no submission was recorded — the REPL derives a "
+                        "submission from exactly that state, so this is a harness "
+                        "inconsistency, not a model verdict."
+                    ),
+                }
+
     if executed:
-        return {
-            "code": DIAG_NOT_REACHED,
-            "detail": (
+        turns = _turns([m for m, _ in executed])
+        # Sharper wording when the state proves the scaffold survived the cell.
+        intact = any(
+            isinstance(entry.get("answer_state"), dict)
+            and entry["answer_state"].get("is_dict")
+            and not entry["answer_state"].get("ready")
+            and not entry["answer_state"].get("error")
+            for message, _site in executed
+            for entry in repl_entries
+            if entry.get("turn") == message.get("turn")
+        )
+        if intact:
+            detail = (
                 "submission line is a real statement in an executed block (turn "
-                f"{_turns([m for m, _ in executed])}) that produced no traceback "
-                "and no submission — it was not reached at runtime. The harness "
-                "cannot tell which of these it was: a conditional or loop body "
-                "that did not run, `answer` rebound to something that is not a "
-                "dict, or an earlier block in the same turn that ended the turn "
-                "first."
-            ),
-        }
+                f"{turns}) that ran clean, and the scaffold `answer` was still "
+                "intact with ready=False when the cell ended — so the line "
+                "genuinely never ran. Usual causes: a conditional or loop body "
+                "that did not execute, or an earlier block in the same turn that "
+                "ended the turn first."
+            )
+        else:
+            detail = (
+                "submission line is a real statement in an executed block (turn "
+                f"{turns}) that produced no traceback and no submission, and the "
+                "cell reported no end state to interpret — the harness cannot "
+                "tell which of these it was: a conditional or loop body that did "
+                "not run, `answer` rebound to something that is not a dict, or an "
+                "earlier block in the same turn that ended the turn first."
+            )
+        return {"code": DIAG_NOT_REACHED, "detail": detail}
 
     wrong_tag = [c for c in candidates if c[1]["placement"] == "fence"]
     if wrong_tag:
