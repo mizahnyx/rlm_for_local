@@ -550,7 +550,10 @@ only in P4 (`docs/20260911-1359-p4-live-confirmation.md`). The probe now scores
 the mean of three trials and passes only on a majority, which is also why a
 `--quick` run on a slow host costs roughly two extra model conversations:
 `RLM_CHECK_P4_TRIALS=1` (or `2`) buys that time back at the price of exactly the
-stability, and the run says so in its own evidence when you do.
+stability, and the run says so in its own evidence when you do. On a cold router
+that same model then scored **0 of 3** trials — the same 46.7 and NOT SUITABLE,
+but now as "it does not submit, three times, for three different reasons" rather
+than "the sample we took" (`docs/20260912-0219-p4-multi-trial-live-confirmation.md`).
 
 **Re-check cadence:** on model upgrade, on prompt change, or when you notice
 degradation. Record the run yourself — `rlm check` prints its report, it does not

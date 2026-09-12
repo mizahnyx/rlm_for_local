@@ -49,6 +49,7 @@ for the `rlm-kernel` implementation against its specification
 | 2026-09-11 12:19 | `20260911-1219-assessment-follow-ups-hardening.md` | That assessment's follow-ups enacted: cross-origin (CSRF) check on every state-changing route, a real P4 disagreement diagnostic, battery reweighting off the saturated probe |
 | 2026-09-11 13:59 | `20260911-1359-p4-live-confirmation.md` | Live confirmation of that diagnostic on the model it came from: 46.7/NOT SUITABLE (predicted), the contradiction reproduced, and the finding that P4 is single-trial — one probe run swings this model's verdict a full band |
 | 2026-09-11 15:18 | `20260911-1518-p4-multi-trial.md` | P4 sampled three times on three questions, scored as mean credit with a majority pass rule — the owner's call on score semantics, with `RLM_CHECK_P4_TRIALS` as the time/stability knob |
+| 2026-09-12 02:19 | `20260912-0219-p4-multi-trial-live-confirmation.md` | That change confirmed live: same 46.7/NOT SUITABLE, P4 `none/none/none`, and the three trials failed by three different mechanisms — the text-in-a-string one named only by the check added the same day |
 
 ## Status
 
@@ -93,3 +94,7 @@ confirmation: the verdict moved as predicted, and P4's single-trial sampling
 means one probe run can swing a model's verdict a full band. That last finding
 was then acted on: `20260911-1518-p4-multi-trial.md` samples P4 three times, on
 the owner's decision, which is the only scoring-semantics change in this thread.
+That change was in turn confirmed live in
+`20260912-0219-p4-multi-trial-live-confirmation.md`, where the three trials failed
+by three different mechanisms — the strongest available argument that sampling P4
+once was reporting an arbitrary one of them.

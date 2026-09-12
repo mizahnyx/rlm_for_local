@@ -136,6 +136,13 @@ block. Reproducing it requires the same cache state, and five further attempts
 kept trace. The new text/code check would name that mechanism if it applied, but
 it was not observed applying here, and this document does not claim it did.
 
+**Closed 2026-09-12 02:19:** the mechanism *was* observed applying, in the
+three-trial live battery recorded in
+`20260912-0219-p4-multi-trial-live-confirmation.md` — trial 1 wrote the
+submission line inside a string in an executed block, and the check added here
+named it. The lexer hypothesis in §4 is therefore verified on a real model rather
+than inferred from this model's habit of writing code as text.
+
 ## 6. Follow-ups
 
 - **P4 is single-trial.** Consider N trials with a pass rate (as P1 does) or a
