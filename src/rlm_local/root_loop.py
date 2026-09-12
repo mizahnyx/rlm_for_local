@@ -241,6 +241,7 @@ class RootLoop:
                         repl_result.final_answer,
                         repl_result.warnings,
                         repl_result.answer_state,
+                        repl_result.scaffold_repaired,
                     )
 
                 # ── §5.6 stage 4: stderr self-correction (R5) ─────────────

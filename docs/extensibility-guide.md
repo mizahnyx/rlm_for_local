@@ -974,9 +974,15 @@ not a permission boundary.**
 - It is a child process of the harness, launched with `sys.executable` and the
   parent's environment (`env={**os.environ, "RLM_REPL_HOST": …, "RLM_REPL_PORT": …}`),
   running as the same user.
-- Its cells are executed with `exec(code, globals())` and the interpreter's
-  normal builtins. There is no restricted-builtin wrapper, no import block, and
-  no `open()` jail. `import os`, `subprocess`, and `socket` all work.
+- Its cells are executed with `exec(code, globals())`. Since 2026-09-12 the
+  dynamic-execution family is removed from the model's builtins (`eval`, `exec`,
+  `compile`, `globals`, `locals` — `RLM_REPL_ALLOW_DYNAMIC=1` restores them) and
+  the worker can be memory-bounded with `RLM_REPL_MEMORY_MB` where the OS allows
+  it, but there is **no import block and no `open()` jail**: `import os` (and
+  therefore `subprocess`, `socket`, and the filesystem) all still work, by design
+  and by record — the `open` jail was retired as unenforceable rather than
+  claimed (roadmap DG2). The worker's own names remain reachable from a cell
+  through `globals()` (roadmap DG10).
 - The worker even *needs* a socket: it connects back to the harness over
   loopback TCP and uses that connection to request sub-calls and vault searches.
 

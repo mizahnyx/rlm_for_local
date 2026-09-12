@@ -595,8 +595,8 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "VD2 the REPL stops reporting the cell-end answer state",
         "src/rlm_local/repl.py",
-        "                \"answer_state\": _answer_state(),",
-        "                \"answer_state\": None,",
+        "            answer_state = _answer_state()",
+        "            answer_state = None",
         [
             "tests/test_model_check.py::TestCellEndAnswerState"
             "::test_a_real_cell_reports_its_final_answer_state",
@@ -683,7 +683,52 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_an_unterminated_call_is_scored_invalid",
         ],
     ),
+    # ── DG1/DG4: design §5.3, implemented 2026-09-12 (roadmap item 6) ──────
+    (
+        "DG1 model code gets the full builtins again",
+        "src/rlm_local/repl.py",
+        "_BLOCKED_BUILTINS = frozenset(\n"
+        "    {\"input\", \"eval\", \"exec\", \"compile\", \"globals\", \"locals\", \"breakpoint\"}\n"
+        ")",
+        "_BLOCKED_BUILTINS = frozenset()",
+        [
+            "tests/test_repl.py::TestDesignSection53Scaffold"
+            "::test_model_code_cannot_use_the_dynamic_execution_family",
+        ],
+    ),
+    (
+        "DG4 the scaffold is never restored after a cell",
+        "src/rlm_local/repl.py",
+        "            scaffold_repaired = _restore_scaffold()",
+        "            scaffold_repaired = []",
+        [
+            "tests/test_repl.py::TestDesignSection53Scaffold"
+            "::test_a_rebound_answer_is_repaired_for_the_next_cell",
+            "tests/test_repl.py::TestDesignSection53Scaffold"
+            "::test_a_helper_overwritten_by_a_non_callable_is_repaired",
+        ],
+    ),
+    (
+        "DG4 the cell-end state is read after the scaffold is repaired",
+        "src/rlm_local/repl.py",
+        "                \"answer_state\": answer_state,",
+        "                \"answer_state\": _answer_state(),",
+        [
+            "tests/test_repl.py::TestDesignSection53Scaffold"
+            "::test_a_rebound_answer_is_repaired_for_the_next_cell",
+        ],
+    ),
 ]
+
+# NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
+# worker's address space with `resource.setrlimit`, which does not exist on
+# Windows. Its effect is therefore unobservable on this development host, and a
+# mutation entry for it would be reported as VACUOUS — a false alarm about the
+# code rather than about the test. The guard is covered by
+# `TestDesignSection53Scaffold::test_a_memory_limit_is_honoured_where_the_os_allows_it`,
+# which skips the effect assertion on Windows and always asserts that a bogus
+# value does not stop the worker. Recorded here so the gap is explicit rather
+# than looked over.
 
 
 def run_tests(node_ids: list[str]) -> int:

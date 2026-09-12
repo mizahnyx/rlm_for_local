@@ -512,18 +512,30 @@ The REPL is a **subprocess-isolated** Python interpreter, not an in-process
 2. **Memory isolation.** The worker's memory is bounded by the OS, not by the
    harness process.
 
-**It is a process boundary, not a security sandbox.** Design §5.3 called for
-restricted builtins (`input`/`eval`/`exec`/`compile`/`globals`/`locals` blocked)
-and `open` jailed to the task directory. **That was never implemented**: the
-worker runs `exec(code, globals())` with normal builtins, imports the standard
-library itself, opens the loopback socket it needs, and is launched with
-`env={**os.environ, ...}` — so it inherits the harness's environment variables.
+**It is a process boundary, not a security sandbox.** Design §5.3 asked for four
+things; three are now implemented and one is retired, and the distinction matters
+more than the summary (roadmap item 6, 2026-09-12):
 
-What that means in practice: run the harness against context and models you
-trust. Model-authored code is not confined by the REPL; a cell can read files the
-harness user can read. The kernel's gate (§7.3.1 of the kernel manual) is likewise
-a *quality* gate rather than containment. If you need real isolation, run the
-whole harness in a container or a dedicated user account.
+| §5.3 requirement | State |
+|---|---|
+| Restricted builtins for model code | **Implemented.** `input`, `eval`, `exec`, `compile`, `globals` and `locals` are removed for the model's cell (plus `breakpoint`, which in a worker with no stdin would sit there until the cell timeout). `RLM_REPL_ALLOW_DYNAMIC=1` restores them. |
+| Memory bound on the worker | **Implemented where the OS allows** — `RLM_REPL_MEMORY_MB` sets `RLIMIT_AS` at worker start. POSIX only; on Windows there is no `resource` module and the cell timeout is the only bound. |
+| Scaffold names restored after every cell | **Implemented.** `answer` rebound to a non-dict, `context` deleted, a helper overwritten by a non-callable: the working binding is put back and the repaired names are recorded in the trajectory. "Restored" means *usable*, not *reset* — `answer['content']` survives between cells, or the submission protocol could not work at all. |
+| `open` jailed to the task directory | **Retired, deliberately.** It cannot be enforced: imports stay permitted (`import os`), the worker's own `_FileContext` must read the spill file outside any task directory, and `os.open`/`pathlib` bypass a Python-level `open` wrapper. Keeping the requirement would have bought a claim, not a boundary. |
+
+**What remains true, stated plainly:** the worker imports the standard library
+itself, opens the loopback socket it needs, and is launched with
+`env={**os.environ, ...}`, so it inherits the harness's environment. Its own
+module names (`os`, `socket`, `sys`, and the protocol functions `_send`/`_recv`)
+are reachable from a cell through `globals()`, and `import os` is allowed — so a
+model that *means* to reach the filesystem or a shell still can. Executing model
+code in a dedicated namespace, so the harness's internals are not sitting in the
+model's globals, is recorded as roadmap DG10 rather than implied to be done.
+
+What that means in practice: run the harness against content and models you
+trust. The kernel's gate (§7.3.1 of the kernel manual) is likewise a *quality*
+gate rather than containment. If you need real isolation, run the whole harness
+in a container or a dedicated user account.
 
 ### 6.2 Communication Protocol
 

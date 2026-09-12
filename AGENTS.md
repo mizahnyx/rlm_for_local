@@ -141,9 +141,12 @@ Use `-m`. (Measured on 2026-09-11: `-m` 744 passed / 12 deselected vs `-k` 724 /
 ## 7. Security posture, in one paragraph
 
 The defaults assume a single trusted user on one machine. The kernel gate is a
-*quality* gate, not containment; the REPL is a process boundary, not a sandbox;
-TLS verification is off for the local self-signed server (with a warning);
-the web console is loopback-only without `RLM_WEB_TOKEN`, requires
-`RLM_WEB_SECRET` with one, and checks the origin of every state-changing request.
-Run against content and models you trust. Details: `README.md` §Security Posture
-and `docs/operator-guide.md` §6.
+*quality* gate, not containment; the REPL is a process boundary, not a sandbox —
+model code runs without `eval`/`exec`/`compile`/`globals`/`locals` and the worker
+can be memory-bounded, but imports stay permitted and the worker's own names are
+reachable through `globals()`, so a cell can still reach the filesystem (roadmap
+DG10 covers closing that); TLS verification is off for the local self-signed
+server (with a warning); the web console is loopback-only without
+`RLM_WEB_TOKEN`, requires `RLM_WEB_SECRET` with one, and checks the origin of
+every state-changing request. Run against content and models you trust. Details:
+`README.md` §Security Posture and `docs/operator-guide.md` §6.

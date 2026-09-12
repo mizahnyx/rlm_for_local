@@ -206,10 +206,14 @@ knowing before you expose anything:
   parsed and pattern-scanned by default; running it in the restricted-builtin
   sandbox is opt-in (`rlm-kernel review --execute`, `validate(..., execute=True)`)
   and is escapable on CPython. See the kernel manual §7.3.1.
-- **The REPL is a process boundary, not a sandbox.** Design §5.3's restricted
-  builtins and `open` jail were never implemented: a cell can read what the
-  harness user can read, and the worker inherits the harness environment. Run
-  against content and models you trust.
+- **The REPL is a process boundary, not a sandbox.** Model code runs with the
+  dynamic-execution family removed (`eval`/`exec`/`compile`/`globals`/`locals`,
+  overridable with `RLM_REPL_ALLOW_DYNAMIC=1`) and the worker's memory can be
+  bounded with `RLM_REPL_MEMORY_MB` where the OS allows it; scaffold names the
+  model breaks are restored after each cell. That is hygiene, not containment:
+  imports stay permitted, so a cell can still read what the harness user can read.
+  Design §5.3's `open` jail is retired as unenforceable rather than claimed.
+  Run against content and models you trust.
 - **TLS verification is off for local self-signed servers.** A non-loopback
   `https` endpoint with verification off raises a `UserWarning` rather than
   failing silently. Certificates and keys are never committed (`*.pem`,

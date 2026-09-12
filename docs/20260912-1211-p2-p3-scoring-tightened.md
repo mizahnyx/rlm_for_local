@@ -1,9 +1,15 @@
 # P2 and P3 scoring tightened — the deferred weaknesses are gone
 
-**Date:** 2026-09-12 12:40
+**Date:** 2026-09-12 12:11
 **Enacts:** roadmap items 4 and 5 (`docs/20260912-1155-roadmap.md`), ledger
 entries BS1, BS2, BS3.
 **Status:** enacted; three new mutations red as required (54 in the table).
+
+*Timestamp note:* this document was first written as `20260912-1240-…` from an
+unchecked reading of the clock. The naming convention makes the prefix the
+creation time, so it has to be true; renamed to 12:11, the time verified when the
+error was noticed, and the error is recorded here rather than quietly fixed — a
+prefix an auditor cannot trust is worse than no prefix.
 
 Two of the battery's probes were documented, deferred weaknesses — pinned by
 tests that asserted the *bad* behaviour so a change would be deliberate. This is

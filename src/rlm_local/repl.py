@@ -65,6 +65,14 @@ class REPLResult:
     and did not.
     """
 
+    scaffold_repaired: list[str] = field(default_factory=list)
+    """Scaffold names the worker had to restore after this cell (design §5.3).
+
+    Empty on a normal cell. Non-empty means model code left `answer`, `context`
+    or a helper unusable and the harness put the working binding back, so the
+    next cell starts from a namespace it can work in.
+    """
+
 
 # ── Wire protocol ─────────────────────────────────────────────────────────
 
@@ -331,6 +339,12 @@ propose = _harness_propose
 answer = {"content": "", "ready": False}
 context = None
 
+# Scaffold registry (design §5.3). Filled in once the helpers below are defined
+# and again after the harness injects vault helpers, so `_restore_scaffold` knows
+# what a working binding looks like.
+_SCAFFOLD_ORIGINALS = {}
+_CONTEXT_ORIGINAL = None
+
 
 def _answer_state():
     '''The scaffold `answer` as it stands when a cell ends (VD2).
@@ -431,10 +445,108 @@ def show_vars():
                 s = '<unprintable>'
             print(f"{name}: {t} = {s}")
 
+# Register the scaffold's own helpers as the "working" bindings (design §5.3).
+for _scaffold_name in ('peek', 'grep', 'chunk', 'map_query', 'show_vars',
+                       'llm_query', 'llm_query_batched', 'search', 'propose'):
+    _SCAFFOLD_ORIGINALS[_scaffold_name] = globals().get(_scaffold_name)
+
 # ── Main loop ─────────────────────────────────────────────────────────────
 
+# Design §5.3: model code runs with the dynamic-execution family removed
+# (`input/eval/exec/compile/globals/locals`, plus `breakpoint` — a worker with no
+# stdin would sit there until the cell timeout). `RLM_REPL_ALLOW_DYNAMIC=1`
+# restores full builtins for an operator whose cells need them.
+#
+# What this is and is not, stated plainly because a half-truth here would be
+# worse than nothing: it is *hygiene* against a model reaching into the harness's
+# machinery by accident, not a boundary. Imports stay permitted, so `import os`
+# (and therefore `os.system`) remains reachable by a model that means it; what
+# actually bounds a cell is the subprocess, the wall-clock timeout, and the
+# memory rlimit below. `_WORKER_SCRIPT`'s own names — `os`, `socket`, `sys`,
+# `_send`, `_recv` — are still visible to model code through `globals()`, which is
+# recorded as roadmap DG10 rather than papered over.
+_BLOCKED_BUILTINS = frozenset(
+    {"input", "eval", "exec", "compile", "globals", "locals", "breakpoint"}
+)
+
+
+def _model_builtins():
+    '''Builtins for model code: everything except the dynamic-execution family.'''
+    import builtins
+
+    if os.environ.get('RLM_REPL_ALLOW_DYNAMIC') == '1':
+        return builtins.__dict__
+    return {
+        name: value for name, value in vars(builtins).items()
+        if name not in _BLOCKED_BUILTINS
+    }
+
+
+def _apply_memory_limit():
+    '''Bound the worker's address space where the OS allows it (design §5.3).
+
+    POSIX only: Windows has no `resource` module, so this is a no-op there and
+    the cell timeout is the only bound. Never fatal — a host that refuses the
+    limit must not stop a worker from starting.
+    '''
+    raw = os.environ.get('RLM_REPL_MEMORY_MB', '')
+    if not raw:
+        return
+    try:
+        import resource
+
+        limit = int(raw) * 1024 * 1024
+        if limit > 0:
+            resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+    except Exception:
+        pass
+
+
+def _restore_scaffold():
+    '''Make the scaffold usable again if model code broke it (design §5.3).
+
+    "Restored" means *usable*, not *reset*: a cell is free to set
+    `answer['content']`, and that state must survive into the next cell or the
+    submission protocol could never work at all. What gets repaired is a name
+    that no longer holds something the next cell can use — `answer` rebound to a
+    string, a helper overwritten by an int, `context` deleted. A model that
+    deliberately replaces `grep` with a different *callable* is left alone.
+
+    Returns the repaired names, which the harness records.
+    '''
+    global answer, context
+
+    ns = globals()
+    repaired = []
+
+    if not isinstance(answer, dict):
+        answer = {'content': '', 'ready': False}
+        repaired.append('answer')
+
+    if 'context' not in ns or (ns['context'] is None and _CONTEXT_ORIGINAL is not None):
+        if _CONTEXT_ORIGINAL is not None:
+            context = _CONTEXT_ORIGINAL
+            repaired.append('context')
+
+    for name, original in _SCAFFOLD_ORIGINALS.items():
+        if original is None:
+            continue
+        current = ns.get(name, None)
+        if current is original:
+            continue
+        if not callable(current):
+            ns[name] = original
+            repaired.append(name)
+
+    return repaired
+
+
 def main():
-    global context, answer, _cell_id
+    global context, answer, _cell_id, _CONTEXT_ORIGINAL
+
+    _apply_memory_limit()
+    _MODEL_BUILTINS = _model_builtins()
+
     while True:
         msg = _recv()
         cmd = msg.get("cmd")
@@ -445,15 +557,27 @@ def main():
             cap_buf = StringIO()
             err_buf = StringIO()
             old_out, old_err = sys.stdout, sys.stderr
+            ns = globals()
+            previous_builtins = ns.get('__builtins__')
             try:
                 sys.stdout = cap_buf
                 sys.stderr = err_buf
-                exec(code, globals())
+                ns['__builtins__'] = _MODEL_BUILTINS
+                exec(code, ns)
             except Exception:
                 traceback.print_exc(file=err_buf)
             finally:
+                # The worker's own post-cell work keeps the real builtins; only
+                # the model's cell ran restricted.
+                ns['__builtins__'] = previous_builtins
                 sys.stdout = old_out
                 sys.stderr = old_err
+
+            # Order matters: the state and the submission are read from what the
+            # *model's* cell left behind, and only then is the scaffold repaired
+            # for the next cell. Repairing first would hide a rebound `answer`
+            # from the diagnostic that exists to report it.
+            answer_state = _answer_state()
 
             final_answer = None
             try:
@@ -469,13 +593,16 @@ def main():
                 # uninspectable `answer` as "not ready" and report the state.
                 final_answer = None
 
+            scaffold_repaired = _restore_scaffold()
+
             _send({
                 "type": "result",
                 "cell_id": _cell_id,
                 "stdout": cap_buf.getvalue(),
                 "stderr": err_buf.getvalue(),
                 "final_answer": final_answer,
-                "answer_state": _answer_state(),
+                "answer_state": answer_state,
+                "scaffold_repaired": scaffold_repaired,
             })
 
         elif cmd == "init":
@@ -486,12 +613,21 @@ def main():
                 context = ""
             else:
                 context = raw_ctx
+            # Snapshot the initial context so `_restore_scaffold` can put it back
+            # if model code deletes or clears it (design §5.3).
+            _CONTEXT_ORIGINAL = context
             helpers = msg.get("helpers", [])
             for h in helpers:
                 try:
                     exec(h["code"], globals())
                 except Exception:
                     pass
+            # Vault-injected helpers count as scaffold too: a cell that rebinds
+            # one to a non-callable gets the injected definition back.
+            for h in helpers:
+                _scaffold_name = h.get("name")
+                if _scaffold_name:
+                    _SCAFFOLD_ORIGINALS[_scaffold_name] = globals().get(_scaffold_name)
             _send({"type": "result", "cell_id": None, "status": "ok"})
 
         elif cmd == "search":
@@ -727,9 +863,11 @@ class REPLSandbox:
             stderr = _truncate_middle(stderr, self._stdout_cap)
 
         self._consecutive_timeouts = 0
+        repaired = msg.get("scaffold_repaired")
         return REPLResult(
             stdout=stdout, stderr=stderr, final_answer=final_answer,
             answer_state=answer_state if isinstance(answer_state, dict) else None,
+            scaffold_repaired=repaired if isinstance(repaired, list) else [],
         )
 
     def _on_timeout(self, cell_id: int) -> REPLResult:

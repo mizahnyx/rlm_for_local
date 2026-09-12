@@ -115,13 +115,18 @@ class TrajectoryLogger:
 
     def log_repl_result(self, turn: int, stdout: str, stderr: str,
                         final_answer: str | None, warnings: list[str],
-                        answer_state: dict[str, Any] | None = None) -> None:
+                        answer_state: dict[str, Any] | None = None,
+                        scaffold_repaired: list[str] | None = None) -> None:
         """Record one cell's outcome.
 
         `answer_state` is the scaffold `answer` as it stood when the cell ended
         (VD2). It is optional because not every caller has one — a timed-out cell
         has no reliable state — and a consumer that needs it must treat None as
         "unknown", never as "unchanged".
+
+        `scaffold_repaired` lists scaffold names the worker had to put back after
+        this cell (design §5.3): model code left `answer`, `context` or a helper
+        unusable, and the harness restored it.
         """
         self._write({
             "event": "repl_result",
@@ -132,6 +137,7 @@ class TrajectoryLogger:
             "final_answer": final_answer,
             "warnings": warnings,
             "answer_state": answer_state,
+            "scaffold_repaired": scaffold_repaired or [],
         })
 
     def log_subcall(self, turn: int, index: int, prompt: str, response: str,

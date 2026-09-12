@@ -261,6 +261,154 @@ class TestOutputCapHonesty:
         assert REPLSandbox(stdout_cap=1234).stdout_cap == 1234
 
 
+class TestDesignSection53Scaffold:
+    """Design §5.3, implemented 2026-09-12 (roadmap DG1, DG3, DG4).
+
+    The design promised three things the code never did: restricted builtins for
+    model code, a memory bound on the worker, and scaffold names restored after
+    every cell so model code cannot brick the environment.
+    """
+
+    def _sandbox(self):
+        return REPLSandbox(cell_timeout=20.0)
+
+    def test_model_code_cannot_use_the_dynamic_execution_family(self):
+        repl = self._sandbox()
+        repl.start(None, None)
+        try:
+            for expression in ("eval('1+1')", "exec('x = 1')", "globals()",
+                               "locals()", "compile('1', '<s>', 'eval')"):
+                result = repl.execute(f"print({expression})" if "(" in expression
+                                      else expression)
+                assert "NameError" in result.stderr or "RuntimeError" in result.stderr, (
+                    f"{expression} was allowed: stderr={result.stderr!r}"
+                )
+        finally:
+            repl.shutdown()
+
+    def test_ordinary_code_still_works(self):
+        """The restriction must not break what cells actually do."""
+        repl = self._sandbox()
+        repl.start(None, None)
+        try:
+            result = repl.execute(
+                "import json\n"
+                "print(len([1, 2, 3]))\n"
+                "print(json.dumps({'a': 1}))\n"
+                "answer['content'] = 'ok'\n"
+                "answer['ready'] = True"
+            )
+        finally:
+            repl.shutdown()
+
+        assert result.stderr == "", result.stderr
+        assert result.final_answer == "ok"
+        assert "3" in result.stdout
+
+    def test_the_escape_hatch_restores_full_builtins(self, monkeypatch):
+        monkeypatch.setenv("RLM_REPL_ALLOW_DYNAMIC", "1")
+        repl = self._sandbox()
+        repl.start(None, None)
+        try:
+            result = repl.execute("print(eval('2+2'))")
+        finally:
+            repl.shutdown()
+
+        assert result.stderr == "", result.stderr
+        assert "4" in result.stdout
+
+    def test_a_rebound_answer_is_repaired_for_the_next_cell(self):
+        """The design's "model code can't brick the environment", measured."""
+        repl = self._sandbox()
+        repl.start(None, None)
+        try:
+            first = repl.execute("answer = 'not a dict'")
+            assert first.scaffold_repaired == ["answer"]
+            assert first.answer_state == {"is_dict": False, "type": "str"}
+
+            # The next cell must be able to submit normally.
+            second = repl.execute(
+                "answer['content'] = 'recovered'\nanswer['ready'] = True"
+            )
+        finally:
+            repl.shutdown()
+
+        assert second.final_answer == "recovered"
+        assert second.scaffold_repaired == []
+
+    def test_a_helper_overwritten_by_a_non_callable_is_repaired(self):
+        repl = self._sandbox()
+        repl.start(None, None)
+        try:
+            first = repl.execute("grep = 42")
+            assert "grep" in first.scaffold_repaired
+
+            second = repl.execute("hits = grep('important')\nprint(len(hits))")
+        finally:
+            repl.shutdown()
+
+        assert second.stderr == "", second.stderr
+
+    def test_a_deliberate_helper_override_is_left_alone(self):
+        """Restoring is about usability, not about freezing the namespace."""
+        repl = self._sandbox()
+        repl.start(None, None)
+        try:
+            first = repl.execute("def grep(pattern, max_hits=50):\n    return ['custom']")
+            assert first.scaffold_repaired == []
+            second = repl.execute("print(grep('x'))")
+        finally:
+            repl.shutdown()
+
+        assert "custom" in second.stdout
+
+    def test_deleting_the_context_is_repaired(self):
+        repl = self._sandbox()
+        repl.start("hello context", None)
+        try:
+            first = repl.execute("del context")
+            assert "context" in first.scaffold_repaired
+            second = repl.execute("print(len(context))")
+        finally:
+            repl.shutdown()
+
+        assert second.stderr == "", second.stderr
+
+    def test_a_memory_limit_is_honoured_where_the_os_allows_it(self, monkeypatch):
+        """POSIX: the worker's address space is bounded. Windows: a no-op."""
+        import sys
+
+        monkeypatch.setenv("RLM_REPL_MEMORY_MB", "512")
+        repl = self._sandbox()
+        repl.start(None, None)
+        try:
+            result = repl.execute(
+                "import resource\n"
+                "print(resource.getrlimit(resource.RLIMIT_AS)[0])"
+                if sys.platform != "win32" else
+                "print('windows: no rlimit')"
+            )
+        finally:
+            repl.shutdown()
+
+        assert result.stderr == "", result.stderr
+        if sys.platform != "win32":
+            assert str(512 * 1024 * 1024) in result.stdout
+        else:
+            assert "no rlimit" in result.stdout
+
+    def test_a_bogus_memory_limit_does_not_stop_the_worker(self, monkeypatch):
+        monkeypatch.setenv("RLM_REPL_MEMORY_MB", "not-a-number")
+        repl = self._sandbox()
+        repl.start(None, None)
+        try:
+            result = repl.execute("print('still alive')")
+        finally:
+            repl.shutdown()
+
+        assert "still alive" in result.stdout
+
+
 class TestDiskBackedContextInWorker:
     """R1 — the spill contract must survive the socket boundary.
 
