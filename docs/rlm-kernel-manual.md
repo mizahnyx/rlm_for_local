@@ -227,7 +227,7 @@ templates, memory notes — is a **page**: a markdown file with YAML frontmatter
 
 ```markdown
 ---
-schema: 1
+schema_version: 1
 id: 01KYC5MTDQJ9SRSPDWC79XZNCM
 kind: helper
 name: grep
@@ -276,7 +276,7 @@ hits = grep("blue", max_hits=3)
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `schema` | `int` | Yes | Schema version. Currently only `1`. |
+| `schema_version` | `int` | Auto | Schema version. Currently only `1`. Renamed from `schema` (R23, 2026-09-12) because the old name shadowed pydantic's deprecated `BaseModel.schema`. **Pages carrying the old key still load** — both are accepted on read — and `rlm-kernel migrate-schema` rewrites them (dry-run by default). |
 | `id` | `str` | Auto | 26-character ULID, stable forever. Auto-generated if omitted. |
 | `kind` | `str` | Yes | One of: `contract`, `template`, `definition`, `helper`, `fewshot`, `note`, `topic`, `cache`. |
 | `name` | `str` | Yes | Machine name, unique within its kind for helper and template pages. Must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` — no path separators, no leading dot or whitespace (S4/R20), because it becomes the page path on promotion. |
@@ -353,9 +353,9 @@ fm = Frontmatter(
 )
 page = Page(fm, "# Blue Widget\n\nDocumentation about blue widgets.")
 
-# Parse a page from markdown
+# Parse a page from markdown (the pre-R23 `schema:` key is still accepted)
 raw = """---
-schema: 1
+schema_version: 1
 kind: note
 name: my-note
 title: "My Note"

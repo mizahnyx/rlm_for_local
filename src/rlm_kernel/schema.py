@@ -14,7 +14,7 @@ from enum import Enum
 from typing import Any
 
 from rlm_kernel._ulid import new as _ulid_new
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 
 # ── Enums ──────────────────────────────────────────────────────────────────
@@ -57,7 +57,17 @@ NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 class Frontmatter(BaseModel):
     """Validated frontmatter for a wiki page (§3.2)."""
 
-    schema: int = Field(default=1, ge=1, le=max(VALID_SCHEMA_VERSIONS))
+    # R23: this field was named `schema`, which shadowed pydantic's deprecated
+    # `BaseModel.schema` and produced a UserWarning on every import. Renamed to
+    # `schema_version`, with the old key still accepted on *read* so pages written
+    # before the rename load unchanged (dual-parse), and
+    # `migrate_schema_key()`/`LocalVault.migrate_schema_keys()` to rewrite them.
+    schema_version: int = Field(
+        default=1,
+        ge=1,
+        le=max(VALID_SCHEMA_VERSIONS),
+        validation_alias=AliasChoices("schema_version", "schema"),
+    )
     id: str = Field(default_factory=_new_ulid, min_length=26, max_length=26)
     kind: PageKind
     name: str = Field(min_length=1, max_length=128)
@@ -77,11 +87,11 @@ class Frontmatter(BaseModel):
     access_count: int = Field(default=0, ge=0)
     last_access: datetime | None = Field(default=None)
 
-    model_config = {"use_enum_values": False}
+    model_config = {"use_enum_values": False, "populate_by_name": True}
 
-    @field_validator("schema")
+    @field_validator("schema_version")
     @classmethod
-    def _check_schema(cls, v: int) -> int:
+    def _check_schema_version(cls, v: int) -> int:
         if v not in VALID_SCHEMA_VERSIONS:
             raise ValueError(f"Unsupported schema version: {v}. Supported: {VALID_SCHEMA_VERSIONS}")
         return v
@@ -112,7 +122,7 @@ class Frontmatter(BaseModel):
         # Ensure clean ordering
         ordered = {}
         for key in [
-            "schema", "id", "kind", "name", "title", "summary",
+            "schema_version", "id", "kind", "name", "title", "summary",
             "tags", "version", "hash", "status", "superseded_by",
             "created", "updated", "access_count", "last_access",
         ]:
@@ -173,6 +183,48 @@ class Page:
 # ── Parsing ────────────────────────────────────────────────────────────────
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+_SCHEMA_KEY_RE = re.compile(r"^schema:([ \t]*)(.*)$", re.MULTILINE)
+_SCHEMA_VERSION_KEY_RE = re.compile(r"^schema_version:", re.MULTILINE)
+
+
+def migrate_schema_key(content: str) -> tuple[str, bool]:
+    """Rename the frontmatter `schema:` key to `schema_version:` (R23).
+
+    Returns ``(content, changed)``.
+
+    Textual and confined to the frontmatter block, on purpose: a migration should
+    change the one key it is about. Re-serializing the page through
+    `Frontmatter.to_yaml()` would also reorder fields, restamp nothing but drop
+    any key the current model does not know, and rewrite formatting — a much
+    larger change than the one being made.
+
+    If both keys are present the new one wins on read (it is first in the
+    validation alias), so the stale `schema:` line is removed rather than renamed,
+    leaving a single source of truth in the file.
+    """
+    m = _FRONTMATTER_RE.match(content)
+    if not m:
+        return content, False
+
+    block = m.group(1)
+    match = _SCHEMA_KEY_RE.search(block)
+    if not match:
+        return content, False
+
+    if _SCHEMA_VERSION_KEY_RE.search(block):
+        # Drop the stale line (leading newline included) — the new key is present.
+        start = match.start()
+        if start > 0 and block[start - 1] == "\n":
+            start -= 1
+        new_block = block[:start] + block[match.end():]
+    else:
+        new_block = (
+            block[:match.start()]
+            + "schema_version:" + match.group(1) + match.group(2)
+            + block[match.end():]
+        )
+
+    return content[:m.start(1)] + new_block + content[m.end(1):], True
 
 
 def parse_page(content: str, path: str = "") -> Page:

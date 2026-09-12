@@ -94,10 +94,18 @@ class LocalVault:
         file_path.parent.mkdir(parents=True, exist_ok=True)
         page.path = path
 
-        content = page.to_markdown()
-        content_bytes = content.encode("utf-8")
+        self._write_text_atomic(file_path, page.to_markdown())
 
-        # Atomic write: write to temp file in same directory, fsync, rename
+        if self._git_available:
+            self._git_add(file_path)
+
+    def _write_text_atomic(self, file_path: Path, content: str) -> None:
+        """Replace a file's contents atomically (tmp in the same directory + rename).
+
+        Shared by `put` and the frontmatter migration so the crash-safety
+        argument is made once: a partial write must never be readable as a page.
+        """
+        content_bytes = content.encode("utf-8")
         tmp_fd, tmp_path = tempfile.mkstemp(
             dir=str(file_path.parent), prefix="." + file_path.name + ".",
             suffix=".tmp",
@@ -115,8 +123,39 @@ class LocalVault:
                 pass
             raise
 
-        if self._git_available:
-            self._git_add(file_path)
+    def migrate_schema_keys(self, commit: bool = True) -> list[str]:
+        """Rename the frontmatter `schema:` key to `schema_version:` (R23).
+
+        Walks the vault's markdown files directly rather than through `list()`,
+        which parses every page and silently skips the ones it cannot parse — a
+        migration has to reach exactly those files, or they are the ones left
+        behind.
+
+        Each file is rewritten textually (`schema.migrate_schema_key`), so every
+        other byte of the page is preserved, and the change goes through the
+        vault's git versioning like any other. Returns the relative paths that
+        changed.
+        """
+        from rlm_kernel.schema import migrate_schema_key
+
+        changed: list[str] = []
+        for md_file in sorted(self.root.rglob("*.md")):
+            if ".index" in md_file.parts or ".git" in md_file.parts:
+                continue
+            text = md_file.read_text(encoding="utf-8")
+            new_text, did_change = migrate_schema_key(text)
+            if not did_change:
+                continue
+            self._write_text_atomic(md_file, new_text)
+            if self._git_available:
+                self._git_add(md_file)
+            changed.append(str(md_file.relative_to(self.root)).replace("\\", "/"))
+
+        if changed and commit and self._git_available:
+            self.git_commit(
+                f"vault: migrate frontmatter schema key ({len(changed)} page(s))"
+            )
+        return changed
 
     def delete(self, path: str) -> None:
         """Remove a page from the vault."""

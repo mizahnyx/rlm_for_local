@@ -9,6 +9,7 @@ Commands:
   rlm-kernel search QUERY [--kind ...]  Search the vault
   rlm-kernel optimize --target ...      Run GEPA offline optimization
   rlm-kernel compact [--confirm]        Compact memory notes (dry-run default)
+  rlm-kernel migrate-schema [--dry-run] Rename frontmatter `schema:` to `schema_version:` (R23)
 """
 
 from __future__ import annotations
@@ -82,6 +83,15 @@ def main(argv: list[str] | None = None) -> int:
                            help="Actually perform merges (default: dry-run)")
     p_compact.add_argument("--vault", type=Path, default=_default_vault())
 
+    # migrate-schema (R23)
+    p_migrate = sub.add_parser(
+        "migrate-schema",
+        help="Rename the frontmatter `schema:` key to `schema_version:` (R23)",
+    )
+    p_migrate.add_argument("--vault", type=Path, default=_default_vault())
+    p_migrate.add_argument("--dry-run", action="store_true",
+                           help="Report what would change without writing")
+
     args = parser.parse_args(argv)
 
     if args.command == "init":
@@ -100,6 +110,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_optimize(args)
     elif args.command == "compact":
         return _cmd_compact(args)
+    elif args.command == "migrate-schema":
+        return _cmd_migrate_schema(args)
     else:
         parser.print_help()
         return 0
@@ -245,6 +257,50 @@ def _cmd_compact(args: argparse.Namespace) -> int:
         print(f"Compacted: {merged} note(s) merged.")
 
     return 0
+
+
+def _cmd_migrate_schema(args: argparse.Namespace) -> int:
+    """R23 — rewrite `schema:` to `schema_version:` in existing pages.
+
+    Dry-run by default, like `compact`: this edits every page in the vault, and a
+    migration an operator cannot preview is a migration they cannot consent to.
+    """
+    from rlm_kernel.schema import migrate_schema_key
+    from rlm_kernel.vault import LocalVault
+
+    vault_path = Path(args.vault)
+    if not vault_path.exists():
+        print(f"Vault not found: {vault_path}", file=sys.stderr)
+        return 1
+
+    if args.dry_run:
+        pending: list[str] = []
+        for md_file in sorted(vault_path.rglob("*.md")):
+            if ".index" in md_file.parts or ".git" in md_file.parts:
+                continue
+            text = md_file.read_text(encoding="utf-8")
+            _, did_change = migrate_schema_key(text)
+            if did_change:
+                pending.append(str(md_file.relative_to(vault_path)).replace("\\", "/"))
+        if not pending:
+            print("Nothing to migrate: every page already uses `schema_version:`.")
+            return 0
+        print(f"Dry run: {len(pending)} page(s) still use `schema:`:")
+        for rel in pending:
+            print(f"  {rel}")
+        print("\nRun without --dry-run to rewrite them (the vault is git-versioned).")
+        return 0
+
+    vault = LocalVault(vault_path)
+    changed = vault.migrate_schema_keys()
+    if not changed:
+        print("Nothing to migrate: every page already uses `schema_version:`.")
+        return 0
+    print(f"Migrated {len(changed)} page(s) to `schema_version:`:")
+    for rel in changed:
+        print(f"  {rel}")
+    return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

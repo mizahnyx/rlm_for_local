@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from pydantic import ValidationError
 
@@ -13,6 +15,7 @@ from rlm_kernel.schema import (
     PageStatus,
     extract_helper_code,
     extract_helper_signature,
+    migrate_schema_key,
     parse_page,
 )
 
@@ -28,7 +31,7 @@ class TestFrontmatter:
             title="Test Concept",
             summary="A test concept for validation.",
         )
-        assert fm.schema == 1
+        assert fm.schema_version == 1
         assert fm.kind == PageKind.DEFINITION
         assert fm.status == PageStatus.ACTIVE  # default
         assert fm.version == 1  # default
@@ -318,3 +321,186 @@ summary: "."
         page = parse_page(content, "helpers/empty.md")
         with pytest.raises(ValueError, match="Implementation"):
             HelperDef.from_page(page)
+
+
+class TestSchemaVersionRename:
+    """R23 — the frontmatter field was `schema`, which shadowed pydantic's
+    deprecated `BaseModel.schema`. Renamed with dual-parse and a migration."""
+
+    def test_both_key_names_parse_identically(self):
+        base = dict(kind="note", name="x", title="X", summary=".")
+        assert Frontmatter(schema_version=1, **base).schema_version == 1
+        # The old key is still accepted on read: pages written before the rename
+        # must load unchanged, which is what makes the migration optional.
+        assert Frontmatter(schema=1, **base).schema_version == 1
+
+    def test_a_page_carrying_both_keys_still_parses(self):
+        """Both keys present is a half-migrated page, not an error.
+
+        Which key "won" is not observable from the value: only one schema version
+        is supported, so both keys carry 1. What matters is that such a page still
+        loads, and that the migration leaves exactly one key behind
+        (`TestSchemaKeyMigration::test_a_stale_duplicate_key_is_dropped`).
+        """
+        fm = Frontmatter(**{"schema_version": 1, "schema": 1, "kind": "note",
+                            "name": "x", "title": "X", "summary": "."})
+        assert fm.schema_version == 1
+
+    def test_an_unsupported_version_is_still_rejected(self):
+        with pytest.raises(ValidationError):
+            Frontmatter(schema_version=99, kind="note", name="x", title="X",
+                        summary=".")
+
+    def test_serialization_writes_the_new_key(self):
+        fm = Frontmatter(kind="note", name="x", title="X", summary=".", tags=["t"])
+        yaml_block = fm.to_yaml()
+        assert re.search(r"^schema_version: 1$", yaml_block, re.MULTILINE)
+        assert not re.search(r"^schema:", yaml_block, re.MULTILINE)
+
+    def test_pages_with_either_key_round_trip(self):
+        for key in ("schema", "schema_version"):
+            content = (
+                f"---\n{key}: 1\nkind: note\nname: n\ntitle: T\nsummary: .\n---\nbody\n"
+            )
+            page = parse_page(content, "notes/n.md")
+            assert page.frontmatter.schema_version == 1
+            # And the page as written back out uses the new key.
+            assert re.search(r"^schema_version:", page.to_markdown(), re.MULTILINE)
+
+
+class TestSchemaKeyMigration:
+    def test_renames_the_key_and_leaves_everything_else_alone(self):
+        original = (
+            "---\n"
+            "schema: 1\n"
+            "kind: note\n"
+            "name: n\n"
+            "title: \"A title: with a colon\"\n"
+            "summary: \".\"\n"
+            "tags:\n"
+            "- one\n"
+            "- two\n"
+            "---\n"
+            "# Body\n\n`schema: 1` in the body must not be touched.\n"
+        )
+        migrated, changed = migrate_schema_key(original)
+        assert changed is True
+        assert re.search(r"^schema_version: 1$", migrated, re.MULTILINE)
+        assert not re.search(r"^schema:", migrated, re.MULTILINE)
+        # The body line mentioning `schema: 1` is untouched: the rewrite is
+        # confined to the frontmatter block.
+        assert "`schema: 1` in the body must not be touched." in migrated
+        # Everything else is byte-identical.
+        assert migrated.replace("schema_version:", "schema:", 1) == original
+
+    def test_a_page_already_using_the_new_key_is_untouched(self):
+        content = "---\nschema_version: 1\nkind: note\nname: n\ntitle: T\nsummary: .\n---\nb\n"
+        migrated, changed = migrate_schema_key(content)
+        assert changed is False
+        assert migrated == content
+
+    def test_a_stale_duplicate_key_is_dropped(self):
+        content = (
+            "---\n"
+            "schema_version: 1\n"
+            "schema: 1\n"
+            "kind: note\n"
+            "name: n\n"
+            "title: T\n"
+            "summary: .\n"
+            "---\nb\n"
+        )
+        migrated, changed = migrate_schema_key(content)
+        assert changed is True
+        assert migrated.count("schema") == 1  # only schema_version survives
+        page = parse_page(migrated, "notes/n.md")
+        assert page.frontmatter.schema_version == 1
+
+    def test_content_without_frontmatter_is_untouched(self):
+        content = "# Just a note\n\nschema: 1\n"
+        assert migrate_schema_key(content) == (content, False)
+
+
+class TestVaultSchemaMigration:
+    def _vault_with_legacy_page(self, tmp_path):
+        from rlm_kernel.vault import LocalVault
+
+        root = tmp_path / "vault"
+        legacy = root / "notes" / "legacy.md"
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text(
+            "---\nschema: 1\nkind: note\nname: legacy\ntitle: Legacy\n"
+            "summary: Written before the rename.\n---\nbody\n",
+            encoding="utf-8",
+        )
+        current = root / "notes" / "current.md"
+        current.write_text(
+            "---\nschema_version: 1\nkind: note\nname: current\ntitle: Current\n"
+            "summary: Already migrated.\n---\nbody\n",
+            encoding="utf-8",
+        )
+        return LocalVault(root), legacy, current
+
+    def test_migration_rewrites_only_the_legacy_page(self, tmp_path):
+        vault, legacy, current = self._vault_with_legacy_page(tmp_path)
+        before_current = current.read_text(encoding="utf-8")
+
+        changed = vault.migrate_schema_keys()
+
+        assert changed == ["notes/legacy.md"]
+        assert re.search(r"^schema_version: 1$", legacy.read_text(encoding="utf-8"),
+                         re.MULTILINE)
+        assert current.read_text(encoding="utf-8") == before_current
+
+    def test_migrated_page_still_parses_and_is_readable(self, tmp_path):
+        vault, legacy, _ = self._vault_with_legacy_page(tmp_path)
+        vault.migrate_schema_keys()
+
+        page = vault.get("notes/legacy.md")
+        assert page is not None
+        assert page.frontmatter.schema_version == 1
+        assert page.frontmatter.name == "legacy"
+
+    def test_a_second_run_finds_nothing_to_do(self, tmp_path):
+        vault, _, _ = self._vault_with_legacy_page(tmp_path)
+        assert vault.migrate_schema_keys() == ["notes/legacy.md"]
+        assert vault.migrate_schema_keys() == []
+
+    def test_cli_dry_run_changes_nothing(self, tmp_path, capsys):
+        from rlm_kernel.cli import main as kernel_main
+
+        vault, legacy, _ = self._vault_with_legacy_page(tmp_path)
+        before = legacy.read_text(encoding="utf-8")
+
+        rc = kernel_main(["migrate-schema", "--vault", str(vault.root), "--dry-run"])
+
+        assert rc == 0
+        assert legacy.read_text(encoding="utf-8") == before
+        assert "Dry run" in capsys.readouterr().out
+
+    def test_cli_migrates_and_reports(self, tmp_path, capsys):
+        from rlm_kernel.cli import main as kernel_main
+
+        vault, legacy, _ = self._vault_with_legacy_page(tmp_path)
+
+        rc = kernel_main(["migrate-schema", "--vault", str(vault.root)])
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Migrated 1 page(s)" in out
+        assert "notes/legacy.md" in out
+        assert "schema_version: 1" in legacy.read_text(encoding="utf-8")
+
+    def test_the_pydantic_shadow_warning_is_gone(self):
+        """The defect R23 exists for: importing the module used to warn."""
+        import importlib
+        import warnings
+
+        import rlm_kernel.schema as schema_module
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            importlib.reload(schema_module)
+
+        shadow = [w for w in caught if "shadows" in str(w.message)]
+        assert shadow == [], [str(w.message) for w in shadow]

@@ -718,6 +718,40 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_rebound_answer_is_repaired_for_the_next_cell",
         ],
     ),
+    # ── R23: `schema` → `schema_version` (roadmap item 7) ──────────────────
+    (
+        "R23 the old frontmatter key stops parsing",
+        "src/rlm_kernel/schema.py",
+        "        validation_alias=AliasChoices(\"schema_version\", \"schema\"),",
+        "        validation_alias=AliasChoices(\"schema_version\",),",
+        [
+            "tests/rlm_kernel/test_schema.py::TestSchemaVersionRename"
+            "::test_both_key_names_parse_identically",
+            "tests/rlm_kernel/test_vault.py::TestParsePage::test_parse_and_roundtrip",
+        ],
+    ),
+    (
+        "R23 serialization writes the old key again",
+        "src/rlm_kernel/schema.py",
+        "            \"schema_version\", \"id\", \"kind\", \"name\", \"title\", \"summary\",",
+        "            \"schema\", \"id\", \"kind\", \"name\", \"title\", \"summary\",",
+        [
+            "tests/rlm_kernel/test_schema.py::TestSchemaVersionRename"
+            "::test_serialization_writes_the_new_key",
+        ],
+    ),
+    (
+        "R23 the migration does not rewrite the key",
+        "src/rlm_kernel/schema.py",
+        "            + \"schema_version:\" + match.group(1) + match.group(2)",
+        "            + \"schema:\" + match.group(1) + match.group(2)",
+        [
+            "tests/rlm_kernel/test_schema.py::TestVaultSchemaMigration"
+            "::test_migration_rewrites_only_the_legacy_page",
+            "tests/rlm_kernel/test_schema.py::TestSchemaKeyMigration"
+            "::test_renames_the_key_and_leaves_everything_else_alone",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
