@@ -215,7 +215,8 @@ loopback-only, and login is disabled.
 ```bash
 rlm ask "QUERY" [--context-file FILE.md ...] [--context-dir DIR] \
     [--stdin] [--vault PATH] [--profile tiny|laptop|workstation] \
-    [--max-turns N] [--log-path FILE] [--endpoint URL] [--model ID]
+    [--max-turns N] [--log-path FILE] [--endpoint URL] [--model ID] \
+    [--corpus-root DIR] [--corpus-index FILE]
 ```
 
 `--endpoint` / `--model` (or `RLM_ENDPOINT` / `RLM_MODEL`) point the run at a
@@ -224,6 +225,11 @@ model server on another host; `--model` sets both tiers. See §2.3.
 Context is assembled in this order: `--context-file` (each with a `# filename`
 heading, separated by `---`), `--context-dir` (all `*.md` sorted), `--stdin`,
 `--vault`. Returns the answer on stdout. Exit code 0 on success, 2 on error.
+
+`--corpus-root` / `--corpus-index` (or `RLM_CORPUS_ROOT` / `RLM_CORPUS_INDEX`)
+give the run read-only access to a corpus instead of a context string: the REPL
+gains `corpus_find`, `corpus_list`, `corpus_stat`, `corpus_read` and
+`corpus_count`, and no `--context-*` argument is needed. See `rlm corpus` in §3.
 
 **Examples:**
 ```bash
@@ -357,6 +363,57 @@ rlm optimize [--target T] [--suite S] [--profile P] [--max-calls N]
 
 GEPA offline optimization of harness prompts. Targets: `prologue`,
 `how-to-work`, `nudges`, `fewshots`, `helper-docs`.
+
+### `rlm corpus`
+
+```bash
+rlm corpus index  --corpus-root DIR --corpus-index FILE [--progress-every N]
+rlm corpus status --corpus-index FILE
+rlm corpus count  --corpus-index FILE [--kind file|dir|symlink] [--under DIR]
+rlm corpus find   --corpus-index FILE QUERY [-k N] [--kind K] [--under DIR]
+rlm corpus read   --corpus-root DIR REL [--max-bytes N]
+```
+
+Read-only access to a large file tree — the "corpus" the harness can answer
+questions about. Both paths also come from the environment
+(`RLM_CORPUS_ROOT`, `RLM_CORPUS_INDEX`).
+
+**The index covers names, not contents.** `rlm corpus index` makes one streaming
+pass over the tree and records `path`, `parent`, `name`, `kind`, `size` and
+`mtime` in SQLite. It opens no files, so it is bounded by directory-entry cost
+rather than by the size of what is in them, and it is what keeps search from
+walking millions of entries per call. Measured on the owner's corpus
+(4.97M entries, ~1.01 TB): the walk is tens of minutes, one-off; every query
+after it is index arithmetic.
+
+**Read-only, in three layers** (`AGENTS.md` §1.8). The boundary is the mount:
+open the LUKS container with `cryptsetup open --readonly`, mount it `ro`, and
+point `--corpus-root` at that path. The code is defence in depth —
+`rlm_kernel/mounts.py` has no write verb to call, resolves every path inside the
+root (refusing symlink escapes), and reads through `O_RDONLY` with a byte cap.
+Derived state must live **outside** the corpus: an index path inside it is
+refused at startup, not accepted with a warning. `rlm corpus index` prints
+aggregate counts only; that is the form safe to quote off the machine, because a
+path listing is a private index of someone's files.
+
+**From a model cell**, `rlm ask --corpus-root … --corpus-index …` exposes five
+helpers — `corpus_find`, `corpus_list`, `corpus_stat`, `corpus_read`,
+`corpus_count` — answered in the parent process through the mount, never by the
+sandboxed worker. The system prompt advertises them and warns that the tree must
+never be walked from a cell. A corpus question needs no `--context-*`.
+
+```bash
+# One-off: build the index, outside the corpus
+rlm corpus index --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite
+
+# Ask the corpus a question (the model reaches it through the helpers)
+rlm ask "How many files are PDFs, and what are the ten largest?" \
+    --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite
+
+# Operator-side checks that need no model
+rlm corpus count --corpus-index ~/rlm-derived/corpus.sqlite --kind file
+rlm corpus find  --corpus-index ~/rlm-derived/corpus.sqlite budget -k 20
+```
 
 ---
 

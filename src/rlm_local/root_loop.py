@@ -45,11 +45,16 @@ class RootLoop:
         backend: ModelBackend,
         logger: TrajectoryLogger | None = None,
         kernel_bridge: Any = None,
+        corpus_bridge: Any = None,
     ) -> None:
         self._config = config
         self._backend = backend
         self._logger = logger
         self._kernel_bridge = kernel_bridge
+        # RO4: the read-only corpus handlers, when a corpus is configured. Kept
+        # separate from the kernel bridge because a corpus run needs no vault:
+        # "answer questions about a file tree" is its own capability.
+        self._corpus_bridge = corpus_bridge
 
         # Subsystem instances (created fresh per run)
         self._parser: Parser | None = None
@@ -147,6 +152,22 @@ class RootLoop:
                 prompt_char_budget=cfg.sub_prompt_char_budget,
             )
 
+        # RO4: a configured corpus must be advertised, and in *both* prompt
+        # paths — the packaged SYSTEM_PROMPT and a vault-assembled one. Appending
+        # here (rather than inside a template) is what makes that uniform: a
+        # vault whose contract page predates this feature would otherwise leave
+        # the model uninformed about helpers that its cells can call.
+        if self._corpus_bridge is not None:
+            from rlm_local.prompts import build_system_prompt, corpus_helpers_section
+
+            if _system_prompt is None:
+                _system_prompt = build_system_prompt(prompt_vars)
+            mount = getattr(self._corpus_bridge, "mount", None)
+            _system_prompt += "\n\n" + corpus_helpers_section(
+                root=str(mount.root) if mount is not None else "(configured)",
+                has_index=getattr(self._corpus_bridge, "index", None) is not None,
+            )
+
         messages = build_messages(
             query, context_len, _context_type, prompt_vars,
             system_prompt=_system_prompt, fewshots=_fewshots,
@@ -154,6 +175,7 @@ class RootLoop:
 
         # ── Start REPL with context and helpers ───────────────────────────
         self._repl._kernel_bridge = self._kernel_bridge
+        self._repl._corpus_bridge = self._corpus_bridge
         self._repl.start(ctx_handle, self._subcall_mgr, definitions=definitions)
 
         # ── Main loop ─────────────────────────────────────────────────────

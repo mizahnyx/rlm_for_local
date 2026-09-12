@@ -51,6 +51,15 @@ class Entry:
     mode: int
     """Permission bits, as returned by `os.stat`."""
 
+    mtime: float = 0.0
+    """Modification time, seconds since the epoch.
+
+    Defaulted so the field can be added without breaking positional
+    construction. It exists because the path index records it: the census and
+    the read-only proof both compare mtimes, and reading a file updates atime
+    rather than mtime (see `AGENTS.md` §1.8).
+    """
+
 
 class LocalTreeMount:
     """A read-only view over a local directory tree.
@@ -106,6 +115,21 @@ class LocalTreeMount:
         except ReadOnlyViolation:
             return False
 
+    def is_contained(self, rel: str) -> bool:
+        """True when ``rel`` resolves inside the root. Says nothing about existence.
+
+        `exists` answers "is there something I can see there?", which is `False`
+        for both a missing path and an escaping one. Some callers must tell those
+        apart — "no such file" and "refused, that path leaves the corpus" are
+        different answers, and a tool that reports one as the other is giving a
+        confident wrong answer.
+        """
+        try:
+            self._resolve(rel)
+            return True
+        except ReadOnlyViolation:
+            return False
+
     def stat(self, rel: str) -> Entry:
         path = self._resolve(rel)
         try:
@@ -117,6 +141,7 @@ class LocalTreeMount:
             kind=_kind_of(info.st_mode),
             size=info.st_size,
             mode=info.st_mode & 0o7777,
+            mtime=info.st_mtime,
         )
 
     def open_readonly(self, rel: str, max_bytes: int | None = None):
@@ -196,6 +221,7 @@ class LocalTreeMount:
                             kind=kind,
                             size=info.st_size,
                             mode=info.st_mode & 0o7777,
+                            mtime=info.st_mtime,
                         )
                         yielded += 1
                         if max_entries is not None and yielded >= max_entries:
@@ -208,6 +234,39 @@ class LocalTreeMount:
                                 stack.append(target)
             except OSError:
                 continue
+
+    def iter_children(
+        self, rel: str = "", *, max_entries: int | None = None,
+    ) -> Iterator[Entry]:
+        """Yield the entries of **one** directory, not its subtree.
+
+        `iter_entries` walks depth-first and is the wrong primitive for "what is
+        in this directory": on a corpus of millions of files a bounded subtree
+        walk answers a different question (and can return entries from four
+        levels down). This is one `scandir`, so its cost is the directory's own
+        size and nothing else.
+        """
+        directory = self._resolve(rel) if rel else self._root
+        if not directory.is_dir():
+            raise ReadOnlyViolation(f"not a directory: {rel!r}")
+        yielded = 0
+        with os.scandir(directory) as scan:
+            for child in scan:
+                path = Path(child.path)
+                try:
+                    info = child.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                yield Entry(
+                    rel=self._relative(path),
+                    kind=_kind_of(info.st_mode),
+                    size=info.st_size,
+                    mode=info.st_mode & 0o7777,
+                    mtime=info.st_mtime,
+                )
+                yielded += 1
+                if max_entries is not None and yielded >= max_entries:
+                    return
 
     def iter_files(
         self,

@@ -10,6 +10,7 @@ Subcommands:
   rlm check      Model suitability battery
   rlm vault      Pass-through to rlm-kernel vault management
   rlm optimize   GEPA offline optimization
+  rlm corpus     Read-only corpus access: build the path index, search, read (RO3)
 """
 
 from __future__ import annotations
@@ -56,6 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ask.add_argument("--log-path", type=Path, default=None,
                        help="Write trajectory JSONL to this path")
     _add_model_server_flags(p_ask)
+    _add_corpus_flags(p_ask, require_root=False, require_index=False)
 
     # ── chat ─────────────────────────────────────────────────────────────
     p_chat = sub.add_parser("chat", help="Interactive chat loop")
@@ -131,7 +133,73 @@ def build_parser() -> argparse.ArgumentParser:
     p_opt.add_argument("--profile", default="tiny")
     p_opt.add_argument("--max-calls", type=int, default=150)
     p_opt.add_argument("--vault", type=Path, default=_default_vault())
+
+    # ── corpus ───────────────────────────────────────────────────────────
+    p_corpus = sub.add_parser(
+        "corpus",
+        help="Read-only corpus access: index, search, read (RO3/RO4)",
+        description=(
+            "Work with a read-only corpus. `index` walks the corpus once and "
+            "records its PATHS (never file contents) in a SQLite file outside "
+            "the corpus; every other subcommand reads through the read-only "
+            "mount. The corpus is never written to."
+        ),
+    )
+    corpus_sub = p_corpus.add_subparsers(dest="corpus_command")
+
+    p_cidx = corpus_sub.add_parser("index", help="Build the corpus path index")
+    _add_corpus_flags(p_cidx, require_root=True, require_index=True)
+    p_cidx.add_argument("--progress-every", type=int, default=250_000,
+                        help="Print a running entry count every N entries")
+
+    p_cstatus = corpus_sub.add_parser(
+        "status", help="Aggregate counts for the corpus (no paths printed)"
+    )
+    _add_corpus_flags(p_cstatus, require_root=False, require_index=True)
+
+    p_cfind = corpus_sub.add_parser("find", help="Search the path index")
+    _add_corpus_flags(p_cfind, require_root=False, require_index=True)
+    p_cfind.add_argument("query")
+    p_cfind.add_argument("-k", "--limit", type=int, default=20)
+    p_cfind.add_argument("--kind", default=None,
+                         help="file | dir | symlink | other")
+    p_cfind.add_argument("--under", default="", help="Restrict to a subtree")
+
+    p_cread = corpus_sub.add_parser("read", help="Read one corpus file (bounded)")
+    _add_corpus_flags(p_cread, require_root=True, require_index=False)
+    p_cread.add_argument("rel", help="Path relative to the corpus root")
+    p_cread.add_argument("--max-bytes", type=int, default=20_000)
+
+    p_ccount = corpus_sub.add_parser("count", help="Count entries in the index")
+    _add_corpus_flags(p_ccount, require_root=False, require_index=True)
+    p_ccount.add_argument("--kind", default=None)
+    p_ccount.add_argument("--under", default="")
+
     return parser
+
+
+def _add_corpus_flags(
+    parser: argparse.ArgumentParser,
+    *,
+    require_root: bool,
+    require_index: bool,
+) -> None:
+    """Corpus location flags, with the environment as the shared default.
+
+    Both values are required where they are needed and never guessed: a default
+    index path could silently land *inside* the corpus, which is the one mistake
+    the mount exists to prevent (AGENTS.md §1.8, layer 3).
+    """
+    parser.add_argument(
+        "--corpus-root", default=os.environ.get("RLM_CORPUS_ROOT"),
+        help="Read-only corpus root, e.g. /srv/corpus (env RLM_CORPUS_ROOT)"
+             + ("" if require_root else " (only needed to read file contents)"),
+    )
+    parser.add_argument(
+        "--corpus-index", default=os.environ.get("RLM_CORPUS_INDEX"),
+        help="Path index file, OUTSIDE the corpus "
+             "(env RLM_CORPUS_INDEX)" + ("" if require_index else " (optional)"),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -156,6 +224,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_vault(args)
     elif args.command == "optimize":
         return _cmd_optimize(args)
+    elif args.command == "corpus":
+        return _cmd_corpus(args)
     else:
         parser.print_help()
         return 0
@@ -251,19 +321,28 @@ def _cmd_ask(args: argparse.Namespace) -> int:
 
     context = _assemble_context(args)
     if context is None:
-        print("Error: no context provided. Use --context-file, --context-dir, --stdin, or --vault.",
-              file=sys.stderr)
-        return 2
+        if not getattr(args, "corpus_root", None):
+            print("Error: no context provided. Use --context-file, --context-dir, "
+                  "--stdin, --vault, or --corpus-root.", file=sys.stderr)
+            return 2
+        # A corpus run needs no context string; the helpers are the interface.
+        # The stub says that out loud so the model does not go looking for the
+        # corpus inside `context`.
+        from rlm_local.templates import CORPUS_CONTEXT_STUB
+
+        context = CORPUS_CONTEXT_STUB
 
     overrides: dict[str, Any] = _model_server_overrides(args)
     if args.max_turns is not None:
         overrides["max_turns"] = args.max_turns
 
+    corpus_bridge = _corpus_bridge_for(args)
     try:
         answer = rlm_local.completion(
             args.query, context,
             profile=args.profile,
             log_path=str(args.log_path) if args.log_path else None,
+            corpus_bridge=corpus_bridge,
             **overrides,
         )
         print(answer)
@@ -271,6 +350,9 @@ def _cmd_ask(args: argparse.Namespace) -> int:
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         return 2
+    finally:
+        if corpus_bridge is not None:
+            corpus_bridge.close()
 
 
 # ── chat ──────────────────────────────────────────────────────────────────
@@ -548,6 +630,125 @@ def _cmd_optimize(args: argparse.Namespace) -> int:
     if result.get("held_out_score") is not None:
         print(f"Held-out: {result['held_out_score']:.1%}")
     return 0
+
+
+# ── corpus ────────────────────────────────────────────────────────────────
+
+def _corpus_bridge_for(args: argparse.Namespace):
+    """Open the corpus bridge the CLI was configured with, or return None.
+
+    Used by `ask`/`chat` so a completion can be pointed at a corpus; the corpus
+    subcommands build their own pieces so that `index` works even when there is
+    no index yet.
+    """
+    from rlm_kernel.corpus import CorpusBridge
+    from rlm_kernel.mounts import ReadOnlyViolation
+
+    root = getattr(args, "corpus_root", None)
+    if not root:
+        return None
+    index = getattr(args, "corpus_index", None)
+    try:
+        return CorpusBridge.open_for(root, index)
+    except ReadOnlyViolation as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return None
+
+
+def _cmd_corpus(args: argparse.Namespace) -> int:
+    """`rlm corpus ...` — the operator's side of RO3/RO4.
+
+    Every subcommand except `index` refuses to invent a corpus: they report what
+    is configured and fail loudly when it is not.
+    """
+    from rlm_kernel.corpus import CorpusBridge, CorpusIndex, count_report, index_report
+    from rlm_kernel.mounts import LocalTreeMount, ReadOnlyViolation
+
+    sub = getattr(args, "corpus_command", None)
+    if not sub:
+        print("Usage: rlm corpus {index,status,find,count,read} ...")
+        return 2
+
+    root, index_path = args.corpus_root, args.corpus_index
+
+    if sub == "index":
+        if not root or not index_path:
+            print("Error: --corpus-root and --corpus-index are both required "
+                  "(env RLM_CORPUS_ROOT / RLM_CORPUS_INDEX).", file=sys.stderr)
+            return 2
+        try:
+            # The mount is built first so a bad root fails before anything is
+            # created, and before a walk starts.
+            mount = LocalTreeMount(root)
+            idx = CorpusIndex.open_for(root, index_path)
+        except ReadOnlyViolation as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 2
+        every = max(1, int(getattr(args, "progress_every", 250_000) or 250_000))
+
+        def progress(n: int) -> None:
+            print(f"  {n} entries indexed", flush=True)
+
+        print(f"Indexing the corpus at {Path(root)} (paths only, no file reads)")
+        try:
+            written = idx.build(mount, progress=progress)
+        except ReadOnlyViolation as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 2
+        finally:
+            report = index_report(idx)
+            idx.close()
+        print(f"Indexed {written} entries into {index_path}")
+        print(report)
+        return 0
+
+    # From here on, index-backed answers. They read the index only, so they need
+    # no corpus root and no mount: `rlm corpus count` works wherever the index is.
+    if sub in ("status", "find", "count"):
+        if not index_path:
+            print("Error: --corpus-index is required for this subcommand "
+                  "(env RLM_CORPUS_INDEX).", file=sys.stderr)
+            return 2
+        if not Path(index_path).exists():
+            print(f"Error: no index at {index_path}. Build one with "
+                  "`rlm corpus index`.", file=sys.stderr)
+            return 2
+        idx = CorpusIndex(index_path)
+        try:
+            if sub == "status":
+                print(index_report(idx))
+                return 0
+            if sub == "count":
+                print(count_report(idx, kind=args.kind, under=args.under))
+                return 0
+            hits = idx.find(args.query, limit=args.limit, kind=args.kind,
+                            under=args.under)
+            for entry in hits:
+                print(f"{entry.rel}  [{entry.kind}, {entry.size} bytes]")
+            if not hits:
+                print("(no matches)")
+            return 0
+        finally:
+            idx.close()
+
+    if sub == "read":
+        if not root:
+            print("Error: --corpus-root is required to read file contents.",
+                  file=sys.stderr)
+            return 2
+        try:
+            bridge = CorpusBridge.open_for(root, index_path)
+        except ReadOnlyViolation as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 2
+        try:
+            print(bridge.handle_read(args.rel, max_bytes=args.max_bytes))
+            return 0
+        finally:
+            bridge.close()
+
+    print(f"Error: unknown corpus subcommand {sub!r}", file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":

@@ -337,11 +337,46 @@ def _harness_propose(kind, name, body, rationale=""):
     resp = _recv()
     return resp.get('result', _MSG['propose_failed'])
 
+# RO4: corpus access. The worker asks the harness; it never opens a corpus file
+# itself, so the read-only mount, the containment check and the byte caps all
+# live in one process that a cell cannot reach around.
+def _harness_corpus_find(query, limit=20, kind=None, under=""):
+    _send({"cmd": "corpus_find", "query": query, "limit": limit, "kind": kind,
+           "under": under, "cell_id": _cell_id})
+    resp = _recv()
+    return resp.get('result', _MSG['corpus_no_matches'])
+
+def _harness_corpus_list(rel="", limit=50):
+    _send({"cmd": "corpus_list", "rel": rel, "limit": limit, "cell_id": _cell_id})
+    resp = _recv()
+    return resp.get('result', _MSG['corpus_no_entries'])
+
+def _harness_corpus_stat(rel):
+    _send({"cmd": "corpus_stat", "rel": rel, "cell_id": _cell_id})
+    resp = _recv()
+    return resp.get('result', _MSG['corpus_not_found'].format(rel=rel))
+
+def _harness_corpus_read(rel, max_bytes=20000):
+    _send({"cmd": "corpus_read", "rel": rel, "max_bytes": max_bytes,
+           "cell_id": _cell_id})
+    resp = _recv()
+    return resp.get('result', _MSG['corpus_read_failed'].format(rel=rel))
+
+def _harness_corpus_count(kind=None, under=""):
+    _send({"cmd": "corpus_count", "kind": kind, "under": under, "cell_id": _cell_id})
+    resp = _recv()
+    return resp.get('result', _MSG['corpus_count_failed'])
+
 # Inject into globals so exec'd code can use them
 llm_query = _harness_llm_query
 llm_query_batched = _harness_llm_query_batched
 search = _harness_search
 propose = _harness_propose
+corpus_find = _harness_corpus_find
+corpus_list = _harness_corpus_list
+corpus_stat = _harness_corpus_stat
+corpus_read = _harness_corpus_read
+corpus_count = _harness_corpus_count
 
 # ── Scaffold namespace ────────────────────────────────────────────────────
 
@@ -456,7 +491,9 @@ def show_vars():
 
 # Register the scaffold's own helpers as the "working" bindings (design §5.3).
 for _scaffold_name in ('peek', 'grep', 'chunk', 'map_query', 'show_vars',
-                       'llm_query', 'llm_query_batched', 'search', 'propose'):
+                       'llm_query', 'llm_query_batched', 'search', 'propose',
+                       'corpus_find', 'corpus_list', 'corpus_stat', 'corpus_read',
+                       'corpus_count'):
     _SCAFFOLD_ORIGINALS[_scaffold_name] = globals().get(_scaffold_name)
 
 # ── Main loop ─────────────────────────────────────────────────────────────
@@ -696,6 +733,10 @@ class REPLSandbox:
         self._subcall_manager: Any = None
         self._lock = threading.RLock()
         self._kernel_bridge: Any = None
+        # RO4: the corpus handlers, when a corpus is configured for this run.
+        # Set as an attribute after construction (like `_kernel_bridge`) because
+        # the bridge is opened by the caller, not by the sandbox.
+        self._corpus_bridge: Any = None
         # R4 protocol state
         self._cell_seq = 0
         self._init_payload: dict | None = None
@@ -904,7 +945,9 @@ class REPLSandbox:
             if msg_type == "subcall_batched":
                 n = len(msg.get("prompts", []))
                 _send_msg(self._worker_sock, {"responses": ["Error: cell timed out"] * n})
-            elif msg_type in ("subcall", "search", "propose"):
+            elif msg_type in ("subcall", "search", "propose",
+                              "corpus_find", "corpus_list", "corpus_stat",
+                              "corpus_read", "corpus_count"):
                 _send_msg(self._worker_sock, {"response": "Error: cell timed out",
                                               "result": "Error: cell timed out"})
         except OSError:
@@ -955,11 +998,55 @@ class REPLSandbox:
                 result_text = "Error: kernel bridge not available"
             _send_msg(self._worker_sock, {"result": result_text})
 
+        elif msg_type.startswith("corpus_"):
+            # RO4: worker requesting corpus access. Answered in this process,
+            # through the read-only mount — the worker has no corpus of its own.
+            if self._corpus_bridge:
+                result_text = self._corpus_result(msg_type, msg)
+            else:
+                result_text = (
+                    "Error: no corpus is configured for this run, so the "
+                    "corpus_* helpers have nothing to read."
+                )
+            _send_msg(self._worker_sock, {"result": result_text})
+
         else:
             _send_msg(self._worker_sock, {
                 "response": f"Error: unsupported REPL request: {msg_type}",
                 "result": f"Error: unsupported REPL request: {msg_type}",
             })
+
+    def _corpus_result(self, msg_type: str, msg: dict) -> str:
+        """Dispatch one corpus verb onto the bridge, defensively.
+
+        A corpus helper is a tool result, and a tool that raises turns into a
+        traceback in the model's context instead of an answer. Every failure mode
+        here is reported as text, including the ones that should be impossible.
+        """
+        bridge = self._corpus_bridge
+        try:
+            if msg_type == "corpus_find":
+                return bridge.handle_find(
+                    msg.get("query", ""),
+                    limit=msg.get("limit", 20),
+                    kind=msg.get("kind"),
+                    under=msg.get("under") or "",
+                )
+            if msg_type == "corpus_list":
+                return bridge.handle_list(msg.get("rel") or "", limit=msg.get("limit", 50))
+            if msg_type == "corpus_stat":
+                return bridge.handle_stat(msg.get("rel") or "")
+            if msg_type == "corpus_read":
+                return bridge.handle_read(
+                    msg.get("rel") or "", max_bytes=msg.get("max_bytes", 20_000)
+                )
+            if msg_type == "corpus_count":
+                return bridge.handle_count(
+                    kind=msg.get("kind"), under=msg.get("under") or ""
+                )
+        except Exception as e:  # pragma: no cover - defensive
+            return f"Error: corpus helper failed: {type(e).__name__}: {e}"
+        return f"Error: unsupported corpus helper: {msg_type}"
 
     def shutdown(self) -> None:
         """Terminate the REPL worker and clean up."""

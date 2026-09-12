@@ -916,6 +916,168 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_the_module_has_no_write_shaped_api",
         ],
     ),
+    # ── RO3/RO4: corpus access is read-only, bounded and index-backed ──────
+    (
+        "RO4 containment stops refusing paths that leave the corpus",
+        "src/rlm_kernel/mounts.py",
+        "            self._resolve(rel)\n"
+        "            return True\n"
+        "        except ReadOnlyViolation:\n"
+        "            return False",
+        "            return True\n"
+        "        except ReadOnlyViolation:\n"
+        "            return False",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestBridgeHandlerMessages"
+            "::test_read_refuses_to_escape_the_corpus",
+            "tests/test_corpus_repl.py::TestCorpusHelpersInALiveCell"
+            "::test_a_cell_cannot_read_outside_the_corpus",
+        ],
+    ),
+    (
+        "RO4 corpus_list walks the subtree instead of one directory",
+        "src/rlm_kernel/corpus.py",
+        "            shown = self.mount.iter_children(\n"
+        "                rel, max_entries=_bounded(limit, LIST_LIMIT_MAX)\n"
+        "            )",
+        "            shown = self.mount.iter_entries(\n"
+        "                rel, max_entries=_bounded(limit, LIST_LIMIT_MAX)\n"
+        "            )",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestBridgeWithoutAnIndex"
+            "::test_list_still_works_from_the_mount",
+            "tests/test_corpus_repl.py::TestCorpusHelpersInALiveCell"
+            "::test_a_cell_can_search_and_read_the_corpus",
+        ],
+    ),
+    (
+        "RO4 corpus_find walks the tree when there is no index",
+        "src/rlm_kernel/corpus.py",
+        "        if self.index is None:\n"
+        "            return CORPUS_NO_INDEX\n"
+        "        hits = self.index.find(query, limit=limit, kind=kind, under=under)",
+        "        hits = (\n"
+        "            self.index.find(query, limit=limit, kind=kind, under=under)\n"
+        "            if self.index is not None else list(self.mount.iter_entries(under))\n"
+        "        )",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestBridgeWithoutAnIndex"
+            "::test_find_never_walks_when_the_index_is_missing",
+        ],
+    ),
+    (
+        "RO4 find stops escaping LIKE wildcards",
+        "src/rlm_kernel/corpus.py",
+        '        params: list[Any] = [f"%{_escape_like(needle)}%"]',
+        '        params: list[Any] = [f"%{needle}%"]',
+        [
+            "tests/rlm_kernel/test_corpus.py::TestQueries"
+            "::test_find_escapes_like_wildcards",
+        ],
+    ),
+    (
+        "RO4 the result caps stop being applied",
+        "src/rlm_kernel/corpus.py",
+        "    return min(value, maximum)",
+        "    return value",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestQueries"
+            "::test_bounded_helper_is_not_vacuous",
+            "tests/rlm_kernel/test_corpus.py::TestBridgeHandlerMessages"
+            "::test_read_cap_cannot_be_raised_past_the_maximum",
+        ],
+    ),
+    (
+        "RO4 an index inside the corpus is accepted",
+        "src/rlm_kernel/corpus.py",
+        "        assert_derived_outside_corpus(corpus_root, index_path)\n"
+        "        return cls(index_path)",
+        "        return cls(index_path)",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestDerivedStateStaysOutside"
+            "::test_an_index_inside_the_corpus_is_refused",
+            "tests/test_cli_corpus.py::TestCorpusIndex"
+            "::test_index_inside_the_corpus_is_refused",
+        ],
+    ),
+    (
+        "RO4 a bridge accepts an index inside the corpus",
+        "src/rlm_kernel/corpus.py",
+        "            assert_derived_outside_corpus(mount.root, candidate)",
+        "            pass",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestDerivedStateStaysOutside"
+            "::test_a_bridge_refuses_an_index_inside_the_corpus",
+        ],
+    ),
+    (
+        "RO3 the index build starts reading file contents",
+        "src/rlm_kernel/corpus.py",
+        "        for entry in mount.iter_entries():\n"
+        "            path = entry.rel",
+        "        for entry in mount.iter_entries():\n"
+        "            path = entry.rel\n"
+        "            mount.read_bytes(path, max_bytes=1)",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestIndexReadsNamesNotContents"
+            "::test_build_never_opens_a_file",
+        ],
+    ),
+    (
+        "RO4 the REPL stops dispatching the corpus verbs",
+        "src/rlm_local/repl.py",
+        '        elif msg_type.startswith("corpus_"):',
+        "        elif False:",
+        [
+            "tests/test_corpus_repl.py::TestParentDispatchesCorpusVerbs"
+            "::test_find_reaches_the_bridge",
+            "tests/test_corpus_repl.py::TestParentDispatchesCorpusVerbs"
+            "::test_list_stat_read_and_count_reach_the_bridge",
+        ],
+    ),
+    (
+        "RO4 the worker stops exporting a corpus verb",
+        "src/rlm_local/repl.py",
+        "\ncorpus_read = _harness_corpus_read\n",
+        "\ncorpus_read = None\n",
+        [
+            "tests/test_corpus_repl.py::TestWorkerDefinesTheCorpusVerbs"
+            "::test_the_worker_defines_and_exports_the_verb[corpus_read]",
+        ],
+    ),
+    (
+        "RO4 a clobbered corpus verb stops being repaired",
+        "src/rlm_local/repl.py",
+        "                       'corpus_find', 'corpus_list', 'corpus_stat', 'corpus_read',\n"
+        "                       'corpus_count'):",
+        "                       'corpus_find'):",
+        [
+            "tests/test_corpus_repl.py::TestWorkerDefinesTheCorpusVerbs"
+            "::test_a_clobbered_verb_is_repaired[corpus_list]",
+        ],
+    ),
+    (
+        "RO4 the run stops advertising the corpus to the model",
+        "src/rlm_local/root_loop.py",
+        "        if self._corpus_bridge is not None:\n"
+        "            from rlm_local.prompts import build_system_prompt, corpus_helpers_section",
+        "        if False:\n"
+        "            from rlm_local.prompts import build_system_prompt, corpus_helpers_section",
+        [
+            "tests/test_corpus_repl.py::TestThePromptMatchesTheWorker"
+            "::test_the_system_prompt_names_the_corpus_and_its_helpers",
+        ],
+    ),
+    (
+        "RO4 ask stops handing the corpus to the run",
+        "src/rlm_local/cli.py",
+        "            corpus_bridge=corpus_bridge,\n",
+        "            corpus_bridge=None,\n",
+        [
+            "tests/test_cli_corpus.py::TestAskWithACorpus"
+            "::test_ask_with_only_a_corpus_uses_the_stub_context",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

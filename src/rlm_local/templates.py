@@ -136,10 +136,38 @@ WORKER_NO_HARNESS_RESPONSE = "Error: no response from harness"
 WORKER_SEARCH_NO_RESULTS = "(no results)"
 WORKER_PROPOSE_FAILED = "Error: propose failed"
 
-WORKER_MESSAGES: dict[str, str] = {
-    "invalid_regex": WORKER_INVALID_REGEX,
+# Corpus helpers (RO4). These are the worker-side defaults, used when the harness
+# answers with nothing at all — the real answers are formatted by
+# `rlm_kernel.corpus.CorpusBridge`, which owns the corpus's own vocabulary
+# ("no such path", "refused", "truncated"). Each one is the honest worker-side
+# equivalent of "the harness told me nothing", never a fake success.
+WORKER_CORPUS_NO_MATCHES = "(no corpus paths matched)"
+WORKER_CORPUS_NO_ENTRIES = "(no corpus entries)"
+WORKER_CORPUS_NOT_FOUND = "Error: no such path in the corpus: {rel}"
+WORKER_CORPUS_READ_FAILED = "Error: corpus read failed: {rel}"
+WORKER_CORPUS_COUNT_FAILED = "Error: corpus count failed"
+
+# ---------------------------------------------------------------------------
+# Corpus runs (RO4)
+# ---------------------------------------------------------------------------
+# A corpus question has no `context` string: the data is a file tree that a cell
+# reaches through the corpus_* helpers. Saying so is load-bearing — a model given
+# an empty context will otherwise try to read the corpus out of `context`, and
+# this corpus is far too large for any cell to walk.
+CORPUS_CONTEXT_STUB = (
+    "The data for this task is a large read-only corpus, not a string. "
+    "`context` is NOT the corpus: reach it with corpus_find, corpus_list, "
+    "corpus_stat, corpus_read and corpus_count. Never walk the tree from a cell."
+)
+
+WORKER_MESSAGES: dict[str, str] = {    "invalid_regex": WORKER_INVALID_REGEX,
     "no_harness_response": WORKER_NO_HARNESS_RESPONSE,
     "search_no_results": WORKER_SEARCH_NO_RESULTS,
     "propose_failed": WORKER_PROPOSE_FAILED,
+    "corpus_no_matches": WORKER_CORPUS_NO_MATCHES,
+    "corpus_no_entries": WORKER_CORPUS_NO_ENTRIES,
+    "corpus_not_found": WORKER_CORPUS_NOT_FOUND,
+    "corpus_read_failed": WORKER_CORPUS_READ_FAILED,
+    "corpus_count_failed": WORKER_CORPUS_COUNT_FAILED,
 }
 

@@ -30,6 +30,7 @@ def completion(
     logger: TrajectoryLogger | None = None,
     log_path: str | None = None,
     kernel_bridge: Any = None,
+    corpus_bridge: Any = None,
     **overrides: Any,
 ) -> str:
     """Run a single RLM completion.
@@ -45,6 +46,10 @@ def completion(
         logger: Optional TrajectoryLogger. Created if log_path is given.
         log_path: Path for JSONL trajectory log. Creates a logger automatically.
         kernel_bridge: Optional KernelBridge for vault-aware operation (K1).
+        corpus_bridge: Optional CorpusBridge for read-only corpus access (RO4).
+                 When given, the REPL gains `corpus_find`, `corpus_list`,
+                 `corpus_stat`, `corpus_read` and `corpus_count`, and the system
+                 prompt says so.
         **overrides: Individual config value overrides (e.g. max_turns=10).
 
     Returns:
@@ -71,7 +76,8 @@ def completion(
     if logger is None and log_path:
         logger = TrajectoryLogger(log_path)
 
-    loop = RootLoop(config, backend, logger, kernel_bridge=kernel_bridge)
+    loop = RootLoop(config, backend, logger, kernel_bridge=kernel_bridge,
+                    corpus_bridge=corpus_bridge)
     try:
         return loop.run(query, context)
     finally:

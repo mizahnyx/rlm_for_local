@@ -88,6 +88,15 @@ exist, written down in one place so they stop being re-derived per session.
      backup) or delete it once the aggregates are computed. Keeping it saves a
      34-minute re-walk; it is also the single most sensitive derived file the
      project produces.
+   - **The corpus is reached only through the harness** (owner call,
+     2026-09-12). Ad-hoc shell work over the tree stops: reads go through
+     `rlm_kernel/mounts.py`, either as `rlm corpus …` or as a `corpus_*` helper
+     inside a model cell, and the path index is built by the harness
+     (`rlm corpus index`) rather than by a hand-run walk. Two consequences worth
+     stating: the harness therefore runs **beside** the corpus (`~/Misc/rlm_for_local`
+     on `lunacode`, derived state in `~/rlm-derived`, model router on
+     `127.0.0.1:9010`), and mount *state* checks (`findmnt`, sysfs `ro`) are the
+     only permitted exception, because they read the mount, not the corpus.
 
 ## 2. Commands
 
@@ -114,6 +123,13 @@ uv run python scripts/assess_router_models.py --only <model> --before-each \
 # Re-score a recorded sweep under a different weight profile — no model runs
 uv run python scripts/rescore_sweep.py logs/router-model-battery.jsonl \
     --verify-with p1-heavy
+
+# Corpus work (RO3/RO4). Runs where the corpus is — see `AGENTS.md` §1.9.
+uv run python -m rlm_local.cli corpus index --corpus-root /srv/corpus \
+    --corpus-index ~/rlm-derived/corpus.sqlite     # paths only; reads no contents
+uv run python -m rlm_local.cli corpus count --corpus-index ~/rlm-derived/corpus.sqlite
+uv run python -m rlm_local.cli ask "…" --corpus-root /srv/corpus \
+    --corpus-index ~/rlm-derived/corpus.sqlite     # corpus_find/read/… in a cell
 ```
 
 `-k "not slow and not load"` is **wrong**: `-k` matches a substring of the node

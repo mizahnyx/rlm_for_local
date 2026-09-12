@@ -154,14 +154,41 @@ before promotion.
 
 Full documentation: [`docs/rlm-kernel-manual.md`](docs/rlm-kernel-manual.md).
 
+## Read-Only Corpus Access
+
+The harness can answer questions against a large **read-only** file tree — a
+personal archive, a backup drive, a document collection — instead of a context
+string. One streaming pass records the tree's *paths* (no file contents, no LLM)
+into a SQLite index outside the corpus; after that, search and counting are index
+arithmetic rather than tree walks:
+
+```bash
+# One-off: index the tree (paths only). The index must live OUTSIDE the corpus.
+rlm corpus index --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite
+
+# Ask questions against it: the model gets corpus_find/list/stat/read/count
+rlm ask "Which documents mention the 2021 audit, and how big are they?" \
+    --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite
+```
+
+The corpus is treated as **strictly non-mutating**, and that is enforced rather
+than intended: the boundary is the mount (a `ro` mount of a LUKS container opened
+with `cryptsetup open --readonly`), the code has no write verb to call
+(`rlm_kernel/mounts.py`), and derived state is refused if it would live inside
+the corpus. Reads are bounded, paths are contained, and tool results are capped so
+a file name can never pull a whole disk into a prompt. See `AGENTS.md` §1.8 and
+§1.9, and the operator guide's `rlm corpus` section.
+
 ## Frontends
 
-**CLI** — single completions, interactive chat, vault management, model checks:
+**CLI** — single completions, interactive chat, vault management, model checks,
+read-only corpus access:
 ```bash
 uv run python -m rlm_local.cli ask "What color?" --context-file doc.md
 uv run python -m rlm_local.cli chat --profile laptop
 uv run python -m rlm_local.cli ingest notes/*.md
 uv run python -m rlm_local.cli check Qwen3.5-4B-Abliterated
+uv run python -m rlm_local.cli corpus count --corpus-index ~/rlm-derived/corpus.sqlite
 ```
 
 **Web UI** — HTTPS/Tailscale-ready console with live SSE progress:

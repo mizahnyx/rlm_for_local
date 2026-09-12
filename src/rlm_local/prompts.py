@@ -132,6 +132,50 @@ def build_system_prompt(prompt_vars: dict) -> str:
     return SYSTEM_PROMPT.format(**prompt_vars)
 
 
+# ── Corpus helpers (RO4) ──────────────────────────────────────────────────
+# Appended to the system prompt by the root loop when a corpus is configured,
+# in packaged *and* vault-assembled prompt paths alike. Not a `prompt_vars` slot
+# on purpose: the section is runtime state about this run (is there a corpus? is
+# there an index?), not a hardware-profile value, and `Config.prompt_vars()` is
+# checked against the SYSTEM_PROMPT template key-for-key.
+CORPUS_SECTION_HEADER = "The corpus (read-only)"
+CORPUS_SECTION_LINES = (
+    "- A large read-only file tree is available: {root}.",
+    "- corpus_find(query, limit=20, kind=None, under=\"\") — search the corpus"
+    " path index. Results are relative paths. A query with a '/' searches full"
+    " paths; without one it searches file names.",
+    "- corpus_list(rel=\"\", limit=50) — one directory level (not the subtree).",
+    "- corpus_stat(rel) — kind, size and mtime of one path.",
+    "- corpus_read(rel, max_bytes=20000) — read one file, bounded. Long files are"
+    " truncated and say so.",
+    "- corpus_count(kind=None, under=\"\") — counts and byte totals without"
+    " listing anything.",
+    "- Never walk the corpus from a cell, and never build a list of every path:"
+    " it holds millions of files and a single walk takes tens of minutes. Search"
+    " with corpus_find, count with corpus_count.",
+    "- The corpus is read-only: nothing you run can or may change it.",
+)
+CORPUS_SECTION_NO_INDEX = (
+    "- No path index is built yet, so corpus_find and corpus_count will say so."
+    " corpus_list, corpus_stat and corpus_read work regardless."
+)
+
+
+def corpus_helpers_section(root: str, has_index: bool) -> str:
+    """The corpus capability block, with the helper names the worker defines.
+
+    `tests/test_corpus_repl.py` checks these names against the worker's actual
+    namespace, because a prompt that advertises a helper the worker does not
+    define is a lie the model will act on.
+    """
+    lines = [CORPUS_SECTION_HEADER]
+    lines.extend(line.format(root=root) if "{root}" in line else line
+                 for line in CORPUS_SECTION_LINES)
+    if not has_index:
+        lines.append(CORPUS_SECTION_NO_INDEX)
+    return "\n".join(lines)
+
+
 def build_messages(
     query: str,
     context_len: int,
