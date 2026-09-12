@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from rlm_kernel.index import Index, rebuild_index
-from rlm_kernel.schema import Frontmatter, Page
+from rlm_kernel.schema import Frontmatter, Page, PageStatus
 from rlm_kernel.vault import LocalVault
 
 
@@ -100,6 +100,77 @@ class TestIndexFTS:
         assert len(results) > 0
         # grep should rank highest
         assert "grep" in results[0]["name"]
+
+
+class TestSearchStatusPredicate:
+    """CL1 — retired pages used to keep answering queries.
+
+    `fts_search` had no status predicate, so a page the vault had explicitly
+    deprecated or superseded matched exactly like an active one, and a superseded
+    page could outrank its own replacement.
+    """
+
+    @pytest.fixture
+    def vault_with_retired_pages(self, temp_vault):
+        vault = LocalVault(temp_vault, init_git=False)
+        vault.put(Page(Frontmatter(
+            schema=1, kind="helper", name="current-qr",
+            title="qr — current implementation",
+            summary="The helper that is in use.",
+        ), "## Signature\n```python\ndef qr(p): ...\n```\n\n## Implementation\n```python\ndef qr(p):\n    pass\n```"),
+            "helper/current-qr.md")
+        vault.put(Page(Frontmatter(
+            schema=1, kind="helper", name="old-qr",
+            title="qr — retired implementation",
+            summary="Superseded by current-qr.",
+            status=PageStatus.DEPRECATED,
+        ), "## Signature\n```python\ndef qr(p): ...\n```\n\n## Implementation\n```python\ndef qr(p):\n    pass\n```"),
+            "helper/old-qr.md")
+        vault.put(Page(Frontmatter(
+            schema=1, kind="helper", name="ancient-qr",
+            title="qr — ancient implementation",
+            summary="Superseded long ago.",
+            status=PageStatus.SUPERSEDED,
+        ), "## Signature\n```python\ndef qr(p): ...\n```\n\n## Implementation\n```python\ndef qr(p):\n    pass\n```"),
+            "helper/ancient-qr.md")
+
+        idx = Index(temp_vault / ".index" / "meta.sqlite")
+        idx.build(vault)
+        return idx, vault
+
+    def test_a_deprecated_page_is_not_returned_by_default(self, vault_with_retired_pages):
+        idx, _ = vault_with_retired_pages
+        names = [r["name"] for r in idx.fts_search("qr")]
+        assert "current-qr" in names
+        assert "old-qr" not in names
+        assert "ancient-qr" not in names
+
+    def test_the_history_is_available_on_request(self, vault_with_retired_pages):
+        idx, _ = vault_with_retired_pages
+        names = [
+            r["name"] for r in idx.fts_search(
+                "qr", statuses=["active", "deprecated", "superseded"],
+            )
+        ]
+        assert set(names) == {"current-qr", "old-qr", "ancient-qr"}
+
+    def test_one_status_at_a_time(self, vault_with_retired_pages):
+        idx, _ = vault_with_retired_pages
+        assert [r["name"] for r in idx.fts_search("qr", statuses=["deprecated"])] == [
+            "old-qr"
+        ]
+
+    def test_results_carry_their_status(self, vault_with_retired_pages):
+        idx, _ = vault_with_retired_pages
+        results = idx.fts_search("qr", statuses=["active", "deprecated"])
+        by_name = {r["name"]: r["status"] for r in results}
+        assert by_name == {"current-qr": "active", "old-qr": "deprecated"}
+
+    def test_kind_and_status_filters_compose(self, vault_with_retired_pages):
+        idx, _ = vault_with_retired_pages
+        assert idx.fts_search("qr", kinds=["definition"]) == []
+        names = [r["name"] for r in idx.fts_search("qr", kinds=["helper"])]
+        assert names == ["current-qr"]
 
 
 class TestIncrementalUpdate:

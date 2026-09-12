@@ -980,13 +980,24 @@ Demotion transitions `active → deprecated` or `active → superseded`. A
 superseded page carries a `superseded_by` field pointing to the replacement
 path. Deprecated and superseded pages remain in the vault and in the index.
 
-**They still match search.** `Index.fts_search` queries the full-text table with
-no status predicate (`search_vault` filters only by `kind` and `tags`), so a
-deprecated page can appear in `search()` results — and a superseded page can
-outrank its replacement. What demotion *does* control is behaviour that reads
-status explicitly: only `active` helper pages are injected into the REPL
-namespace and listed in the system prompt. Treat demotion as "stop using this",
-not "make this invisible", and read `superseded_by` when a hit looks stale.
+**They no longer match search** (CL1, fixed 2026-09-12). `Index.fts_search`
+defaults to `statuses=["active"]`, so a page the vault has retired stops
+answering queries — before this, a deprecated page could appear in `search()`
+results and a superseded page could outrank its replacement. Search results now
+carry their `status`, and the history is one argument away:
+
+```python
+search_vault(vault, idx, "grep", statuses=["active", "deprecated", "superseded"])
+```
+
+```bash
+rlm-kernel search "grep" --status active deprecated
+```
+
+Demotion also still controls behaviour that reads status explicitly: only
+`active` helper pages are injected into the REPL namespace and listed in the
+system prompt. Treat demotion as "stop using this, and stop offering it", and
+read `superseded_by` when a historical hit is what you asked for.
 
 ### 7.7 Quarantine Isolation
 

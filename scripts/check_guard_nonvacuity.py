@@ -752,6 +752,29 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_renames_the_key_and_leaves_everything_else_alone",
         ],
     ),
+    # ── CL1: search stops returning retired pages (roadmap item 8) ─────────
+    (
+        "CL1 search returns every status again",
+        "src/rlm_kernel/index.py",
+        "        wanted_statuses = [\"active\"] if statuses is None else list(statuses)",
+        "        wanted_statuses = [] if statuses is None else list(statuses)",
+        [
+            "tests/rlm_kernel/test_index.py::TestSearchStatusPredicate"
+            "::test_a_deprecated_page_is_not_returned_by_default",
+            "tests/rlm_kernel/test_kernel_cli.py::TestSearchStatusFilter"
+            "::test_a_deprecated_page_is_hidden_from_its_own_query",
+        ],
+    ),
+    (
+        "CL1 a search card forgets the page's status",
+        "src/rlm_kernel/search.py",
+        "        \"status\": row.get(\"status\", \"active\"),",
+        "        \"status\": \"active\",",
+        [
+            "tests/rlm_kernel/test_kernel_cli.py::TestSearchStatusFilter"
+            "::test_status_widens_the_search_to_the_history",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

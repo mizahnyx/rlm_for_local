@@ -229,8 +229,16 @@ class Index:
 
     def fts_search(self, query: str, limit: int = 40,
                    kinds: list[str] | None = None,
-                   tags: list[str] | None = None) -> list[dict[str, Any]]:
-        """BM25-ranked FTS5 search with optional kind and tag filters.
+                   tags: list[str] | None = None,
+                   statuses: list[str] | None = None) -> list[dict[str, Any]]:
+        """BM25-ranked FTS5 search with optional kind, tag and status filters.
+
+        **`statuses` defaults to `["active"]`.** Search returns the knowledge the
+        vault still stands behind; deprecated and superseded pages used to match
+        like any other, so a page the vault had explicitly retired kept answering
+        queries with its retired text (F14/CL1). An auditor who needs the history
+        passes the statuses they want explicitly — `["active", "deprecated",
+        "superseded", "pending"]` returns everything indexed.
 
         Query semantics (R14): the query is split on whitespace and every token
         is individually quoted and OR-ed together — ``alpha beta`` becomes
@@ -257,9 +265,15 @@ class Index:
         conditions = []
         params: list[Any] = [fts_query]
 
+        wanted_statuses = ["active"] if statuses is None else list(statuses)
+        if wanted_statuses:
+            placeholders = ",".join("?" for _ in wanted_statuses)
+            conditions.append(f"pages.status IN ({placeholders})")
+            params.extend(wanted_statuses)
+
         if kinds:
             placeholders = ",".join("?" for _ in kinds)
-            conditions.append(f"kind IN ({placeholders})")
+            conditions.append(f"fts_pages.kind IN ({placeholders})")
             params.extend(kinds)
 
         if tags:
@@ -276,8 +290,12 @@ class Index:
             where = "AND " + where
 
         sql = f"""
-            SELECT path, kind, name, title, summary, rank AS score
+            SELECT fts_pages.path AS path, fts_pages.kind AS kind,
+                   fts_pages.name AS name, fts_pages.title AS title,
+                   fts_pages.summary AS summary, pages.status AS status,
+                   rank AS score
             FROM fts_pages
+            JOIN pages ON pages.path = fts_pages.path
             WHERE fts_pages MATCH ?
               {where}
             ORDER BY rank

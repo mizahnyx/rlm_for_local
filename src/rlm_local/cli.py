@@ -80,6 +80,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("query", help="Search query")
     p_search.add_argument("--kind", nargs="*", default=None)
     p_search.add_argument("--tag", nargs="*", default=None)
+    p_search.add_argument(
+        "--status", nargs="*", default=None,
+        choices=["active", "deprecated", "superseded", "pending"],
+        help="Page statuses to include (default: active only — retired pages "
+             "stop answering queries, F14/CL1)",
+    )
     p_search.add_argument("-k", type=int, default=5)
     p_search.add_argument("--vault", type=Path, default=_default_vault())
 
@@ -383,13 +389,21 @@ def _cmd_search(args: argparse.Namespace) -> int:
         print("Index not found. Run: rlm vault index --rebuild")
         return 1
 
-    results = search_vault(vault, idx_path, args.query, k=args.k, kinds=args.kind, tags=args.tag)
+    results = search_vault(
+        vault, idx_path, args.query, k=args.k, kinds=args.kind, tags=args.tag,
+        statuses=getattr(args, "status", None),
+    )
     if not results:
         print("(no results)")
+        if getattr(args, "status", None) is None:
+            print("Search returns active pages by default; "
+                  "--status deprecated superseded includes retired pages.")
         return 0
 
     for r in results:
-        print(f"[{r['kind']}] {r['name']}: {r['title']}")
+        status = r.get("status", "active")
+        marker = "" if status == "active" else f" [{status}]"
+        print(f"[{r['kind']}]{marker} {r['name']}: {r['title']}")
         print(f"    {r['summary'][:120]}")
         print()
     return 0

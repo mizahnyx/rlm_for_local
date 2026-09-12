@@ -108,6 +108,64 @@ class TestSearch:
         assert "[contract]" not in out
 
 
+class TestSearchStatusFilter:
+    """CL1 — a retired page stops answering queries, but stays reachable."""
+
+    @staticmethod
+    def _vault_with_a_deprecated_helper(tmp_path):
+        main(["init", "--vault", str(tmp_path)])
+        main(["index", "--rebuild", "--vault", str(tmp_path)])
+        # Demote the seeded grep helper: it stays in the vault and the index.
+        main(["demote", "helper/grep.md", "--vault", str(tmp_path)])
+        main(["index", "--rebuild", "--vault", str(tmp_path)])
+
+    def test_a_deprecated_page_is_hidden_from_its_own_query(self, tmp_path, capsys):
+        self._vault_with_a_deprecated_helper(tmp_path)
+        capsys.readouterr()
+
+        rc = main(["search", "grep", "--vault", str(tmp_path)])
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        # Other pages may mention grep; the demoted helper itself must not appear.
+        assert "[helper] grep" not in out
+
+    def test_an_empty_result_explains_the_default(self, tmp_path, capsys):
+        main(["init", "--vault", str(tmp_path)])
+        main(["index", "--rebuild", "--vault", str(tmp_path)])
+        capsys.readouterr()
+
+        rc = main(["search", "xyzzynotpresent", "--vault", str(tmp_path)])
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "(no results)" in out
+        assert "active pages by default" in out
+
+    def test_status_widens_the_search_to_the_history(self, tmp_path, capsys):
+        self._vault_with_a_deprecated_helper(tmp_path)
+        capsys.readouterr()
+
+        rc = main(["search", "grep", "--status", "deprecated",
+                   "--vault", str(tmp_path)])
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "[helper] [deprecated] grep: grep" in out
+
+    def test_an_active_page_shows_without_a_marker(self, tmp_path, capsys):
+        main(["init", "--vault", str(tmp_path)])
+        main(["index", "--rebuild", "--vault", str(tmp_path)])
+        capsys.readouterr()
+
+        rc = main(["search", "grep", "--vault", str(tmp_path)])
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "[helper] grep: grep" in out
+        assert "[deprecated]" not in out
+
+
 class TestReview:
     def test_review_with_no_proposals(self, tmp_path, capsys):
         main(["init", "--vault", str(tmp_path)])

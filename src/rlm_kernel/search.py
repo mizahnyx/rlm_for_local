@@ -32,8 +32,15 @@ def search_vault(
     tags: list[str] | None = None,
     detail: str = "card",
     include_quarantine: bool = False,
+    statuses: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Search the vault via its index with optional kind and tag filters."""
+    """Search the vault via its index with optional kind, tag and status filters.
+
+    `statuses` defaults to `["active"]` in the index layer: retired knowledge
+    stops answering queries (F14/CL1). Pass an explicit list to search the
+    history, and `include_quarantine=True` to merge in quarantined proposals on
+    top of the indexed results.
+    """
     from rlm_kernel.index import Index
 
     if not index_path.exists():
@@ -41,7 +48,8 @@ def search_vault(
 
     idx = Index(index_path)
     try:
-        results = idx.fts_search(query, limit=k * 2, kinds=kinds, tags=tags)
+        results = idx.fts_search(query, limit=k * 2, kinds=kinds, tags=tags,
+                                 statuses=statuses)
     finally:
         idx.close()
 
@@ -58,6 +66,7 @@ def search_vault(
                 "title": r["title"],
                 "summary": r["summary"],
                 "score": r["score"],
+                "status": r.get("status", "active"),
                 "body": page.body,
                 "frontmatter": page.frontmatter.model_dump(mode="json"),
             })
@@ -118,4 +127,8 @@ def _make_card(row: dict[str, Any]) -> dict[str, Any]:
         "title": row["title"],
         "summary": row["summary"],
         "score": row["score"],
+        # CL1: the card carries the page's status so a caller that widened the
+        # search to the history can tell a retired hit from a live one. Dropping
+        # it here made `--status deprecated` print exactly like an active result.
+        "status": row.get("status", "active"),
     }

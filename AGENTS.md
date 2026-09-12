@@ -91,6 +91,14 @@ Use `-m`. (Measured on 2026-09-11: `-m` 744 passed / 12 deselected vs `-k` 724 /
   `ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL lunacode …`.
   PowerShell re-adds CR to piped scripts; pipe remote scripts through
   `tr -d '\r' | bash -s`.
+- **Do not hand-pick a mix of `tests/` and `tests/rlm_kernel/` modules in one
+  pytest invocation.** A combination like
+  `pytest tests/rlm_kernel/test_index.py tests/test_cli.py tests/rlm_kernel/test_repl_bridge.py`
+  can fail the *last* module with `fixture 'temp_vault' not found` even though
+  every module passes — and every pair of those modules passes — in isolation.
+  The documented invocations (`pytest tests/`, `pytest tests/rlm_kernel/`) are
+  unaffected and are what the recorded suite numbers come from; select modules
+  from one directory, or run the directory.
 
 ## 4. The local model server
 
