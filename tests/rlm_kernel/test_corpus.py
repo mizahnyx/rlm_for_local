@@ -30,7 +30,7 @@ from rlm_kernel.corpus import (
     CorpusIndex,
     _bounded,
 )
-from rlm_kernel.mounts import LocalTreeMount, ReadOnlyViolation
+from rlm_kernel.mounts import Entry, LocalTreeMount, ReadOnlyViolation
 
 CORPUS_SRC = Path(__file__).resolve().parents[2] / "src" / "rlm_kernel" / "corpus.py"
 
@@ -133,6 +133,67 @@ class TestIndexReadsNamesNotContents:
             "corpus.py uses the builtin open(); reads must go through the mount"
         )
 
+    def test_progress_is_reported_by_interval_not_by_batch(
+        self, corpus: Path, derived: Path, mount: LocalTreeMount,
+    ) -> None:
+        """`progress_every` counts entries, and the final total always arrives.
+
+        The flag shipped inert the first time: the callback fired once per
+        5,000-entry batch whatever the operator asked for, which on a 4.97M-entry
+        corpus is a progress report nobody reads.
+        """
+        seen: list[int] = []
+        idx = CorpusIndex.open_for(corpus, derived / "corpus.sqlite")
+        idx.build(mount, progress=seen.append, progress_every=2, batch_size=1)
+        assert seen == [2, 4, 6]  # six entries; never reported twice
+        idx.close()
+
+    def test_progress_reports_every_batch_when_ungated(
+        self, corpus: Path, derived: Path, mount: LocalTreeMount,
+    ) -> None:
+        seen: list[int] = []
+        idx = CorpusIndex.open_for(corpus, derived / "corpus.sqlite")
+        idx.build(mount, progress=seen.append, batch_size=2)
+        assert seen == [2, 4, 6]
+        idx.close()
+
+
+class TestSchemaChangesCostARebuild:
+    """A layout change drops the table instead of migrating it."""
+
+    def test_a_stale_layout_is_dropped_and_reusable(
+        self, corpus: Path, derived: Path, mount: LocalTreeMount,
+    ) -> None:
+        import sqlite3
+
+        stale = derived / "corpus.sqlite"
+        conn = sqlite3.connect(str(stale))
+        conn.executescript(
+            "CREATE TABLE entries (path TEXT PRIMARY KEY, parent TEXT, name TEXT,"
+            " kind TEXT, size INTEGER, mtime REAL);"
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+            "INSERT INTO meta VALUES ('schema_version', '1');"
+            "INSERT INTO entries VALUES ('old/path.md', 'old', 'path.md', 'file', 1, 1.0);"
+        )
+        conn.commit()
+        conn.close()
+
+        idx = CorpusIndex.open_for(corpus, stale)
+        assert idx.count() == 0, "the stale row should not have survived"
+        assert idx.build(mount) == 6
+        assert idx.stat("readme.md") is not None
+        idx.close()
+
+    def test_a_current_layout_keeps_its_rows(
+        self, corpus: Path, derived: Path, mount: LocalTreeMount,
+    ) -> None:
+        idx = CorpusIndex.open_for(corpus, derived / "corpus.sqlite")
+        idx.build(mount)
+        idx.close()
+        reopened = CorpusIndex.open_for(corpus, derived / "corpus.sqlite")
+        assert reopened.count() == 6
+        reopened.close()
+
 
 class TestDerivedStateStaysOutside:
     def test_an_index_inside_the_corpus_is_refused(self, corpus: Path) -> None:
@@ -220,6 +281,140 @@ class TestQueries:
         assert _bounded(10_000, 200) == 200
         assert _bounded(0, 200) == 1
         assert _bounded("junk", 200) == 200
+
+
+class TestNamesThatAreNotUtf8:
+    """The case the first real build died on, 75,000 entries in.
+
+    Linux allows any byte but `/` and NUL in a file name, and a personal backup
+    is full of them. Python hands those back with surrogate escapes, and SQLite
+    cannot store a lone surrogate in a TEXT column at all — the first build of
+    this index died on `UnicodeEncodeError: surrogates not allowed` after the
+    ASCII-named unit tests had all passed.
+
+    So a path is stored twice: exactly, as bytes, and as a surrogate-free display
+    form. Without the bytes, a damaged name would be visible in a search result
+    and permanently unopenable — the worst of both.
+
+    The end-to-end tests need a POSIX filesystem (Windows file names are UTF-16,
+    so a name like `caf\\xe9` in latin-1 cannot exist there). The recovery logic
+    is therefore also tested against a fake mount that behaves the way POSIX
+    does, which keeps that guard inside the mutation table on every platform.
+    """
+
+    DAMAGED_RAW = b"sub/caf\xe9-latin1.txt"
+    DAMAGED_SHOWN = "sub/caf\ufffd-latin1.txt"
+    DAMAGED_SURROGATE = DAMAGED_RAW.decode("utf-8", "surrogateescape")
+
+    @pytest.fixture
+    def with_a_damaged_row(self, corpus: Path, derived: Path, mount: LocalTreeMount):
+        """An index that also knows about a name that is not valid UTF-8.
+
+        The row is inserted directly because the *walk* cannot produce one on
+        Windows; what is under test here is what the index does with such a row.
+        """
+        from rlm_kernel.corpus import _INSERT, path_bytes, path_text
+
+        idx = CorpusIndex.open_for(corpus, derived / "corpus.sqlite")
+        idx.build(mount)
+        idx._conn.execute(  # noqa: SLF001 - the row this platform cannot walk to
+            _INSERT,
+            (
+                path_bytes(self.DAMAGED_SURROGATE),
+                path_text(self.DAMAGED_SURROGATE),
+                "sub",
+                "caf\ufffd-latin1.txt",
+                "file",
+                31,
+                1.0,
+            ),
+        )
+        idx._conn.commit()
+        yield idx
+        idx.close()
+
+    def test_a_damaged_path_is_displayed_safely_and_stored_exactly(
+        self, with_a_damaged_row, tmp_path: Path,
+    ) -> None:
+        idx = with_a_damaged_row
+        hits = idx.find("caf")
+        assert len(hits) == 1
+        shown = hits[0].rel
+        # Displayable: no surrogates, so it can be printed, JSON-round-tripped
+        # through a cell, and written to a log.
+        assert "\ufffd" in shown
+        shown.encode("utf-8")  # raises if a surrogate survived
+        # And the exact bytes are still recoverable from the same row.
+        assert idx.raw_for(shown) == self.DAMAGED_RAW
+
+    def test_a_damaged_file_can_still_be_read(self, with_a_damaged_row) -> None:
+        """The recovery path, against a mount that only answers to exact bytes."""
+
+        class ExactBytesMount(LocalTreeMount):
+            """Stands in for POSIX: the display form names nothing on disk."""
+
+            def exists(self, rel: str) -> bool:
+                return rel == TestNamesThatAreNotUtf8.DAMAGED_SURROGATE
+
+            def is_contained(self, rel: str) -> bool:
+                return True
+
+            def stat(self, rel: str) -> Entry:
+                return Entry(rel=rel, kind="file", size=31, mode=0o644, mtime=1.0)
+
+            def read_bytes(self, rel: str, max_bytes: int | None = None) -> bytes:
+                return b"damaged name, readable content\n"
+
+        bridge = CorpusBridge(mount=ExactBytesMount(with_a_damaged_row.path.parent),
+                              index=with_a_damaged_row)
+        out = bridge.handle_read(self.DAMAGED_SHOWN)
+        assert "readable content" in out
+
+    def test_an_ambiguous_display_path_is_refused_rather_than_guessed(
+        self, with_a_damaged_row,
+    ) -> None:
+        """Two names can share one display form; guessing one would be wrong."""
+        from rlm_kernel.corpus import _INSERT, path_bytes, path_text
+
+        idx = with_a_damaged_row
+        for raw in (b"sub/two-\xe9.txt", b"sub/two-\xff.txt"):
+            surrogate = raw.decode("utf-8", "surrogateescape")
+            idx._conn.execute(  # noqa: SLF001
+                _INSERT,
+                (path_bytes(surrogate), path_text(surrogate), "sub",
+                 "two-\ufffd.txt", "file", 1, 1.0),
+            )
+        idx._conn.commit()
+        hits = idx.find("two-")
+        assert len(hits) == 2
+        assert hits[0].rel == hits[1].rel  # same display form, different files
+        assert idx.raw_for(hits[0].rel) is None, "ambiguity must not be guessed"
+
+    @pytest.mark.skipif(
+        os.name != "posix", reason="POSIX-only: byte-exact file names"
+    )
+    def test_the_build_survives_a_real_damaged_name(
+        self, corpus: Path, derived: Path, mount: LocalTreeMount,
+    ) -> None:
+        with open(os.path.join(os.fsencode(corpus), self.DAMAGED_RAW), "wb") as handle:
+            handle.write(b"damaged name, readable content\n")
+        idx = CorpusIndex.open_for(corpus, derived / "corpus.sqlite")
+        assert idx.build(mount) == 7
+        assert idx.meta()["paths_not_utf8"] == "1"
+        idx.close()
+
+    @pytest.mark.skipif(
+        os.name != "posix", reason="POSIX-only: byte-exact file names"
+    )
+    def test_a_real_damaged_name_reads_end_to_end(
+        self, corpus: Path, mount: LocalTreeMount, with_a_damaged_row,
+    ) -> None:
+        with open(os.path.join(os.fsencode(corpus), self.DAMAGED_RAW), "wb") as handle:
+            handle.write(b"damaged name, readable content\n")
+        bridge = CorpusBridge(mount=mount, index=with_a_damaged_row)
+        out = bridge.handle_read(self.DAMAGED_SHOWN)
+        assert "readable content" in out
+        assert self.DAMAGED_SHOWN in out
 
 
 class TestBridgeWithoutAnIndex:

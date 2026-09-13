@@ -59,6 +59,57 @@ DEFAULT_READ_BYTES = 20_000
 _SCHEMA_VERSION = "1"
 
 
+_SCHEMA_VERSION = "2"
+
+#: The one layout this code can read. Bumped whenever it changes; the index is a
+#: cache of the corpus, so a stale layout is dropped and rebuilt rather than
+#: migrated (`_ensure_schema`).
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS entries (
+    raw    BLOB PRIMARY KEY,
+    path   TEXT NOT NULL,
+    parent TEXT NOT NULL,
+    name   TEXT NOT NULL,
+    kind   TEXT NOT NULL,
+    size   INTEGER NOT NULL,
+    mtime  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS entries_parent ON entries(parent);
+CREATE INDEX IF NOT EXISTS entries_name ON entries(name);
+CREATE INDEX IF NOT EXISTS entries_path ON entries(path);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+"""
+
+
+def path_text(rel: str) -> str:
+    """The stored, always-encodable form of a path.
+
+    A backup contains file names that are not valid UTF-8 (Linux permits any
+    bytes but `/` and NUL), and Python hands those back from `scandir` with
+    surrogate escapes (`'\\udced'`). SQLite encodes TEXT as UTF-8 and refuses
+    lone surrogates outright — which is how the first real build of this index
+    died 75,000 entries in, after the unit tests (all ASCII names) passed.
+
+    So a path is stored twice: exactly, as bytes (`raw`), and as this
+    surrogate-free text (`path`) for display and search. `CorpusIndex.raw_for`
+    recovers the exact bytes, which is how a damaged name stays *readable*
+    instead of merely visible.
+    """
+    return rel.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+
+
+def path_bytes(rel: str) -> bytes:
+    """The exact bytes of a path, whatever its encoding."""
+    return rel.encode("utf-8", "surrogateescape")
+
+
+#: One statement, used by both the batch and the tail insert.
+_INSERT = (
+    "INSERT OR REPLACE INTO entries"
+    " (raw, path, parent, name, kind, size, mtime) VALUES (?, ?, ?, ?, ?, ?, ?)"
+)
+
+
 def _connect(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.execute("PRAGMA journal_mode=WAL")
@@ -76,21 +127,24 @@ class CorpusIndex:
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
         self._conn = _connect(self._path)
-        self._conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS entries (
-                path  TEXT PRIMARY KEY,
-                parent TEXT NOT NULL,
-                name   TEXT NOT NULL,
-                kind   TEXT NOT NULL,
-                size   INTEGER NOT NULL,
-                mtime  REAL NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS entries_parent ON entries(parent);
-            CREATE INDEX IF NOT EXISTS entries_name ON entries(name);
-            CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            """
-        )
+        self._ensure_schema()
+
+    def _ensure_schema(self) -> None:
+        """Create the schema, or drop a stale one and rebuild from scratch.
+
+        There is nothing to migrate: the corpus is the source of truth and this
+        table is a cache of it, so a layout change costs one re-walk rather than
+        a migration script that has to be right.
+        """
+        self._conn.executescript(_SCHEMA)
+        existing = {
+            k: v for k, v in self._conn.execute("SELECT key, value FROM meta")
+        }
+        found = existing.get("schema_version")
+        if found is not None and found != _SCHEMA_VERSION:
+            self._conn.executescript("DROP TABLE IF EXISTS entries;")
+            self._conn.executescript(_SCHEMA)
+        self._set_meta("schema_version", _SCHEMA_VERSION)
         self._conn.commit()
 
     @classmethod
@@ -129,6 +183,7 @@ class CorpusIndex:
         mount: LocalTreeMount,
         *,
         progress: Callable[[int], None] | None = None,
+        progress_every: int | None = None,
         batch_size: int = 5_000,
     ) -> int:
         """Write the path index from one streaming walk of ``mount``.
@@ -141,39 +196,58 @@ class CorpusIndex:
 
         Only directory entries are read. No file is opened, so an unreadable,
         damaged or enormous file costs nothing here.
+
+        `progress_every` gates the callback by *entries*, not by batches: a walk
+        of millions of files at the default batch size would otherwise emit about
+        a thousand lines, which is a progress report nobody reads — and, the first
+        time this ran, a `--progress-every` flag that claimed to control the
+        interval and did not.
         """
-        rows: list[tuple[str, str, str, str, int, float]] = []
+        rows: list[tuple[bytes, str, str, str, str, int, float]] = []
         written = 0
+        damaged = 0
+        reported = 0
+
+        def report(count: int, *, final: bool = False) -> None:
+            nonlocal reported
+            if progress is None or count == reported:
+                return
+            if not final and progress_every and count - reported < progress_every:
+                return
+            reported = count
+            progress(count)
+
         cursor = self._conn.cursor()
         cursor.execute("DELETE FROM entries")
         for entry in mount.iter_entries():
             path = entry.rel
-            parent, _, name = path.rpartition("/")
-            rows.append((path, parent, name, entry.kind, entry.size, entry.mtime))
+            shown = path_text(path)
+            if shown != path:
+                # A name that is not valid UTF-8. Counted so the aggregate
+                # record can say how much of the corpus is in this state.
+                damaged += 1
+            parent, _, name = shown.rpartition("/")
+            rows.append(
+                (path_bytes(path), shown, parent, name, entry.kind, entry.size,
+                 entry.mtime)
+            )
             if len(rows) >= batch_size:
-                cursor.executemany(
-                    "INSERT OR REPLACE INTO entries"
-                    " (path, parent, name, kind, size, mtime) VALUES (?, ?, ?, ?, ?, ?)",
-                    rows,
-                )
+                cursor.executemany(_INSERT, rows)
                 written += len(rows)
                 rows.clear()
-                if progress is not None:
-                    progress(written)
+                report(written)
         if rows:
-            cursor.executemany(
-                "INSERT OR REPLACE INTO entries"
-                " (path, parent, name, kind, size, mtime) VALUES (?, ?, ?, ?, ?, ?)",
-                rows,
-            )
+            cursor.executemany(_INSERT, rows)
             written += len(rows)
         self._set_meta("corpus_root", str(mount.root))
         self._set_meta("built_at", f"{time.time():.3f}")
         self._set_meta("schema_version", _SCHEMA_VERSION)
         self._set_meta("entries", str(written))
+        # Aggregates only, per AGENTS.md 1.9: how many names are not valid
+        # UTF-8 is a fact about the corpus that is safe to report anywhere.
+        self._set_meta("paths_not_utf8", str(damaged))
         self._conn.commit()
-        if progress is not None:
-            progress(written)
+        report(written, final=True)
         return written
 
     def _set_meta(self, key: str, value: str) -> None:
@@ -246,6 +320,20 @@ class CorpusIndex:
             (rel.rstrip("/"),),
         ).fetchone()
         return _entry(row)
+
+    def raw_for(self, rel: str) -> bytes | None:
+        """The exact bytes of a stored path, or None if absent or ambiguous.
+
+        This is what makes a name that is not valid UTF-8 *usable*: the display
+        form has its damaged bytes replaced, so opening it directly fails, and
+        the original bytes are the only thing that names the file.
+        """
+        rows = self._conn.execute(
+            "SELECT raw FROM entries WHERE path = ? LIMIT 2", (rel.rstrip("/"),)
+        ).fetchall()
+        if len(rows) != 1:
+            return None
+        return bytes(rows[0][0])
 
     def list_dir(self, rel: str = "", *, limit: int = DEFAULT_LIST_LIMIT) -> list[Entry]:
         """One directory level, from the index. Never a walk."""
@@ -395,6 +483,34 @@ class CorpusBridge:
             return None
         return CORPUS_REFUSED.format(rel=rel)
 
+    def _readable(self, rel: str) -> str | None:
+        """The path to hand the mount, or None if nothing there can be opened.
+
+        Usually the caller's own string. The exception is a name that is not
+        valid UTF-8: the index stores a display form with the damaged bytes
+        replaced, and that display form does not name the file on disk. When the
+        index knows the exact bytes, they are recovered here — otherwise a
+        damaged name would be visible in a search result and permanently
+        unreadable, which is the worst of both.
+        """
+        try:
+            if self.mount.exists(rel):
+                return rel
+        except ReadOnlyViolation:
+            return None
+        if self.index is None:
+            return None
+        raw = self.index.raw_for(rel)
+        if raw is None:
+            return None
+        recovered = raw.decode("utf-8", "surrogateescape")
+        try:
+            if self.mount.exists(recovered):
+                return recovered
+        except ReadOnlyViolation:
+            return None
+        return None
+
     def handle_find(
         self,
         query: str,
@@ -427,13 +543,14 @@ class CorpusBridge:
         refusal = self._refusal(rel)
         if refusal is not None:
             return refusal
+        target = self._readable(rel)
+        if target is None:
+            return CORPUS_NOT_FOUND.format(rel=rel)
         try:
-            if not self.mount.exists(rel):
-                return CORPUS_NOT_FOUND.format(rel=rel)
-            if rel.strip("/") and self.mount.stat(rel).kind != "dir":
+            if rel.strip("/") and self.mount.stat(target).kind != "dir":
                 return CORPUS_NOT_FOUND.format(rel=rel)
             shown = self.mount.iter_children(
-                rel, max_entries=_bounded(limit, LIST_LIMIT_MAX)
+                target, max_entries=_bounded(limit, LIST_LIMIT_MAX)
             )
             hits = list(shown)
             if not hits:
@@ -451,10 +568,11 @@ class CorpusBridge:
         else:
             # A missing path and an escaping path are different answers: the
             # former is "nothing there", the latter is "refused".
+            target = self._readable(rel)
+            if target is None:
+                return CORPUS_NOT_FOUND.format(rel=rel)
             try:
-                if not self.mount.exists(rel):
-                    return CORPUS_NOT_FOUND.format(rel=rel)
-                entry = self.mount.stat(rel)
+                entry = self.mount.stat(target)
             except ReadOnlyViolation as e:
                 return CORPUS_REFUSED.format(rel=rel) + f" ({e})"
         if entry is None:
@@ -470,20 +588,26 @@ class CorpusBridge:
         refusal = self._refusal(rel)
         if refusal is not None:
             return refusal
+        target = self._readable(rel)
+        if target is None:
+            return CORPUS_NOT_FOUND.format(rel=rel)
         try:
-            if not self.mount.exists(rel):
-                return CORPUS_NOT_FOUND.format(rel=rel)
-            size = self.mount.stat(rel)
+            size = self.mount.stat(target)
         except ReadOnlyViolation as e:
             return CORPUS_REFUSED.format(rel=rel) + f" ({e})"
         if size.kind == "dir":
             return CORPUS_NOT_A_FILE.format(rel=rel)
         try:
-            data = self.mount.read_bytes(rel, max_bytes=cap)
+            data = self.mount.read_bytes(target, max_bytes=cap)
         except ReadOnlyViolation as e:
             return CORPUS_READ_ERROR.format(rel=rel, error=e)
         text = data.decode("utf-8", errors="replace")
-        header = f"# {size.rel} ({size.size} bytes)"
+        # The header names the path the *caller* used: `size.rel` may contain
+        # surrogate escapes for a name that is not valid UTF-8, and a surrogate
+        # cannot be printed (or JSON-round-tripped through a cell) without
+        # raising. The bytes are what opens the file; the display form is what
+        # travels.
+        header = f"# {rel} ({size.size} bytes)"
         if size.size > len(data):
             return header + "\n" + text + CORPUS_READ_TRUNCATED.format(
                 shown=len(data), total=size.size

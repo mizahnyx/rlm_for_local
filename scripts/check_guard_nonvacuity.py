@@ -1078,6 +1078,44 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_ask_with_only_a_corpus_uses_the_stub_context",
         ],
     ),
+    (
+        "RO3 --progress-every goes inert again",
+        "src/rlm_kernel/corpus.py",
+        "            if not final and progress_every and count - reported < progress_every:\n"
+        "                return",
+        "            if False:\n"
+        "                return",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestIndexReadsNamesNotContents"
+            "::test_progress_is_reported_by_interval_not_by_batch",
+        ],
+    ),
+    (
+        "RO3 the index stops storing exact path bytes",
+        "src/rlm_kernel/corpus.py",
+        "                (path_bytes(path), shown, parent, name, entry.kind, entry.size,\n"
+        "                 entry.mtime)",
+        "                (shown.encode(\"utf-8\", \"replace\"), shown, parent, name,\n"
+        "                 entry.kind, entry.size, entry.mtime)",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestNamesThatAreNotUtf8"
+            "::test_a_damaged_path_is_stored_exactly_and_displayed_safely",
+        ],
+    ),
+    (
+        "RO3 a not-UTF-8 path stops being recoverable for reading",
+        "src/rlm_kernel/corpus.py",
+        "        raw = self.index.raw_for(rel)\n"
+        "        if raw is None:\n"
+        "            return None",
+        "        raw = self.index.raw_for(rel)\n"
+        "        if raw is None or True:\n"
+        "            return None",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestNamesThatAreNotUtf8"
+            "::test_a_damaged_file_can_still_be_read",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

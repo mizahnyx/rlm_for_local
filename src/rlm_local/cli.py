@@ -691,7 +691,7 @@ def _cmd_corpus(args: argparse.Namespace) -> int:
 
         print(f"Indexing the corpus at {Path(root)} (paths only, no file reads)")
         try:
-            written = idx.build(mount, progress=progress)
+            written = idx.build(mount, progress=progress, progress_every=every)
         except ReadOnlyViolation as e:
             print(f"Error: {e}", file=sys.stderr)
             return 2
