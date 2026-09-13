@@ -218,6 +218,33 @@ def build_parser() -> argparse.ArgumentParser:
     p_cdigest.add_argument("--compare", type=Path, default=None,
                            help="Compare this snapshot file with the one just taken")
 
+    p_cclassify = corpus_sub.add_parser(
+        "classify",
+        help="Stage 1: read each file's head and record what it actually is",
+        description=(
+            "Read the head of every file (bounded, O_RDONLY, through the "
+            "read-only mount) and record kind, encoding and a content hash beside "
+            "the path index. This is what tells text from databases, media and "
+            "vendored blobs when the extension does not — the 1.56M files Stage 0 "
+            "could not classify. Resumable: it commits in batches and skips what "
+            "is already done. Prints aggregates only."
+        ),
+    )
+    _add_corpus_flags(p_cclassify, require_root=True, require_index=True)
+    p_cclassify.add_argument("--sniff-bytes", type=int, default=8192,
+                             help="How many bytes to read for the sniff")
+    p_cclassify.add_argument("--hash-bytes", type=int, default=65536,
+                             help="How many bytes to hash (together with the size)")
+    p_cclassify.add_argument("--hash-mode", choices=["head", "none"], default="head",
+                             help="'head' hashes the head window plus the size; "
+                                  "'none' skips hashing entirely")
+    p_cclassify.add_argument("--batch-size", type=int, default=2000)
+    p_cclassify.add_argument("--limit", type=int, default=None,
+                             help="Classify at most N files (smoke tests, pilots)")
+    p_cclassify.add_argument("--redo", action="store_true",
+                             help="Re-classify files that already have a row")
+    p_cclassify.add_argument("--progress-every", type=int, default=100_000)
+
     return parser
 
 
@@ -796,8 +823,67 @@ def _cmd_corpus(args: argparse.Namespace) -> int:
     if sub == "digest":
         return _cmd_corpus_digest(args)
 
+    if sub == "classify":
+        return _cmd_corpus_classify(args)
+
     print(f"Error: unknown corpus subcommand {sub!r}", file=sys.stderr)
     return 2
+
+
+def _cmd_corpus_classify(args: argparse.Namespace) -> int:
+    """`rlm corpus classify` — Stage 1, the content sniffing pass."""
+    from rlm_kernel.classify import classify_entries, format_report
+    from rlm_kernel.corpus import CorpusIndex
+    from rlm_kernel.mounts import LocalTreeMount, ReadOnlyViolation
+
+    if not args.corpus_root or not args.corpus_index:
+        print("Error: --corpus-root and --corpus-index are both required "
+              "(env RLM_CORPUS_ROOT / RLM_CORPUS_INDEX).", file=sys.stderr)
+        return 2
+
+    try:
+        mount = LocalTreeMount(args.corpus_root)
+        idx = CorpusIndex.open_for(args.corpus_root, args.corpus_index)
+    except ReadOnlyViolation as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+    table = idx.classifications()
+    table.ensure()
+
+    every = max(1, int(getattr(args, "progress_every", 100_000) or 100_000))
+    reported = 0
+
+    def progress(stats) -> None:
+        nonlocal reported
+        if stats.files_seen - reported < every and stats.files_seen:
+            return
+        reported = stats.files_seen
+        print(f"  {stats.files_seen:,} files classified", flush=True)
+
+    print(f"Classifying the corpus at {Path(args.corpus_root)} "
+          f"(heads only, no writes)")
+    try:
+        stats = classify_entries(
+            mount, table,
+            sniff_bytes=args.sniff_bytes,
+            hash_bytes=args.hash_bytes,
+            hash_mode=args.hash_mode,
+            batch_size=args.batch_size,
+            limit=args.limit,
+            redo=args.redo,
+            progress=progress,
+        )
+    except ReadOnlyViolation as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+    finally:
+        report = table.report()
+        summary = idx.summary()
+        idx.close()
+
+    print(format_report(report, total_files=summary["by_kind"].get("file", 0),
+                        total_bytes=summary["file_bytes"], stats=stats))
+    return 0
 
 
 def _cmd_corpus_digest(args: argparse.Namespace) -> int:

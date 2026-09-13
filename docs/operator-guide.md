@@ -373,6 +373,7 @@ rlm corpus count  --corpus-index FILE [--kind file|dir|symlink] [--under DIR]
 rlm corpus find   --corpus-index FILE QUERY [-k N] [--kind K] [--under DIR]
 rlm corpus read   --corpus-root DIR REL [--max-bytes N]
 rlm corpus verify --corpus-root DIR (--since T | --since-file F) [--sample N]
+rlm corpus classify --corpus-root DIR --corpus-index FILE [--limit N] [--hash-mode head|none]
 ```
 
 Read-only access to a large file tree — the "corpus" the harness can answer
@@ -418,7 +419,30 @@ rlm corpus find  --corpus-index ~/rlm-derived/corpus.sqlite budget -k 20
 # Prove a run did not touch the corpus (take the marker before the run)
 touch ~/rlm-derived/marker
 rlm corpus verify --corpus-root /srv/corpus --since-file ~/rlm-derived/marker
+
+# Stage 1: read each file's head and record what it actually is
+rlm corpus classify --corpus-root /srv/corpus \
+    --corpus-index ~/rlm-derived/corpus.sqlite
 ```
+
+**`rlm corpus classify` is the content pass.** Extensions lie — on the owner's
+corpus, 1.07M files have unknown extensions and 486k have none, ~191 GiB whose
+nature no name can tell. This reads the **head** of each file (default 8 KiB,
+bounded, `O_RDONLY`, through the read-only mount — a 200 GiB image costs what a
+4-byte file costs), and records in a table beside the path index:
+
+- `kind` — `text`, `archive`, `media`, `database`, `document`, `binary`, `empty`,
+  `unreadable`;
+- `encoding` — `utf-8`, `cp1252`, or nothing;
+- a content hash over the head plus the size (exact for any file under the
+  window, and 1.49M files here are under 1 KiB), which is what makes the dedup
+  estimate real.
+
+It is **resumable**: rows commit in batches and a second run classifies only what
+is left, so a pass killed after three hours resumes rather than restarts. Use
+`--limit N` for a pilot and `--redo` to redo everything (e.g. after a sniffing
+rule changes — rows carry a `sniff_version`). Output is aggregates only: counts
+and bytes by kind, encodings, dedup factor, and unreadable count — never a path.
 
 **`rlm corpus verify` is the read-only proof.** Take a marker before the run, and
 this walks the corpus afterwards through the same mount provider and reports, as

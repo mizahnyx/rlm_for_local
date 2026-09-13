@@ -299,6 +299,17 @@ class CorpusIndex:
         """
         return self.meta().get("complete", "1") == "1"
 
+    def classifications(self):
+        """The Stage 1 classification table (`rlm_kernel.classify`).
+
+        A lazy import on purpose: `classify` needs this index's connection, not
+        this class, and a module-level import would make the two modules depend
+        on each other.
+        """
+        from rlm_kernel.classify import ClassificationTable
+
+        return ClassificationTable(self._conn)
+
     def _set_meta(self, key: str, value: str) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value)

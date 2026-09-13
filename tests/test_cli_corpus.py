@@ -319,6 +319,60 @@ class TestCorpusDigestCommand:
         assert "cannot read" in capsys.readouterr().err
 
 
+class TestCorpusClassifyCommand:
+    """`rlm corpus classify` — Stage 1 from the operator's side."""
+
+    def test_it_classifies_and_reports_aggregates(
+        self, corpus: Path, index_path: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        cli_main(["corpus", "index", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path)])
+        capsys.readouterr()
+        rc = cli_main(["corpus", "classify", "--corpus-root", str(corpus),
+                       "--corpus-index", str(index_path)])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "files classified" in out or "classified:" in out
+        assert "dedup" in out
+        # Aggregates only: the report must never name a file.
+        assert "notes.md" not in out
+        assert "archive.zip" not in out
+
+    def test_a_second_run_says_nothing_new(
+        self, corpus: Path, index_path: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        cli_main(["corpus", "index", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path)])
+        cli_main(["corpus", "classify", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path)])
+        capsys.readouterr()
+        cli_main(["corpus", "classify", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path)])
+        assert "this pass: 0 files read" in capsys.readouterr().out
+
+    def test_limit_pilots(
+        self, corpus: Path, index_path: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        cli_main(["corpus", "index", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path)])
+        capsys.readouterr()
+        cli_main(["corpus", "classify", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path), "--limit", "2"])
+        assert "this pass: 2 files read" in capsys.readouterr().out
+
+    def test_it_needs_both_paths(self, capsys: pytest.CaptureFixture) -> None:
+        assert cli_main(["corpus", "classify", "--corpus-root", "/tmp"]) == 2
+        assert "required" in capsys.readouterr().err
+
+    def test_a_bad_root_is_an_error(
+        self, tmp_path: Path, index_path: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        rc = cli_main(["corpus", "classify", "--corpus-root", str(tmp_path / "absent"),
+                       "--corpus-index", str(index_path)])
+        assert rc == 2
+        assert "not a directory" in capsys.readouterr().err
+
+
 class TestAskWithACorpus:
     def test_ask_with_only_a_corpus_uses_the_stub_context(
         self, corpus: Path, index_path: Path, monkeypatch: pytest.MonkeyPatch,

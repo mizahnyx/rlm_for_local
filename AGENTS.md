@@ -128,6 +128,8 @@ uv run python scripts/rescore_sweep.py logs/router-model-battery.jsonl \
 uv run python -m rlm_local.cli corpus index --corpus-root /srv/corpus \
     --corpus-index ~/rlm-derived/corpus.sqlite     # paths only; reads no contents
 uv run python -m rlm_local.cli corpus count --corpus-index ~/rlm-derived/corpus.sqlite
+uv run python -m rlm_local.cli corpus classify --corpus-root /srv/corpus \
+    --corpus-index ~/rlm-derived/corpus.sqlite     # heads only, resumable
 uv run python -m rlm_local.cli ask "…" --corpus-root /srv/corpus \
     --corpus-index ~/rlm-derived/corpus.sqlite     # corpus_find/read/… in a cell
 

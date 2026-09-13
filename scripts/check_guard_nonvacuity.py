@@ -1247,6 +1247,91 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         ],
     ),
     (
+        "RO1 the sniff reads the whole file instead of the head",
+        "src/rlm_kernel/classify.py",
+        "    want = sniff_bytes\n"
+        "    if hash_mode == \"head\":\n"
+        "        want = max(sniff_bytes, hash_bytes)",
+        "    want = None\n"
+        "    if hash_mode == \"head\":\n"
+        "        want = None",
+        [
+            "tests/rlm_kernel/test_classify.py::TestTheClassifyPass"
+            "::test_the_read_is_bounded_to_the_head",
+        ],
+    ),
+    (
+        "RO1 the classify pass stops being resumable",
+        "src/rlm_kernel/classify.py",
+        "        if not redo:\n"
+        "            sql += \" AND c.raw IS NULL\"",
+        "        if False:\n"
+        "            sql += \" AND c.raw IS NULL\"",
+        [
+            "tests/rlm_kernel/test_classify.py::TestTheClassifyPass"
+            "::test_a_second_run_classifies_nothing_new",
+        ],
+    ),
+    (
+        "RO1 an unreadable file aborts the pass instead of being recorded",
+        "src/rlm_kernel/classify.py",
+        "        except ReadOnlyViolation as e:\n"
+        "            result, digest, mode, read = SniffResult(UNREADABLE, None), \"\", \"none\", 0\n"
+        "            note = type(e).__name__\n"
+        "            stats.unreadable += 1",
+        "        except ReadOnlyViolation:\n"
+        "            raise",
+        [
+            "tests/rlm_kernel/test_classify.py::TestTheClassifyPass"
+            "::test_it_reports_unreadable_paths_without_aborting",
+        ],
+    ),
+    (
+        "RO1 the report starts carrying paths",
+        "src/rlm_kernel/classify.py",
+        "        unreadable = by_kind.get(UNREADABLE, {}).get(\"files\", 0)\n"
+        "        return {\n"
+        "            \"classified\": sum(v[\"files\"] for v in by_kind.values()),",
+        "        unreadable = by_kind.get(UNREADABLE, {}).get(\"files\", 0)\n"
+        "        sample = [row[0] for row in self._conn.execute(\n"
+        "            \"SELECT path FROM entries LIMIT 1\")]\n"
+        "        return {\n"
+        "            \"sample\": sample,\n"
+        "            \"classified\": sum(v[\"files\"] for v in by_kind.values()),",
+        [
+            "tests/rlm_kernel/test_classify.py::TestTheReport"
+            "::test_it_contains_no_paths",
+        ],
+    ),
+    (
+        "RO1 NUL bytes stop meaning binary",
+        "src/rlm_kernel/classify.py",
+        "    if b\"\\x00\" not in data:\n"
+        "        try:\n"
+        "            data.decode(\"utf-8\")",
+        "    if True:\n"
+        "        try:\n"
+        "            data.decode(\"utf-8\", \"ignore\")",
+        [
+            "tests/rlm_kernel/test_classify.py::TestTheSniffItself"
+            "::test_binary_with_nul_bytes",
+        ],
+    ),
+    (
+        "RO1 the classification table truncates the path index",
+        "src/rlm_kernel/classify.py",
+        "    def ensure(self) -> None:\n"
+        "        self._conn.executescript(",
+        "    def ensure(self) -> None:\n"
+        "        self._conn.executescript(\"DELETE FROM entries;\")\n"
+        "        self._conn.executescript(",
+        [
+            "tests/rlm_kernel/test_classify.py"
+            "::TestOpeningTheIndexLeavesThePathIndexAlone"
+            "::test_classifying_does_not_truncate_the_path_index",
+        ],
+    ),
+    (
         "RO2 two different snapshots compare as equal",
         "src/rlm_kernel/corpus.py",
         "    same = (\n"
