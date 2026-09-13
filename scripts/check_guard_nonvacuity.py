@@ -1013,11 +1013,11 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO3 the index build starts reading file contents",
         "src/rlm_kernel/corpus.py",
-        "        for entry in mount.iter_entries():\n"
-        "            path = entry.rel",
-        "        for entry in mount.iter_entries():\n"
-        "            path = entry.rel\n"
-        "            mount.read_bytes(path, max_bytes=1)",
+        "            for entry in mount.iter_entries():\n"
+        "                path = entry.rel",
+        "            for entry in mount.iter_entries():\n"
+        "                path = entry.rel\n"
+        "                mount.read_bytes(path, max_bytes=1)",
         [
             "tests/rlm_kernel/test_corpus.py::TestIndexReadsNamesNotContents"
             "::test_build_never_opens_a_file",
@@ -1091,15 +1091,17 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         ],
     ),
     (
-        "RO3 the index stops storing exact path bytes",
+        "RO3 stored path bytes become lossy",
         "src/rlm_kernel/corpus.py",
-        "                (path_bytes(path), shown, parent, name, entry.kind, entry.size,\n"
-        "                 entry.mtime)",
-        "                (shown.encode(\"utf-8\", \"replace\"), shown, parent, name,\n"
-        "                 entry.kind, entry.size, entry.mtime)",
+        "def path_bytes(rel: str) -> bytes:\n"
+        "    \"\"\"The exact bytes of a path, whatever its encoding.\"\"\"\n"
+        "    return rel.encode(\"utf-8\", \"surrogateescape\")",
+        "def path_bytes(rel: str) -> bytes:\n"
+        "    \"\"\"The exact bytes of a path, whatever its encoding.\"\"\"\n"
+        "    return rel.encode(\"utf-8\", \"replace\")",
         [
             "tests/rlm_kernel/test_corpus.py::TestNamesThatAreNotUtf8"
-            "::test_a_damaged_path_is_stored_exactly_and_displayed_safely",
+            "::test_a_damaged_path_is_displayed_safely_and_stored_exactly",
         ],
     ),
     (
@@ -1114,6 +1116,46 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         [
             "tests/rlm_kernel/test_corpus.py::TestNamesThatAreNotUtf8"
             "::test_a_damaged_file_can_still_be_read",
+        ],
+    ),
+    (
+        "RO3 the secondary indexes are not restored after a bulk load",
+        "src/rlm_kernel/corpus.py",
+        "            for statement in _SECONDARY_INDEXES:\n"
+        "                cursor.execute(statement)\n"
+        "            self._conn.commit()",
+        "            pass",
+        [
+            "tests/rlm_kernel/test_corpus.py"
+            "::TestProgressIsCheckpointedAndCompletenessIsRecorded"
+            "::test_the_secondary_indexes_exist_after_a_bulk_load",
+        ],
+    ),
+    (
+        "RO3 batches stop being checkpointed during the walk",
+        "src/rlm_kernel/corpus.py",
+        "                    self._set_meta(\"entries\", str(written))\n"
+        "                    self._conn.commit()\n"
+        "                    report(written)",
+        "                    report(written)",
+        [
+            "tests/rlm_kernel/test_corpus.py"
+            "::TestProgressIsCheckpointedAndCompletenessIsRecorded"
+            "::test_each_batch_is_checkpointed",
+        ],
+    ),
+    (
+        "RO3 an incomplete index is presented as complete",
+        "src/rlm_kernel/corpus.py",
+        "        return self.meta().get(\"complete\", \"1\") == \"1\"",
+        "        return True",
+        [
+            "tests/rlm_kernel/test_corpus.py"
+            "::TestProgressIsCheckpointedAndCompletenessIsRecorded"
+            "::test_a_partial_index_says_so_in_find",
+            "tests/rlm_kernel/test_corpus.py"
+            "::TestProgressIsCheckpointedAndCompletenessIsRecorded"
+            "::test_a_partial_index_says_so_even_when_nothing_matches",
         ],
     ),
 ]

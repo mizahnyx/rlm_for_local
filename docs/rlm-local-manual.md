@@ -587,6 +587,19 @@ scope:
 | `show_vars()` | function | Print all user-defined variables in the REPL |
 | `search(query, k=5)` | function | **Kernel only.** Search the vault via BM25; returns formatted results |
 | `propose(kind, name, body, rationale)` | function | **Kernel only.** Propose a new page to quarantine for gate review |
+| `corpus_find(query, limit=20, kind=None, under="")` | function | **Corpus only.** Matching corpus paths from the path index. A query with a `/` searches whole paths; without one it searches file names. |
+| `corpus_list(rel="", limit=50)` | function | **Corpus only.** One directory level (never the subtree) |
+| `corpus_stat(rel)` | function | **Corpus only.** Kind, size and mtime of one path |
+| `corpus_read(rel, max_bytes=20000)` | function | **Corpus only.** Read one file, bounded; truncation is reported |
+| `corpus_count(kind=None, under="")` | function | **Corpus only.** Counts and byte totals without listing anything |
+
+The `corpus_*` helpers exist only when the run was given a corpus
+(`--corpus-root`, or the `corpus_bridge` argument to `completion()`), and they are
+answered in the parent process through the read-only mount — the worker never
+opens a corpus file itself. Without a corpus they return a message saying so.
+Reads are bounded and paths are contained inside the corpus root; a path that
+would escape it is refused, not resolved. See `docs/operator-guide.md` §3
+(`rlm corpus`) and `AGENTS.md` §1.8 for the read-only guarantee this implements.
 
 ### 6.4 Vault Helper Injection (Kernel Integration)
 

@@ -158,6 +158,99 @@ class TestIndexReadsNamesNotContents:
         idx.close()
 
 
+class TestProgressIsCheckpointedAndCompletenessIsRecorded:
+    """A killed walk must leave an index that says it is partial.
+
+    The first real build died (non-UTF-8 names) and the whole load was one
+    transaction, so it left nothing — and a docstring claiming otherwise. Now
+    each batch is committed *and* the running count is written to `meta`, and
+    `complete` stays `0` until the walk reaches the end. A partial index that
+    says "no matches" would be a confident wrong answer.
+    """
+
+    def test_a_finished_build_is_marked_complete(
+        self, corpus: Path, derived: Path, mount: LocalTreeMount,
+    ) -> None:
+        idx = CorpusIndex.open_for(corpus, derived / "corpus.sqlite")
+        idx.build(mount)
+        assert idx.is_complete() is True
+        assert idx.meta()["entries"] == str(idx.count()) == "6"
+        idx.close()
+
+    def test_each_batch_is_checkpointed(
+        self, corpus: Path, derived: Path, mount: LocalTreeMount,
+    ) -> None:
+        """`meta` shows the running count while the walk is still going."""
+        snapshots: list[tuple[int, str | None]] = []
+        idx = CorpusIndex.open_for(corpus, derived / "corpus.sqlite")
+        idx.build(
+            mount,
+            batch_size=2,
+            progress=lambda n: snapshots.append((n, idx.meta().get("entries"))),
+        )
+        assert snapshots == [(2, "2"), (4, "4"), (6, "6")]
+        idx.close()
+
+    def test_the_secondary_indexes_exist_after_a_bulk_load(
+        self, corpus: Path, derived: Path, mount: LocalTreeMount,
+    ) -> None:
+        """They are dropped for speed during the load, so they must come back."""
+        idx = CorpusIndex.open_for(corpus, derived / "corpus.sqlite")
+        idx.build(mount)
+        names = {
+            row[0] for row in idx._conn.execute(  # noqa: SLF001
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            )
+        }
+        assert {"entries_parent", "entries_name", "entries_path"} <= names
+        idx.close()
+
+    def _partial(self, corpus: Path, derived: Path, mount: LocalTreeMount):
+        idx = CorpusIndex.open_for(corpus, derived / "corpus.sqlite")
+        idx.build(mount)
+        idx._set_meta("complete", "0")  # noqa: SLF001 - what a killed walk leaves
+        return idx
+
+    def test_a_partial_index_says_so_in_find(
+        self, corpus: Path, derived: Path, mount: LocalTreeMount,
+    ) -> None:
+        idx = self._partial(corpus, derived, mount)
+        bridge = CorpusBridge(mount=mount, index=idx)
+        out = bridge.handle_find("readme")
+        assert out.startswith("[warning: the path index is INCOMPLETE")
+        assert "readme.md" in out
+        idx.close()
+
+    def test_a_partial_index_says_so_even_when_nothing_matches(
+        self, corpus: Path, derived: Path, mount: LocalTreeMount,
+    ) -> None:
+        idx = self._partial(corpus, derived, mount)
+        bridge = CorpusBridge(mount=mount, index=idx)
+        out = bridge.handle_find("nothing-at-all")
+        assert "INCOMPLETE" in out
+        assert CORPUS_NO_MATCHES in out
+        idx.close()
+
+    def test_a_partial_index_says_so_in_count(
+        self, corpus: Path, derived: Path, mount: LocalTreeMount,
+    ) -> None:
+        idx = self._partial(corpus, derived, mount)
+        bridge = CorpusBridge(mount=mount, index=idx)
+        assert "INCOMPLETE" in bridge.handle_count()
+        idx.close()
+
+    def test_an_index_without_the_flag_counts_as_complete(
+        self, corpus: Path, derived: Path, mount: LocalTreeMount,
+    ) -> None:
+        """An index built before the flag existed is not retroactively partial."""
+        idx = CorpusIndex.open_for(corpus, derived / "corpus.sqlite")
+        idx.build(mount)
+        idx._conn.execute("DELETE FROM meta WHERE key = 'complete'")  # noqa: SLF001
+        idx._conn.commit()
+        assert idx.is_complete() is True
+        idx.close()
+
+
 class TestSchemaChangesCostARebuild:
     """A layout change drops the table instead of migrating it."""
 

@@ -109,6 +109,21 @@ _INSERT = (
     " (raw, path, parent, name, kind, size, mtime) VALUES (?, ?, ?, ?, ?, ?, ?)"
 )
 
+#: The secondary indexes. Dropped for the duration of a bulk load and rebuilt in
+#: one pass at the end: maintaining three B-trees per row insertion costs a small
+#: multiple of the whole walk (measured on the owner's corpus, where the first
+#: full build took ~100 minutes), while recreating them afterwards is one sort.
+_SECONDARY_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS entries_parent ON entries(parent)",
+    "CREATE INDEX IF NOT EXISTS entries_name ON entries(name)",
+    "CREATE INDEX IF NOT EXISTS entries_path ON entries(path)",
+)
+_DROP_SECONDARY_INDEXES = (
+    "DROP INDEX IF EXISTS entries_parent",
+    "DROP INDEX IF EXISTS entries_name",
+    "DROP INDEX IF EXISTS entries_path",
+)
+
 
 def _connect(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
@@ -189,10 +204,16 @@ class CorpusIndex:
         """Write the path index from one streaming walk of ``mount``.
 
         A rebuild replaces the previous contents: the corpus is the source of
-        truth and the index is a cache of it. Each batch is one transaction, so a
-        walk interrupted after an hour still leaves a usable — if partial —
-        index rather than nothing, and the row count reported in `meta` says how
-        far it got.
+        truth and the index is a cache of it.
+
+        **Progress is checkpointed, and completeness is recorded.** Each batch is
+        committed and the running count is written to `meta`, so a walk killed
+        after an hour (this happened on the first real one, which lost nothing
+        only because it died before the first commit) leaves a *usable* and
+        *honest* partial index: `complete` stays `"0"`, and every tool result
+        built on it says the index is incomplete. A partial index quietly
+        answering "no matches" would be the worst failure this project knows —
+        a confident wrong answer.
 
         Only directory entries are read. No file is opened, so an unreadable,
         damaged or enormous file costs nothing here.
@@ -219,26 +240,44 @@ class CorpusIndex:
 
         cursor = self._conn.cursor()
         cursor.execute("DELETE FROM entries")
-        for entry in mount.iter_entries():
-            path = entry.rel
-            shown = path_text(path)
-            if shown != path:
-                # A name that is not valid UTF-8. Counted so the aggregate
-                # record can say how much of the corpus is in this state.
-                damaged += 1
-            parent, _, name = shown.rpartition("/")
-            rows.append(
-                (path_bytes(path), shown, parent, name, entry.kind, entry.size,
-                 entry.mtime)
-            )
-            if len(rows) >= batch_size:
+        self._set_meta("complete", "0")
+        self._set_meta("entries", "0")
+        self._conn.commit()
+        for statement in _DROP_SECONDARY_INDEXES:
+            cursor.execute(statement)
+        self._conn.commit()
+        try:
+            for entry in mount.iter_entries():
+                path = entry.rel
+                shown = path_text(path)
+                if shown != path:
+                    # A name that is not valid UTF-8. Counted so the aggregate
+                    # record can say how much of the corpus is in this state.
+                    damaged += 1
+                parent, _, name = shown.rpartition("/")
+                rows.append(
+                    (path_bytes(path), shown, parent, name, entry.kind, entry.size,
+                     entry.mtime)
+                )
+                if len(rows) >= batch_size:
+                    cursor.executemany(_INSERT, rows)
+                    written += len(rows)
+                    rows.clear()
+                    self._set_meta("entries", str(written))
+                    self._conn.commit()
+                    report(written)
+            if rows:
                 cursor.executemany(_INSERT, rows)
                 written += len(rows)
-                rows.clear()
-                report(written)
-        if rows:
-            cursor.executemany(_INSERT, rows)
-            written += len(rows)
+                self._set_meta("entries", str(written))
+                self._conn.commit()
+        finally:
+            # The indexes come back whatever happened: an index-less table still
+            # answers queries, just by scanning, and leaving it that way would be
+            # a silent performance trap for every later caller.
+            for statement in _SECONDARY_INDEXES:
+                cursor.execute(statement)
+            self._conn.commit()
         self._set_meta("corpus_root", str(mount.root))
         self._set_meta("built_at", f"{time.time():.3f}")
         self._set_meta("schema_version", _SCHEMA_VERSION)
@@ -246,9 +285,19 @@ class CorpusIndex:
         # Aggregates only, per AGENTS.md 1.9: how many names are not valid
         # UTF-8 is a fact about the corpus that is safe to report anywhere.
         self._set_meta("paths_not_utf8", str(damaged))
+        self._set_meta("complete", "1")
         self._conn.commit()
         report(written, final=True)
         return written
+
+    def is_complete(self) -> bool:
+        """Whether the last build ran to the end of the corpus.
+
+        An index with no `complete` key at all predates the flag; it is treated
+        as complete because the build that made it either finished or left a
+        database that its own version could not have queried anyway.
+        """
+        return self.meta().get("complete", "1") == "1"
 
     def _set_meta(self, key: str, value: str) -> None:
         self._conn.execute(
@@ -425,6 +474,13 @@ CORPUS_READ_TRUNCATED = "\n[... truncated: {shown} of {total} bytes shown ...]"
 CORPUS_NOT_A_FILE = "Error: not a regular file in the corpus: {rel!r}"
 CORPUS_READ_ERROR = "Error: could not read {rel!r}: {error}"
 CORPUS_NO_MATCHES = "(no corpus paths matched)"
+CORPUS_INCOMPLETE = (
+    "[warning: the path index is INCOMPLETE — {entries} entries as of its last "
+    "checkpoint, so results may be missing. Rebuild it with `rlm corpus index`.]"
+)
+CORPUS_INCOMPLETE_INDEX_REPORT = (
+    "\n[incomplete index: {entries} entries as of the last checkpoint]"
+)
 CORPUS_SUMMARY_LINE = (
     "{count} entries under {scope} ({files} files, {dirs} directories, "
     "{bytes} bytes in files)"
@@ -522,10 +578,22 @@ class CorpusBridge:
             return CORPUS_NO_INDEX
         hits = self.index.find(query, limit=limit, kind=kind, under=under)
         if not hits:
-            return CORPUS_NO_MATCHES
-        return "\n".join(_format_entry(e) for e in hits) + _total_hint(
-            self.index.count(kind=kind, under=under), len(hits)
+            return self._honest(CORPUS_NO_MATCHES)
+        return self._honest(
+            "\n".join(_format_entry(e) for e in hits)
+            + _total_hint(self.index.count(kind=kind, under=under), len(hits))
         )
+
+    def _honest(self, text: str) -> str:
+        """Prefix a result from an incomplete index with the fact that it is one.
+
+        A partial index answering "no matches" is a confident wrong answer, which
+        is the failure this project treats as worse than no answer at all.
+        """
+        if self.index is None or self.index.is_complete():
+            return text
+        entries = self.index.meta().get("entries", "?")
+        return CORPUS_INCOMPLETE.format(entries=entries) + "\n" + text
 
     def handle_list(self, rel: str = "", limit: int = DEFAULT_LIST_LIMIT) -> str:
         """One directory level, from the index when there is one, else the mount.
@@ -617,7 +685,7 @@ class CorpusBridge:
     def handle_count(self, *, kind: str | None = None, under: str = "") -> str:
         if self.index is None:
             return CORPUS_NO_INDEX
-        return count_report(self.index, kind=kind, under=under)
+        return self._honest(count_report(self.index, kind=kind, under=under))
 
 
 def count_report(
