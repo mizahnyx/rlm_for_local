@@ -13,7 +13,9 @@ that would fail if the property were weakened:
 
 from __future__ import annotations
 
+import json
 import os
+import time
 import re
 from pathlib import Path
 
@@ -249,6 +251,114 @@ class TestProgressIsCheckpointedAndCompletenessIsRecorded:
         idx._conn.commit()
         assert idx.is_complete() is True
         idx.close()
+
+
+class TestTheReadOnlyProof:
+    """`scan_newer` — the AGENTS.md 1.8 proof obligation, in the harness.
+
+    The first version of this proof was a hand-typed `find -newer`, which is
+    shell work over the corpus (now ruled out) and which reads a clock-skewed
+    file — one already dated in the future — as a breach. The scan reports
+    aggregates only, and says which of the two it is looking at.
+    """
+
+    @pytest.fixture
+    def timed_corpus(self, corpus: Path) -> Path:
+        """Two files: one old, one with an mtime far in the future."""
+        old = 1_600_000_000.0
+        for path in corpus.rglob("*"):
+            os.utime(path, (old, old))
+        return corpus
+
+    def test_nothing_newer_is_a_complete_proof(self, timed_corpus: Path) -> None:
+        from rlm_kernel.corpus import scan_newer
+
+        mount = LocalTreeMount(timed_corpus)
+        scan = scan_newer(mount, since=1_700_000_000.0, sample=None)
+        assert scan.newer == 0
+        assert scan.complete is True
+        assert scan.scanned == 6
+        assert "PROOF: nothing" in scan.verdict()
+
+    def test_a_future_dated_file_is_not_reported_as_a_write(
+        self, timed_corpus: Path,
+    ) -> None:
+        """The false positive: dated in the future, long before this run.
+
+        This is the case the real corpus produced, where a bare `find -newer`
+        reported a breach that the harness could show was not one.
+        """
+        from rlm_kernel.corpus import scan_newer
+
+        future = time.time() + 86400 * 365  # a year after the scan
+        os.utime(timed_corpus / "blob.bin", (future, future))
+        mount = LocalTreeMount(timed_corpus)
+        scan = scan_newer(mount, since=time.time() - 3600, sample=None)
+        assert scan.newer == 1
+        assert scan.kinds == {"file": 1}
+        assert scan.future_dated == 1
+        assert scan.in_run_window == 0
+        verdict = scan.verdict()
+        assert verdict.startswith("NO WRITES BY THIS RUN")
+        assert "pre-existing timestamps" in verdict
+
+    def test_a_write_during_the_run_is_reported_as_a_breach(
+        self, timed_corpus: Path,
+    ) -> None:
+        from rlm_kernel.corpus import scan_newer
+
+        started = time.time() - 60
+        os.utime(timed_corpus / "readme.md", None)  # now
+        mount = LocalTreeMount(timed_corpus)
+        scan = scan_newer(mount, since=started, sample=None, run_started=started)
+        assert scan.newer == 1
+        assert scan.in_run_window == 1
+        assert scan.verdict().startswith("BREACH")
+
+    def test_a_marker_set_before_the_run_is_reported_as_such(
+        self, timed_corpus: Path,
+    ) -> None:
+        from rlm_kernel.corpus import scan_newer
+
+        now = time.time()
+        scan = scan_newer(
+            LocalTreeMount(timed_corpus),
+            since=1_500_000_000.0,  # older than the files, so all of them count
+            sample=None,
+            run_started=now - 60,
+        )
+        assert scan.stale_dated == 6
+        assert scan.in_run_window == 0
+        assert scan.verdict().startswith("UNEXPLAINED")
+
+    def test_the_sample_bounds_the_cost_of_a_bad_answer(
+        self, timed_corpus: Path,
+    ) -> None:
+        from rlm_kernel.corpus import scan_newer
+
+        mount = LocalTreeMount(timed_corpus)
+        scan = scan_newer(mount, since=0.0, sample=2)
+        assert scan.newer == 2
+        assert scan.complete is False
+        assert scan.scanned == 2, "the scan must stop, not walk the whole tree"
+
+    def test_the_report_carries_no_paths(self, timed_corpus: Path) -> None:
+        from rlm_kernel.corpus import scan_newer, verify_report
+
+        mount = LocalTreeMount(timed_corpus)
+        scan = scan_newer(mount, since=0.0, sample=None)
+        report = verify_report(scan)
+        # A proof has to be quotable: aggregates may travel, identifiers may not.
+        assert "readme.md" not in report
+        assert "blob.bin" not in report
+        assert json.loads(report)["newer"] == 6
+
+    def test_the_scan_reads_no_file_contents(self, timed_corpus: Path) -> None:
+        from rlm_kernel.corpus import scan_newer
+
+        spy = SpyMount(timed_corpus, forbid_reads=True)
+        scan_newer(spy, since=0.0, sample=None)
+        assert spy.read_calls == []
 
 
 class TestSchemaChangesCostARebuild:

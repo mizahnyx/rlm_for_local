@@ -9,6 +9,8 @@ an index inside the corpus writes into the thing the mount exists to protect.
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -138,6 +140,99 @@ class TestCorpusQueries:
     def test_no_subcommand_prints_usage(self, capsys: pytest.CaptureFixture) -> None:
         assert cli_main(["corpus"]) == 2
         assert "Usage: rlm corpus" in capsys.readouterr().out
+
+
+class TestCorpusVerify:
+    """`rlm corpus verify` — the read-only proof, produced by the harness."""
+
+    HOUR = 3600.0
+
+    @staticmethod
+    def _age_everything(corpus: Path, marker: Path, when: float) -> None:
+        """Give the whole fixture — and the marker — one unambiguous mtime."""
+        for path in corpus.rglob("*"):
+            os.utime(path, (when, when))
+        marker.write_text("", encoding="utf-8")
+        os.utime(marker, (when, when))
+
+    def test_a_clean_corpus_exits_zero_with_a_proof(
+        self, corpus: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        marker = corpus.parent / "marker"
+        self._age_everything(corpus, marker, time.time() - self.HOUR)
+        rc = cli_main(["corpus", "verify", "--corpus-root", str(corpus),
+                       "--since-file", str(marker), "--sample", "0"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        report = json.loads(out)
+        assert report["verdict"].startswith("PROOF: nothing")
+        assert report["scan_complete"] is True
+        assert report["newer"] == 0
+
+    def test_a_write_inside_the_run_window_exits_one(
+        self, corpus: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        marker = corpus.parent / "marker"
+        when = time.time() - self.HOUR
+        self._age_everything(corpus, marker, when)
+        os.utime(corpus / "papers" / "notes.md", None)  # written "now"
+        rc = cli_main(["corpus", "verify", "--corpus-root", str(corpus),
+                       "--since-file", str(marker), "--sample", "0",
+                       "--run-started", str(when)])
+        report = json.loads(capsys.readouterr().out)
+        assert rc == 1
+        assert report["verdict"].startswith("BREACH")
+        assert report["newer_inside_run_window"] == 1
+
+    def test_a_future_dated_file_is_reported_as_not_ours(
+        self, corpus: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        marker = corpus.parent / "marker"
+        when = time.time() - self.HOUR
+        self._age_everything(corpus, marker, when)
+        future = time.time() + 86400 * 30
+        os.utime(corpus / "archive.zip", (future, future))
+        rc = cli_main(["corpus", "verify", "--corpus-root", str(corpus),
+                       "--since-file", str(marker), "--sample", "0"])
+        report = json.loads(capsys.readouterr().out)
+        assert report["verdict"].startswith("NO WRITES BY THIS RUN")
+        assert report["newer_dated_in_the_future"] == 1
+        assert report["newer_inside_run_window"] == 0
+        assert rc == 1  # not clean, and it says why rather than pretending
+
+    def test_the_report_contains_no_paths(
+        self, corpus: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        marker = corpus.parent / "marker"
+        marker.write_text("", encoding="utf-8")
+        cli_main(["corpus", "verify", "--corpus-root", str(corpus),
+                  "--since-file", str(marker), "--sample", "0"])
+        out = capsys.readouterr().out
+        assert "readme.md" not in out
+        assert "archive.zip" not in out
+
+    def test_a_missing_marker_is_an_error(
+        self, corpus: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        rc = cli_main(["corpus", "verify", "--corpus-root", str(corpus)])
+        assert rc == 2
+        assert "marker" in capsys.readouterr().err
+
+    def test_a_bad_marker_file_is_an_error(
+        self, corpus: Path, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        rc = cli_main(["corpus", "verify", "--corpus-root", str(corpus),
+                       "--since-file", str(tmp_path / "absent")])
+        assert rc == 2
+        assert "cannot use" in capsys.readouterr().err
+
+    def test_an_epoch_marker_is_accepted(
+        self, corpus: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        rc = cli_main(["corpus", "verify", "--corpus-root", str(corpus),
+                       "--since", "2000000000", "--sample", "0"])
+        assert rc == 0
+        assert json.loads(capsys.readouterr().out)["newer"] == 0
 
 
 class TestAskWithACorpus:

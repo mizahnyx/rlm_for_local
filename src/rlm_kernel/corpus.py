@@ -721,3 +721,196 @@ def _total_hint(total: int, shown: int) -> str:
 def index_report(index: CorpusIndex) -> str:
     """An aggregates-only description of an index, safe to print anywhere."""
     return json.dumps(index.summary(), indent=2, sort_keys=True)
+
+
+# ── The read-only proof (AGENTS.md 1.8) ───────────────────────────────────
+
+@dataclass(frozen=True)
+class NewerScan:
+    """Aggregates from a "what changed since the marker" scan.
+
+    Contains no paths on purpose. A proof that something changed has to be
+    *reportable* — the whole point is that it can be said out loud without
+    quoting someone's private file names (AGENTS.md §1.9) — so this carries
+    counts, kinds and mtime bounds instead.
+    """
+
+    scanned: int
+    """Entries visited before the scan stopped."""
+
+    newer: int
+    """Entries whose mtime is strictly after `since`."""
+
+    complete: bool
+    """False when the scan stopped early at `sample`, so `newer` is a floor."""
+
+    kinds: dict[str, int]
+    """Kinds among the newer entries (file/dir/symlink/other)."""
+
+    oldest_newer_mtime: float | None
+    newest_newer_mtime: float | None
+
+    in_run_window: int
+    """Newer entries whose mtime falls inside the run window — a real breach."""
+
+    future_dated: int
+    """Newer entries whose mtime is after the scan: pre-existing skewed dates."""
+
+    stale_dated: int
+    """Newer than `since`, older than the run started: the marker was early."""
+
+    marker: float
+    scanned_at: float
+
+    def verdict(self) -> str:
+        """One honest sentence about what the scan can and cannot say.
+
+        The distinction that matters: a file *written by this run* has an mtime
+        inside the run window, while a file that was already dated in the future
+        (a skewed clock, or a tool that wrote future dates) has an mtime after
+        the scan finished. A bare `find -newer` cannot tell those apart, and the
+        first version of this proof called the second one a breach.
+        """
+        if self.newer == 0:
+            if self.complete:
+                return (
+                    "PROOF: nothing under the corpus has an mtime after the marker "
+                    f"({self.scanned} entries scanned)."
+                )
+            return (
+                "PROOF INCOMPLETE: the scan stopped early and saw nothing newer "
+                f"yet ({self.scanned} entries scanned)."
+            )
+
+        counts = (
+            f"{self.newer}{'+' if not self.complete else ''} entries newer than "
+            f"the marker out of {self.scanned} scanned (kinds: {self.kinds}); "
+            f"inside the run window: {self.in_run_window}, "
+            f"dated in the future: {self.future_dated}, "
+            f"dated before the run: {self.stale_dated}"
+        )
+        if self.oldest_newer_mtime is not None:
+            counts += (
+                f"; mtimes from "
+                f"{_fmt_time(self.oldest_newer_mtime)} to "
+                f"{_fmt_time(self.newest_newer_mtime or 0.0)}"
+            )
+        if self.in_run_window:
+            return (
+                f"BREACH: {counts} — and {self.in_run_window} of them fall inside "
+                "this run's own window, which is exactly what the read-only "
+                "constraint forbids. Investigate before trusting the mount."
+            )
+        if self.future_dated and not self.stale_dated:
+            return (
+                f"NO WRITES BY THIS RUN: {counts} — every one of them is dated "
+                "after the scan finished, so they are pre-existing timestamps "
+                "(a skewed clock or a tool that wrote future dates), not writes "
+                "by this run."
+            )
+        return f"UNEXPLAINED: {counts} — review before treating this as clean."
+
+
+def _fmt_time(value: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(value))
+
+
+def scan_newer(
+    mount: LocalTreeMount,
+    since: float,
+    *,
+    sample: int | None = 1000,
+    run_started: float | None = None,
+    run_ended: float | None = None,
+) -> NewerScan:
+    """Walk the corpus and report what has an mtime after `since`.
+
+    The read-only proof obliges this project to show that a run did not touch
+    the corpus (`AGENTS.md` §1.8), and the first version of that proof was a
+    hand-typed `find -newer` — which has two problems. It is shell work over the
+    corpus, which the owner has ruled out, and it cannot tell "something was
+    written" from "something was already dated in the future", so a clock-skewed
+    file reads as a breach. Measured on the real corpus: it did.
+
+    This does the walk through the mount provider, reports aggregates only, and
+    stops after `sample` newer entries so the cost of a *bad* answer is bounded
+    (a clean corpus still costs a full walk, which is the price of saying
+    "nothing changed" honestly).
+
+    `run_started`/`run_ended` bound the window in which a write would be ours;
+    they default to `since` and to "now".
+    """
+    started = since if run_started is None else run_started
+    scanned = 0
+    newer = 0
+    kinds: dict[str, int] = {}
+    oldest: float | None = None
+    newest: float | None = None
+    in_window = 0
+    future = 0
+    stale = 0
+    complete = True
+    # 60s of slack covers filesystem timestamp granularity and clock drift
+    # between the marker being written and the walk starting.
+    slack = 60.0
+    ended = (time.time() if run_ended is None else run_ended) + slack
+    for entry in mount.iter_entries():
+        scanned += 1
+        if entry.mtime > since:
+            newer += 1
+            kinds[entry.kind] = kinds.get(entry.kind, 0) + 1
+            oldest = entry.mtime if oldest is None else min(oldest, entry.mtime)
+            newest = entry.mtime if newest is None else max(newest, entry.mtime)
+            # Classified with a second of slack on the *upper* bound only for the
+            # marker side: a file written microseconds after the marker by a
+            # clock that is a hair ahead of ours is still a write.
+            if entry.mtime > ended:
+                future += 1
+            elif entry.mtime < started - slack:
+                stale += 1
+            else:
+                in_window += 1
+            if sample is not None and newer >= sample:
+                complete = False
+                break
+    return NewerScan(
+        scanned=scanned,
+        newer=newer,
+        complete=complete,
+        kinds=kinds,
+        oldest_newer_mtime=oldest,
+        newest_newer_mtime=newest,
+        in_run_window=in_window,
+        future_dated=future,
+        stale_dated=stale,
+        marker=since,
+        scanned_at=time.time(),
+    )
+
+
+def verify_report(scan: NewerScan) -> str:
+    """The proof, as JSON, aggregates only."""
+    return json.dumps(
+        {
+            "marker": _fmt_time(scan.marker),
+            "scanned_at": _fmt_time(scan.scanned_at),
+            "scanned": scan.scanned,
+            "newer": scan.newer,
+            "scan_complete": scan.complete,
+            "newer_kinds": scan.kinds,
+            "newer_inside_run_window": scan.in_run_window,
+            "newer_dated_in_the_future": scan.future_dated,
+            "newer_dated_before_the_run": scan.stale_dated,
+            "oldest_newer_mtime": (
+                None if scan.oldest_newer_mtime is None
+                else _fmt_time(scan.oldest_newer_mtime)
+            ),
+            "newest_newer_mtime": (
+                None if scan.newest_newer_mtime is None
+                else _fmt_time(scan.newest_newer_mtime)
+            ),
+            "verdict": scan.verdict(),
+        },
+        indent=2,
+        sort_keys=True,
+    )

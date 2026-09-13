@@ -938,10 +938,10 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         "RO4 corpus_list walks the subtree instead of one directory",
         "src/rlm_kernel/corpus.py",
         "            shown = self.mount.iter_children(\n"
-        "                rel, max_entries=_bounded(limit, LIST_LIMIT_MAX)\n"
+        "                target, max_entries=_bounded(limit, LIST_LIMIT_MAX)\n"
         "            )",
         "            shown = self.mount.iter_entries(\n"
-        "                rel, max_entries=_bounded(limit, LIST_LIMIT_MAX)\n"
+        "                target, max_entries=_bounded(limit, LIST_LIMIT_MAX)\n"
         "            )",
         [
             "tests/rlm_kernel/test_corpus.py::TestBridgeWithoutAnIndex"
@@ -1156,6 +1156,42 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "tests/rlm_kernel/test_corpus.py"
             "::TestProgressIsCheckpointedAndCompletenessIsRecorded"
             "::test_a_partial_index_says_so_even_when_nothing_matches",
+        ],
+    ),
+    (
+        "RO2 the read-only proof loses its run window",
+        "src/rlm_kernel/corpus.py",
+        "            if entry.mtime > ended:\n"
+        "                future += 1\n"
+        "            elif entry.mtime < started - slack:\n"
+        "                stale += 1\n"
+        "            else:\n"
+        "                in_window += 1",
+        "            if entry.mtime > ended:\n"
+        "                stale += 1\n"
+        "            elif entry.mtime < started - slack:\n"
+        "                future += 1\n"
+        "            else:\n"
+        "                in_window += 1",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestTheReadOnlyProof"
+            "::test_a_future_dated_file_is_not_reported_as_a_write",
+            "tests/test_cli_corpus.py::TestCorpusVerify"
+            "::test_a_future_dated_file_is_reported_as_not_ours",
+        ],
+    ),
+    (
+        "RO2 the read-only proof stops sampling, walking everything",
+        "src/rlm_kernel/corpus.py",
+        "            if sample is not None and newer >= sample:\n"
+        "                complete = False\n"
+        "                break",
+        "            if False:\n"
+        "                complete = False\n"
+        "                break",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestTheReadOnlyProof"
+            "::test_the_sample_bounds_the_cost_of_a_bad_answer",
         ],
     ),
 ]

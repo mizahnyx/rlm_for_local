@@ -175,6 +175,29 @@ def build_parser() -> argparse.ArgumentParser:
     p_ccount.add_argument("--kind", default=None)
     p_ccount.add_argument("--under", default="")
 
+    p_cverify = corpus_sub.add_parser(
+        "verify",
+        help="Read-only proof: what changed in the corpus since a marker",
+        description=(
+            "Walk the corpus through the mount provider and report, in "
+            "aggregates only, what has an mtime after a marker. This is the "
+            "proof obligation of AGENTS.md 1.8 done by the harness rather than "
+            "by hand-typed shell — and it distinguishes 'written during this "
+            "run' from 'already dated in the future', which a bare "
+            "`find -newer` cannot."
+        ),
+    )
+    _add_corpus_flags(p_cverify, require_root=True, require_index=False)
+    p_cverify.add_argument("--since", default=None,
+                           help="ISO-8601 timestamp or epoch seconds to compare against")
+    p_cverify.add_argument("--since-file", type=Path, default=None,
+                           help="Use this file's mtime as the marker")
+    p_cverify.add_argument("--sample", type=int, default=1000,
+                           help="Stop after this many newer entries (0 = scan everything)")
+    p_cverify.add_argument("--run-started", default=None,
+                           help="When this run started, to judge whether the newer "
+                                "mtimes could be ours (default: the marker)")
+
     return parser
 
 
@@ -747,8 +770,65 @@ def _cmd_corpus(args: argparse.Namespace) -> int:
         finally:
             bridge.close()
 
+    if sub == "verify":
+        return _cmd_corpus_verify(args)
+
     print(f"Error: unknown corpus subcommand {sub!r}", file=sys.stderr)
     return 2
+
+
+def _cmd_corpus_verify(args: argparse.Namespace) -> int:
+    """`rlm corpus verify` — the read-only proof, run by the harness."""
+    from rlm_kernel.corpus import scan_newer, verify_report
+    from rlm_kernel.mounts import LocalTreeMount, ReadOnlyViolation
+
+    since = _parse_time(getattr(args, "since", None))
+    if since is None and getattr(args, "since_file", None):
+        marker = Path(args.since_file)
+        try:
+            since = marker.stat().st_mtime
+        except OSError as e:
+            print(f"Error: cannot use {marker} as a marker: {e}", file=sys.stderr)
+            return 2
+    if since is None:
+        print("Error: give a marker with --since (ISO-8601 or epoch) or "
+              "--since-file.", file=sys.stderr)
+        return 2
+    run_started = _parse_time(getattr(args, "run_started", None))
+    sample = getattr(args, "sample", 1000) or None
+    try:
+        mount = LocalTreeMount(args.corpus_root)
+    except ReadOnlyViolation as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+    scan = scan_newer(mount, since, sample=sample, run_started=run_started)
+    print(verify_report(scan))
+    return 0 if (scan.newer == 0 and scan.complete) else 1
+
+
+def _parse_time(raw: str | None) -> float | None:
+    """ISO-8601 or epoch seconds, or None."""
+    if raw is None:
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    from datetime import datetime
+
+    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt).timestamp()
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
 
 
 if __name__ == "__main__":
