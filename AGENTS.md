@@ -130,6 +130,14 @@ uv run python -m rlm_local.cli corpus index --corpus-root /srv/corpus \
 uv run python -m rlm_local.cli corpus count --corpus-index ~/rlm-derived/corpus.sqlite
 uv run python -m rlm_local.cli ask "…" --corpus-root /srv/corpus \
     --corpus-index ~/rlm-derived/corpus.sqlite     # corpus_find/read/… in a cell
+
+# The read-only proof. A marker scan CANNOT clear this corpus: it contains
+# future-dated files, so "newer than the marker" is true forever. Compare two
+# digests instead — one from the index, one from a fresh walk.
+uv run python -m rlm_local.cli corpus digest --from-index \
+    --corpus-index ~/rlm-derived/corpus.sqlite --out /tmp/before.json
+uv run python -m rlm_local.cli corpus digest --corpus-root /srv/corpus \
+    --compare /tmp/before.json
 ```
 
 `-k "not slow and not load"` is **wrong**: `-k` matches a substring of the node

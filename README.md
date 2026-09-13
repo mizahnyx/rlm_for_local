@@ -176,8 +176,21 @@ than intended: the boundary is the mount (a `ro` mount of a LUKS container opene
 with `cryptsetup open --readonly`), the code has no write verb to call
 (`rlm_kernel/mounts.py`), and derived state is refused if it would live inside
 the corpus. Reads are bounded, paths are contained, and tool results are capped so
-a file name can never pull a whole disk into a prompt. See `AGENTS.md` §1.8 and
-§1.9, and the operator guide's `rlm corpus` section.
+a file name can never pull a whole disk into a prompt.
+
+That claim is also **proved**, not asserted — and one proof had to be replaced
+because it could not tell the truth: a `find -newer` marker scan cannot clear a
+corpus that contains future-dated files, and this one does. The proof is a pair
+of digests over every entry's path bytes, kind, size and mtime, one taken from the
+index and one from a fresh walk:
+
+```bash
+rlm corpus digest --from-index --corpus-index ~/rlm-derived/corpus.sqlite \
+    --out /tmp/before.json
+rlm corpus digest --corpus-root /srv/corpus --compare /tmp/before.json
+```
+
+See `AGENTS.md` §1.8 and §1.9, and the operator guide's `rlm corpus` section.
 
 ## Frontends
 
