@@ -1194,6 +1194,54 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_the_sample_bounds_the_cost_of_a_bad_answer",
         ],
     ),
+    (
+        "RO2 the digest stops covering entry sizes",
+        "src/rlm_kernel/corpus.py",
+        "    h.update(struct.pack(\">Qq\", entry.size, stamp))",
+        "    h.update(struct.pack(\">Qq\", 0, stamp))",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestTheCorpusDigest"
+            "::test_a_changed_size_with_the_same_mtime_is_caught",
+        ],
+    ),
+    (
+        "RO2 the digest stops covering file timestamps",
+        "src/rlm_kernel/corpus.py",
+        "    stamp = 0 if entry.kind == \"dir\" else int(round(entry.mtime * 1_000_000_000))",
+        "    stamp = 0",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestTheCorpusDigest"
+            "::test_a_changed_mtime_is_caught",
+            "tests/rlm_kernel/test_corpus.py::TestTheCorpusDigest"
+            "::test_directory_timestamps_are_not_part_of_the_digest",
+        ],
+    ),
+    (
+        "RO2 the digest starts covering directory timestamps",
+        "src/rlm_kernel/corpus.py",
+        "    stamp = 0 if entry.kind == \"dir\" else int(round(entry.mtime * 1_000_000_000))",
+        "    stamp = int(round(entry.mtime * 1_000_000_000))",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestTheCorpusDigest"
+            "::test_a_walk_and_an_index_of_the_same_corpus_agree",
+        ],
+    ),
+    (
+        "RO2 two different snapshots compare as equal",
+        "src/rlm_kernel/corpus.py",
+        "    same = (\n"
+        "        before[\"digest\"] == after[\"digest\"]\n"
+        "        and before[\"entries\"] == after[\"entries\"]\n"
+        "        and before[\"file_bytes\"] == after[\"file_bytes\"]\n"
+        "    )",
+        "    same = True",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestTheCorpusDigest"
+            "::test_a_changed_size_is_caught",
+            "tests/test_cli_corpus.py::TestCorpusDigestCommand"
+            "::test_compare_reports_a_change_and_exits_one",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

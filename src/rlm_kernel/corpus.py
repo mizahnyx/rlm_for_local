@@ -914,3 +914,133 @@ def verify_report(scan: NewerScan) -> str:
         indent=2,
         sort_keys=True,
     )
+
+
+# ── The digest: a proof that can be compared and quoted ───────────────────
+
+class DigestAccumulator:
+    """An order-independent digest over a corpus's entries.
+
+    A marker scan answers "is anything newer than T", which cannot clear a
+    corpus that contains future-dated files — and the owner's corpus does: its
+    first such entry is stamped ten years ahead. What *can* clear it is comparing
+    two snapshots of the whole tree, and this is that snapshot in 32 bytes.
+
+    The digest covers each entry's exact path bytes, kind, size and mtime, so
+    "unchanged" means every one of 4.97M entries is in the same place with the
+    same content size and the same timestamp. It is order-independent because the
+    two sides of a comparison may enumerate differently (the index is ordered by
+    path; a walk is ordered by directory), and it is additive rather than a chain
+    for the same reason.
+
+    The honest limitation, recorded rather than hidden: an additive digest cannot
+    distinguish two trees that differ only by a *permutation of attributes*
+    between entries (swap two files' sizes and both aggregates can cancel). The
+    path is hashed with its attributes, so the per-entry hashes differ, and both
+    an XOR and a modular sum are accumulated — three aggregates plus the entry
+    count and the byte total. A collision across all of them is not a practical
+    concern; a silent one is, which is why none of this is claimed to be a
+    cryptographic commitment.
+    """
+
+    __slots__ = ("_xor", "_sum", "count", "file_bytes", "kinds")
+
+    def __init__(self) -> None:
+        self._xor = 0
+        self._sum = 0
+        self.count = 0
+        self.file_bytes = 0
+        self.kinds: dict[str, int] = {}
+
+    def add(self, entry: Entry) -> None:
+        digest = _entry_digest(entry)
+        self._xor ^= digest
+        self._sum = (self._sum + digest) % (1 << 256)
+        self.count += 1
+        self.kinds[entry.kind] = self.kinds.get(entry.kind, 0) + 1
+        if entry.kind == "file":
+            self.file_bytes += entry.size
+
+    @property
+    def digest(self) -> str:
+        return f"{self._xor:064x}{self._sum:064x}"
+
+    def report(self, *, source: str) -> dict[str, Any]:
+        return {
+            "source": source,
+            "digest": self.digest,
+            "entries": self.count,
+            "kinds": dict(sorted(self.kinds.items())),
+            "file_bytes": self.file_bytes,
+        }
+
+
+def _entry_digest(entry: Entry) -> int:
+    import hashlib
+    import struct
+
+    # A directory's mtime is deliberately *not* part of the digest, and the
+    # reason is measured rather than aesthetic: in this environment two reads of
+    # the same directory, a millisecond apart, returned different mtimes while
+    # every file's held still. A directory timestamp is metadata about its
+    # children — which are in the digest themselves — and it moves on events that
+    # change nothing (a file created and deleted, a scanner touching the tree).
+    # Including it would have produced a second false "the corpus changed", which
+    # is the same failure the marker scan was fixed for.
+    stamp = 0 if entry.kind == "dir" else int(round(entry.mtime * 1_000_000_000))
+    h = hashlib.sha256()
+    h.update(entry.rel.encode("utf-8", "surrogateescape"))
+    h.update(b"\x00")
+    h.update(entry.kind.encode("utf-8", "surrogateescape"))
+    h.update(struct.pack(">Qq", entry.size, stamp))
+    return int.from_bytes(h.digest(), "big")
+
+
+def digest_of_mount(mount: LocalTreeMount) -> dict[str, Any]:
+    """The digest of a live walk. Reads directory entries only."""
+    acc = DigestAccumulator()
+    for entry in mount.iter_entries():
+        acc.add(entry)
+    return acc.report(source="walk")
+
+
+def digest_of_index(index: CorpusIndex) -> dict[str, Any]:
+    """The digest of an index. No filesystem access at all.
+
+    This is what makes the proof cheap on one side: an index built before an
+    operation is already a snapshot of it, so only the *after* side needs a walk.
+    """
+    acc = DigestAccumulator()
+    rows = index._conn.execute(  # noqa: SLF001 - one deliberate read of the table
+        "SELECT path, kind, size, mtime FROM entries"
+    )
+    for path, kind, size, mtime in rows:
+        acc.add(Entry(rel=str(path), kind=str(kind), size=int(size), mode=0,
+                      mtime=float(mtime)))
+    return acc.report(source="index")
+
+
+def compare_digests(before: dict[str, Any], after: dict[str, Any]) -> str:
+    """A verdict on two snapshots, in aggregates only."""
+    same = (
+        before["digest"] == after["digest"]
+        and before["entries"] == after["entries"]
+        and before["file_bytes"] == after["file_bytes"]
+    )
+    if same:
+        return (
+            "PROOF: the two snapshots are identical — "
+            f"{after['entries']} entries, digest {after['digest'][:16]}…, "
+            f"{after['file_bytes']} file bytes. Nothing under the corpus changed "
+            "between them."
+        )
+    deltas = {
+        "entries": after["entries"] - before["entries"],
+        "file_bytes": after["file_bytes"] - before["file_bytes"],
+    }
+    return (
+        "DIFFERENT: the snapshots do not match "
+        f"(digest {before['digest'][:16]}… -> {after['digest'][:16]}…, "
+        f"entry delta {deltas['entries']:+d}, byte delta {deltas['file_bytes']:+d}). "
+        "Something changed, or the two sides saw different trees."
+    )

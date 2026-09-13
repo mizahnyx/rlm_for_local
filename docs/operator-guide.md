@@ -372,6 +372,7 @@ rlm corpus status --corpus-index FILE
 rlm corpus count  --corpus-index FILE [--kind file|dir|symlink] [--under DIR]
 rlm corpus find   --corpus-index FILE QUERY [-k N] [--kind K] [--under DIR]
 rlm corpus read   --corpus-root DIR REL [--max-bytes N]
+rlm corpus verify --corpus-root DIR (--since T | --since-file F) [--sample N]
 ```
 
 Read-only access to a large file tree — the "corpus" the harness can answer
@@ -413,7 +414,24 @@ rlm ask "How many files are PDFs, and what are the ten largest?" \
 # Operator-side checks that need no model
 rlm corpus count --corpus-index ~/rlm-derived/corpus.sqlite --kind file
 rlm corpus find  --corpus-index ~/rlm-derived/corpus.sqlite budget -k 20
+
+# Prove a run did not touch the corpus (take the marker before the run)
+touch ~/rlm-derived/marker
+rlm corpus verify --corpus-root /srv/corpus --since-file ~/rlm-derived/marker
 ```
+
+**`rlm corpus verify` is the read-only proof.** Take a marker before the run, and
+this walks the corpus afterwards through the same mount provider and reports, as
+aggregates only, everything whose mtime is after it. Exit 0 means a complete scan
+and nothing newer; anything else exits 1 with a JSON report. It classifies each
+newer entry by where its mtime falls — inside the run window (**breach**), after
+the scan (pre-existing future dates: a skewed clock or a tool that wrote future
+dates), or before the run (the marker was taken early) — because a bare
+`find -newer` cannot tell those apart, and on this corpus it reported a breach
+that turned out not to be one. `--sample N` stops after N newer entries, which
+bounds the cost of a bad answer; a clean corpus costs a full walk, which is the
+price of saying "nothing changed" honestly. The report never contains a path (see
+`AGENTS.md` §1.9).
 
 ---
 

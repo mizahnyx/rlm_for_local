@@ -16,6 +16,7 @@ Subcommands:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -197,6 +198,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_cverify.add_argument("--run-started", default=None,
                            help="When this run started, to judge whether the newer "
                                 "mtimes could be ours (default: the marker)")
+
+    p_cdigest = corpus_sub.add_parser(
+        "digest",
+        help="Snapshot the whole corpus as a 32-byte digest (for a before/after proof)",
+        description=(
+            "Reduce every entry's path, kind, size and mtime to one digest. Two "
+            "digests that match are a complete proof that nothing changed — "
+            "unlike a marker scan, which cannot clear a corpus containing "
+            "future-dated files. Take one from the index (cheap, no filesystem "
+            "access) and one from a fresh walk (a full pass), and compare."
+        ),
+    )
+    _add_corpus_flags(p_cdigest, require_root=False, require_index=False)
+    p_cdigest.add_argument("--from-index", action="store_true",
+                           help="Digest the index instead of walking the corpus")
+    p_cdigest.add_argument("--out", type=Path, default=None,
+                           help="Write the JSON snapshot here (to compare later)")
+    p_cdigest.add_argument("--compare", type=Path, default=None,
+                           help="Compare this snapshot file with the one just taken")
 
     return parser
 
@@ -773,8 +793,62 @@ def _cmd_corpus(args: argparse.Namespace) -> int:
     if sub == "verify":
         return _cmd_corpus_verify(args)
 
+    if sub == "digest":
+        return _cmd_corpus_digest(args)
+
     print(f"Error: unknown corpus subcommand {sub!r}", file=sys.stderr)
     return 2
+
+
+def _cmd_corpus_digest(args: argparse.Namespace) -> int:
+    """`rlm corpus digest` — a snapshot of the whole tree, in 32 bytes."""
+    from rlm_kernel.corpus import (
+        CorpusIndex,
+        compare_digests,
+        digest_of_index,
+        digest_of_mount,
+    )
+    from rlm_kernel.mounts import LocalTreeMount, ReadOnlyViolation
+
+    if args.from_index:
+        if not args.corpus_index:
+            print("Error: --from-index needs --corpus-index.", file=sys.stderr)
+            return 2
+        if not Path(args.corpus_index).exists():
+            print(f"Error: no index at {args.corpus_index}.", file=sys.stderr)
+            return 2
+        idx = CorpusIndex(args.corpus_index)
+        try:
+            snapshot = digest_of_index(idx)
+        finally:
+            idx.close()
+    else:
+        if not args.corpus_root:
+            print("Error: --corpus-root is required to digest a walk.",
+                  file=sys.stderr)
+            return 2
+        try:
+            mount = LocalTreeMount(args.corpus_root)
+        except ReadOnlyViolation as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 2
+        snapshot = digest_of_mount(mount)
+
+    print(json.dumps(snapshot, indent=2, sort_keys=True))
+    if args.out:
+        Path(args.out).write_text(json.dumps(snapshot, indent=2, sort_keys=True),
+                                  encoding="utf-8")
+        print(f"snapshot written to {args.out}")
+    if args.compare:
+        try:
+            before = json.loads(Path(args.compare).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            print(f"Error: cannot read {args.compare}: {e}", file=sys.stderr)
+            return 2
+        verdict = compare_digests(before, snapshot)
+        print(verdict)
+        return 0 if verdict.startswith("PROOF") else 1
+    return 0
 
 
 def _cmd_corpus_verify(args: argparse.Namespace) -> int:

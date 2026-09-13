@@ -235,6 +235,90 @@ class TestCorpusVerify:
         assert json.loads(capsys.readouterr().out)["newer"] == 0
 
 
+class TestCorpusDigestCommand:
+    """`rlm corpus digest` — the snapshot that a before/after proof compares."""
+
+    def test_a_walk_digest_prints_aggregates_only(
+        self, corpus: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        rc = cli_main(["corpus", "digest", "--corpus-root", str(corpus)])
+        out = capsys.readouterr().out
+        assert rc == 0
+        snapshot = json.loads(out)
+        assert snapshot["source"] == "walk"
+        assert snapshot["entries"] == 5
+        assert len(snapshot["digest"]) == 128
+        assert "notes.md" not in out
+
+    def test_an_index_digest_is_available_without_a_walk(
+        self, corpus: Path, index_path: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        cli_main(["corpus", "index", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path)])
+        capsys.readouterr()
+        rc = cli_main(["corpus", "digest", "--from-index",
+                       "--corpus-index", str(index_path)])
+        snapshot = json.loads(capsys.readouterr().out)
+        assert rc == 0
+        assert snapshot["source"] == "index"
+
+    def test_index_and_walk_digests_of_the_same_corpus_match(
+        self, corpus: Path, index_path: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        cli_main(["corpus", "index", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path)])
+        capsys.readouterr()
+        cli_main(["corpus", "digest", "--from-index", "--corpus-index", str(index_path)])
+        from_index = json.loads(capsys.readouterr().out)
+        cli_main(["corpus", "digest", "--corpus-root", str(corpus)])
+        from_walk = json.loads(capsys.readouterr().out)
+        assert from_index["digest"] == from_walk["digest"]
+
+    def test_compare_reports_a_match_and_exits_zero(
+        self, corpus: Path, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        snapshot = tmp_path / "before.json"
+        cli_main(["corpus", "digest", "--corpus-root", str(corpus),
+                  "--out", str(snapshot)])
+        capsys.readouterr()
+        rc = cli_main(["corpus", "digest", "--corpus-root", str(corpus),
+                       "--compare", str(snapshot)])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "PROOF: the two snapshots are identical" in out
+
+    def test_compare_reports_a_change_and_exits_one(
+        self, corpus: Path, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        snapshot = tmp_path / "before.json"
+        cli_main(["corpus", "digest", "--corpus-root", str(corpus),
+                  "--out", str(snapshot)])
+        capsys.readouterr()
+        (corpus / "papers" / "notes.md").write_text("changed\n", encoding="utf-8")
+        rc = cli_main(["corpus", "digest", "--corpus-root", str(corpus),
+                       "--compare", str(snapshot)])
+        assert rc == 1
+        assert "DIFFERENT" in capsys.readouterr().out
+
+    def test_from_index_without_an_index_is_an_error(
+        self, capsys: pytest.CaptureFixture,
+    ) -> None:
+        assert cli_main(["corpus", "digest", "--from-index"]) == 2
+        assert "--corpus-index" in capsys.readouterr().err
+
+    def test_a_walk_digest_needs_a_root(self, capsys: pytest.CaptureFixture) -> None:
+        assert cli_main(["corpus", "digest"]) == 2
+        assert "--corpus-root" in capsys.readouterr().err
+
+    def test_an_unreadable_snapshot_is_an_error(
+        self, corpus: Path, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        rc = cli_main(["corpus", "digest", "--corpus-root", str(corpus),
+                       "--compare", str(tmp_path / "absent.json")])
+        assert rc == 2
+        assert "cannot read" in capsys.readouterr().err
+
+
 class TestAskWithACorpus:
     def test_ask_with_only_a_corpus_uses_the_stub_context(
         self, corpus: Path, index_path: Path, monkeypatch: pytest.MonkeyPatch,

@@ -361,6 +361,124 @@ class TestTheReadOnlyProof:
         assert spy.read_calls == []
 
 
+class TestTheCorpusDigest:
+    """A before/after proof that can clear a corpus with future-dated files."""
+
+    def test_a_walk_and_an_index_of_the_same_corpus_agree(
+        self, corpus: Path, derived: Path, mount: LocalTreeMount,
+    ) -> None:
+        from rlm_kernel.corpus import digest_of_index, digest_of_mount
+
+        idx = CorpusIndex.open_for(corpus, derived / "corpus.sqlite")
+        idx.build(mount)
+        walk = digest_of_mount(mount)
+        from_index = digest_of_index(idx)
+        assert walk["digest"] == from_index["digest"]
+        assert walk["entries"] == from_index["entries"] == 6
+        idx.close()
+
+    def test_the_digest_carries_no_paths(
+        self, corpus: Path, derived: Path, mount: LocalTreeMount,
+    ) -> None:
+        from rlm_kernel.corpus import digest_of_mount
+
+        report = json.dumps(digest_of_mount(mount))
+        assert "readme.md" not in report
+        assert "code.py" not in report
+
+    def test_an_unchanged_corpus_compares_equal(
+        self, corpus: Path, derived: Path, mount: LocalTreeMount,
+    ) -> None:
+        from rlm_kernel.corpus import compare_digests, digest_of_mount
+
+        before = digest_of_mount(mount)
+        after = digest_of_mount(mount)
+        assert compare_digests(before, after).startswith("PROOF")
+
+    def test_a_changed_size_is_caught(
+        self, corpus: Path, derived: Path, mount: LocalTreeMount,
+    ) -> None:
+        from rlm_kernel.corpus import compare_digests, digest_of_mount
+
+        before = digest_of_mount(mount)
+        (corpus / "readme.md").write_text("# Notes\n\nSome other text.\n", encoding="utf-8")
+        after = digest_of_mount(mount)
+        verdict = compare_digests(before, after)
+        assert verdict.startswith("DIFFERENT")
+        assert "directory names" not in verdict
+
+    def test_a_changed_size_with_the_same_mtime_is_caught(
+        self, corpus: Path, derived: Path, mount: LocalTreeMount,
+    ) -> None:
+        """Isolates size: rewriting a file changes both size and mtime, so the
+        mtime is put back and only the size differs."""
+        from rlm_kernel.corpus import compare_digests, digest_of_mount
+
+        readme = corpus / "readme.md"
+        before = digest_of_mount(mount)
+        stat = os.stat(readme)
+        readme.write_text("# Notes\n\nSome other text entirely.\n", encoding="utf-8")
+        os.utime(readme, (stat.st_atime, stat.st_mtime))
+        after = digest_of_mount(mount)
+        assert os.path.getsize(readme) != stat.st_size, "fixture bug: size unchanged"
+        # Asserted on the digest itself, not on `compare_digests`: the composite
+        # verdict also compares the byte total, so it would report a difference
+        # even if the digest had stopped covering sizes.
+        assert before["digest"] != after["digest"]
+
+    def test_a_changed_mtime_is_caught(
+        self, corpus: Path, derived: Path, mount: LocalTreeMount,
+    ) -> None:
+        """The case a size-only check would miss — reading does not change it,
+        but anything that rewrites a file does."""
+        from rlm_kernel.corpus import compare_digests, digest_of_mount
+
+        before = digest_of_mount(mount)
+        os.utime(corpus / "readme.md", (1_600_000_000.0, 1_600_000_000.0))
+        after = digest_of_mount(mount)
+        assert compare_digests(before, after).startswith("DIFFERENT")
+
+    def test_a_new_file_is_caught(
+        self, corpus: Path, derived: Path, mount: LocalTreeMount,
+    ) -> None:
+        from rlm_kernel.corpus import compare_digests, digest_of_mount
+
+        before = digest_of_mount(mount)
+        (corpus / "added.txt").write_text("new\n", encoding="utf-8")
+        after = digest_of_mount(mount)
+        assert after["entries"] == before["entries"] + 1
+        assert compare_digests(before, after).startswith("DIFFERENT")
+
+    def test_directory_timestamps_are_not_part_of_the_digest(
+        self, corpus: Path, derived: Path, mount: LocalTreeMount,
+    ) -> None:
+        """Measured, not aesthetic: dir mtimes moved between two reads.
+
+        Two consecutive reads of the same directory in this environment returned
+        mtimes a millisecond apart while every file's held still, so including a
+        directory's timestamp would have produced a false "the corpus changed" —
+        the same failure the marker scan was fixed for.
+        """
+        from rlm_kernel.corpus import compare_digests, digest_of_mount
+
+        before = digest_of_mount(mount)
+        os.utime(corpus / "sub", (1_600_000_000.0, 1_600_000_000.0))
+        assert compare_digests(before, digest_of_mount(mount)).startswith("PROOF")
+        # A *file's* timestamp, by contrast, is exactly the kind of change this
+        # digest exists to catch.
+        os.utime(corpus / "readme.md", (1_600_000_000.0, 1_600_000_000.0))
+        assert compare_digests(before, digest_of_mount(mount)).startswith("DIFFERENT")
+
+    def test_the_digest_reads_no_file_contents(
+        self, corpus: Path, derived: Path,
+    ) -> None:
+        from rlm_kernel.corpus import digest_of_mount
+
+        spy = SpyMount(corpus, forbid_reads=True)
+        digest_of_mount(spy)
+        assert spy.read_calls == []
+
+
 class TestSchemaChangesCostARebuild:
     """A layout change drops the table instead of migrating it."""
 
