@@ -1237,6 +1237,16 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         ],
     ),
     (
+        "RO2 the index digest reads the display path, not the exact bytes",
+        "src/rlm_kernel/corpus.py",
+        "        \"SELECT raw, kind, size, mtime FROM entries\"",
+        "        \"SELECT path, kind, size, mtime FROM entries\"",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestTheCorpusDigest"
+            "::test_a_walk_and_an_index_of_the_same_corpus_agree",
+        ],
+    ),
+    (
         "RO2 two different snapshots compare as equal",
         "src/rlm_kernel/corpus.py",
         "    same = (\n"

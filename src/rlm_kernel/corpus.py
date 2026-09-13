@@ -1016,14 +1016,25 @@ def digest_of_index(index: CorpusIndex) -> dict[str, Any]:
 
     This is what makes the proof cheap on one side: an index built before an
     operation is already a snapshot of it, so only the *after* side needs a walk.
+
+    It reads the `raw` column — the exact path bytes — and not `path`, the display
+    form. A walk hands back surrogate escapes for a name that is not valid UTF-8,
+    so digesting the display form would make the two sides disagree on all 98 such
+    names in the owner's corpus while agreeing on the other 4,972,511: a
+    comparison that looks like it works and quietly never can.
     """
     acc = DigestAccumulator()
     rows = index._conn.execute(  # noqa: SLF001 - one deliberate read of the table
-        "SELECT path, kind, size, mtime FROM entries"
+        "SELECT raw, kind, size, mtime FROM entries"
     )
-    for path, kind, size, mtime in rows:
-        acc.add(Entry(rel=str(path), kind=str(kind), size=int(size), mode=0,
-                      mtime=float(mtime)))
+    for raw, kind, size, mtime in rows:
+        acc.add(Entry(
+            rel=bytes(raw).decode("utf-8", "surrogateescape"),
+            kind=str(kind),
+            size=int(size),
+            mode=0,
+            mtime=float(mtime),
+        ))
     return acc.report(source="index")
 
 

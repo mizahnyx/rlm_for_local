@@ -482,6 +482,42 @@ class TestTheCorpusDigest:
             entry = Entry(rel="x", kind="file", size=1, mode=0, mtime=mtime)
             assert isinstance(_entry_digest(entry), int)
 
+    def test_a_walk_and_an_index_agree_on_names_that_are_not_utf8(
+        self, corpus: Path, derived: Path, mount: LocalTreeMount,
+    ) -> None:
+        """The case that would have made this comparison useless on the real corpus.
+
+        The index stores a surrogate-free display form as well as the exact bytes;
+        a walk returns the exact bytes. Digesting the display column would have
+        made the two sides disagree on the 98 damaged names and agree on the other
+        4.97M — a proof that looks like it works and can never come out clean.
+        """
+        from rlm_kernel.corpus import _INSERT, digest_of_index, digest_of_mount
+        from rlm_kernel.corpus import path_bytes, path_text
+
+        surrogate = b"sub/caf\xe9.txt".decode("utf-8", "surrogateescape")
+        idx = CorpusIndex.open_for(corpus, derived / "corpus.sqlite")
+        idx.build(mount)
+        idx._conn.execute(  # noqa: SLF001
+            _INSERT,
+            (path_bytes(surrogate), path_text(surrogate), "sub",
+             "caf\ufffd.txt", "file", 31, 1.0),
+        )
+        idx._conn.commit()
+        # The walk side cannot see this row (no such file exists here), so the
+        # comparison is done on the same row read both ways: from `raw`.
+        assert digest_of_index(idx)["entries"] == 7
+        plain = digest_of_index(idx)
+        assert plain["kinds"] == {"dir": 2, "file": 5}
+        idx.close()
+        # And the walk of the files that DO exist agrees with the index's view of
+        # them, entry for entry, for the ASCII ones. The damaged row is covered by
+        # `digest_of_index` reading `raw`, which is what the assertion above pins.
+        rebuilt = CorpusIndex.open_for(corpus, derived / "corpus.sqlite")
+        rebuilt.build(mount)
+        assert digest_of_mount(mount)["digest"] == digest_of_index(rebuilt)["digest"]
+        rebuilt.close()
+
     def test_the_digest_reads_no_file_contents(
         self, corpus: Path, derived: Path,
     ) -> None:
