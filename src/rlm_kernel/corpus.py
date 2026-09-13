@@ -987,12 +987,19 @@ def _entry_digest(entry: Entry) -> int:
     # change nothing (a file created and deleted, a scanner touching the tree).
     # Including it would have produced a second false "the corpus changed", which
     # is the same failure the marker scan was fixed for.
-    stamp = 0 if entry.kind == "dir" else int(round(entry.mtime * 1_000_000_000))
+    # The timestamp is packed as the double it is, not as a nanosecond integer:
+    # the integer form overflowed int64 on the real corpus, whose future-dated
+    # entries reach far enough ahead that `mtime x 1e9` does not fit. That was the
+    # second real-corpus crash in this feature, and it is why the encoding is
+    # chosen for the values rather than for convenience — a double round-trips
+    # through SQLite's REAL exactly, and its bit pattern is defined for every
+    # value including the absurd ones.
+    stamp = 0.0 if entry.kind == "dir" else entry.mtime
     h = hashlib.sha256()
     h.update(entry.rel.encode("utf-8", "surrogateescape"))
     h.update(b"\x00")
     h.update(entry.kind.encode("utf-8", "surrogateescape"))
-    h.update(struct.pack(">Qq", entry.size, stamp))
+    h.update(struct.pack(">Qd", entry.size & 0xFFFFFFFFFFFFFFFF, stamp))
     return int.from_bytes(h.digest(), "big")
 
 

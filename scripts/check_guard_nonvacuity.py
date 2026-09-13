@@ -1197,8 +1197,8 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO2 the digest stops covering entry sizes",
         "src/rlm_kernel/corpus.py",
-        "    h.update(struct.pack(\">Qq\", entry.size, stamp))",
-        "    h.update(struct.pack(\">Qq\", 0, stamp))",
+        "    h.update(struct.pack(\">Qd\", entry.size & 0xFFFFFFFFFFFFFFFF, stamp))",
+        "    h.update(struct.pack(\">Qd\", 0, stamp))",
         [
             "tests/rlm_kernel/test_corpus.py::TestTheCorpusDigest"
             "::test_a_changed_size_with_the_same_mtime_is_caught",
@@ -1207,7 +1207,7 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO2 the digest stops covering file timestamps",
         "src/rlm_kernel/corpus.py",
-        "    stamp = 0 if entry.kind == \"dir\" else int(round(entry.mtime * 1_000_000_000))",
+        "    stamp = 0.0 if entry.kind == \"dir\" else entry.mtime",
         "    stamp = 0",
         [
             "tests/rlm_kernel/test_corpus.py::TestTheCorpusDigest"
@@ -1219,11 +1219,21 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO2 the digest starts covering directory timestamps",
         "src/rlm_kernel/corpus.py",
-        "    stamp = 0 if entry.kind == \"dir\" else int(round(entry.mtime * 1_000_000_000))",
+        "    stamp = 0.0 if entry.kind == \"dir\" else entry.mtime",
         "    stamp = int(round(entry.mtime * 1_000_000_000))",
         [
             "tests/rlm_kernel/test_corpus.py::TestTheCorpusDigest"
             "::test_a_walk_and_an_index_of_the_same_corpus_agree",
+        ],
+    ),
+    (
+        "RO2 the digest goes back to a nanosecond integer timestamp",
+        "src/rlm_kernel/corpus.py",
+        "    h.update(struct.pack(\">Qd\", entry.size & 0xFFFFFFFFFFFFFFFF, stamp))",
+        "    h.update(struct.pack(\">Qq\", entry.size, int(round(stamp * 1_000_000_000))))",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestTheCorpusDigest"
+            "::test_a_timestamp_that_does_not_fit_in_nanoseconds_is_handled",
         ],
     ),
     (

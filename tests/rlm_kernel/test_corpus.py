@@ -469,6 +469,19 @@ class TestTheCorpusDigest:
         os.utime(corpus / "readme.md", (1_600_000_000.0, 1_600_000_000.0))
         assert compare_digests(before, digest_of_mount(mount)).startswith("DIFFERENT")
 
+    def test_a_timestamp_that_does_not_fit_in_nanoseconds_is_handled(self) -> None:
+        """The real corpus broke the first encoding: `mtime x 1e9` > int64.
+
+        Its future-dated entries reach far enough ahead that the nanosecond
+        integer overflowed, which killed a full walk. The digest packs the double
+        instead, so no timestamp can fail it.
+        """
+        from rlm_kernel.corpus import _entry_digest
+
+        for mtime in (1e11, 1e18, -1e11, 0.0, float("inf")):
+            entry = Entry(rel="x", kind="file", size=1, mode=0, mtime=mtime)
+            assert isinstance(_entry_digest(entry), int)
+
     def test_the_digest_reads_no_file_contents(
         self, corpus: Path, derived: Path,
     ) -> None:
