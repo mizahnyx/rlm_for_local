@@ -374,6 +374,11 @@ rlm corpus find   --corpus-index FILE QUERY [-k N] [--kind K] [--under DIR]
 rlm corpus read   --corpus-root DIR REL [--max-bytes N]
 rlm corpus verify --corpus-root DIR (--since T | --since-file F) [--sample N]
 rlm corpus classify --corpus-root DIR --corpus-index FILE [--limit N] [--hash-mode head|none]
+rlm mine plan   --corpus-index FILE [--limit N]
+rlm mine status --corpus-index FILE
+rlm mine run    --corpus-root DIR --corpus-index FILE [--tasks T,T] [--for 2h] [--until 07:00] [--max-items N]
+rlm mine pause | resume [--corpus-index FILE]
+rlm mine retry  --corpus-index FILE [--task T]
 ```
 
 Read-only access to a large file tree — the "corpus" the harness can answer
@@ -443,6 +448,50 @@ is left, so a pass killed after three hours resumes rather than restarts. Use
 `--limit N` for a pilot and `--redo` to redo everything (e.g. after a sniffing
 rule changes — rows carry a `sniff_version`). Output is aggregates only: counts
 and bytes by kind, encodings, dedup factor, and unreadable count — never a path.
+
+### `rlm mine` — mining the corpus in windows
+
+```bash
+# 1. Turn the map into work. Idempotent: running it again adds nothing.
+rlm mine plan --corpus-index ~/rlm-derived/corpus.sqlite
+
+# 2. Work it for as long as the machine is yours, then it stops by itself.
+rlm mine run --corpus-root /srv/corpus \
+    --corpus-index ~/rlm-derived/corpus.sqlite \
+    --tasks list_archive,extract_text --for 2h --progress-every 500
+
+# 3. Or hand the machine over immediately: the worker finishes the item in
+#    flight, commits it, and exits.
+rlm mine pause          # ... and later:
+rlm mine resume
+rlm mine status         # queue depth by task and state, cache size, PAUSED?
+rlm mine retry          # put failed items back (e.g. after the code improves)
+```
+
+**The corpus is mined, not read once.** The Stage 1 map says what each file is, so
+`plan` queues exactly the work each file needs and nothing is discovered by
+walking. A `run` is a *window*: a `--for` budget, a `--until` clock time, an
+`--max-items` cap and the `--pause` flag are each checked **between items**, and
+every item commits as it lands — stopping at any moment loses at most the item in
+flight.
+
+**Everything derived is cached by content hash** under `~/rlm-derived/cache/<task>/`,
+so the corpus's 2.09× duplication in text is paid for once and re-running a batch
+is free. The cache entry records the engine and version, never the source path —
+two byte-identical files share one derivation.
+
+**One worker at a time.** `run` takes a lock (`~/rlm-derived/mine.lock`) whose
+liveness is a *heartbeat*: the worker touches it per item, and a lock untouched
+for five minutes is stale and may be taken over. (It deliberately does not check
+whether the recorded pid exists — see `AGENTS.md` §3 for why that check cost this
+project a night.) A second `run` refuses to start.
+
+Tasks implemented today: **`list_archive`** (zip/tar listings through the mount,
+capped at 20,000 members, members recorded for search) and **`extract_text`**
+(pdftotext, or zip+XML for OOXML/ODF/EPUB; an empty text layer is recorded as
+`needs_ocr`, never as a failure). `vlm_describe`, `asr_transcribe`, `ocr_page`,
+`summarise` and `synthesise` are queued names with no handler yet, and the worker
+records them as `no_handler` rather than pretending to do them.
 
 **`rlm corpus verify` is the read-only proof.** Take a marker before the run, and
 this walks the corpus afterwards through the same mount provider and reports, as

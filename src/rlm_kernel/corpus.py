@@ -310,6 +310,12 @@ class CorpusIndex:
 
         return ClassificationTable(self._conn)
 
+    def mining(self):
+        """The mining queue (`rlm_kernel.mine`), for the same reason."""
+        from rlm_kernel.mine import MineStore
+
+        return MineStore(self._conn)
+
     def _set_meta(self, key: str, value: str) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value)

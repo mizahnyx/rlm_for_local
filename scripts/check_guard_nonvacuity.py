@@ -1425,6 +1425,41 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_it_queues_documents_and_archives_only",
         ],
     ),
+    (
+        "RO3 mining: the CLI ignores the worker lock",
+        "src/rlm_local/cli.py",
+        "            holder = acquire_lock(lock_path)\n"
+        "            if holder is None:",
+        "            holder = acquire_lock(lock_path)\n"
+        "            if False:",
+        [
+            "tests/test_cli_mine.py::TestRun::test_a_second_worker_is_refused",
+        ],
+    ),
+    (
+        "RO3 mining: the CLI never releases the lock",
+        "src/rlm_local/cli.py",
+        "            finally:\n"
+        "                release_lock(lock_path)",
+        "            finally:\n"
+        "                pass",
+        [
+            "tests/test_cli_mine.py::TestRun::test_the_lock_is_released_after_a_run",
+        ],
+    ),
+    (
+        "RO3 mining: --for ignores its unit",
+        "src/rlm_local/cli.py",
+        "    units = {\"s\": 1, \"m\": 60, \"h\": 3600}\n"
+        "    if text[-1] in units:\n"
+        "        number, factor = text[:-1], units[text[-1]]",
+        "    units = {\"s\": 1, \"m\": 60, \"h\": 3600}\n"
+        "    if False:\n"
+        "        number, factor = text[:-1], units[text[-1]]",
+        [
+            "tests/test_cli_mine.py::TestDurations::test_seconds_minutes_hours",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

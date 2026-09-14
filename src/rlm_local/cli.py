@@ -245,6 +245,59 @@ def build_parser() -> argparse.ArgumentParser:
                              help="Re-classify files that already have a row")
     p_cclassify.add_argument("--progress-every", type=int, default=100_000)
 
+    # ── mine ─────────────────────────────────────────────────────────────
+    p_mine = sub.add_parser(
+        "mine",
+        help="Mine the corpus: queue, run in windows, pause, resume",
+        description=(
+            "Work the corpus batch by batch, in whatever windows the machine is "
+            "free. `plan` turns the Stage 1 map into a queue; `run` works it for a "
+            "budget, a deadline or an item count and stops cleanly; `pause` and "
+            "`resume` are a file flag the worker checks between items. Everything "
+            "derived is cached by content hash, so a re-run is free, and one "
+            "worker at a time holds a heartbeat lock. Output is aggregates only."
+        ),
+    )
+    mine_sub = p_mine.add_subparsers(dest="mine_command")
+
+    p_mplan = mine_sub.add_parser("plan", help="Enqueue work from the Stage 1 map")
+    _add_corpus_flags(p_mplan, require_root=False, require_index=True)
+    p_mplan.add_argument("--limit", type=int, default=None,
+                         help="Queue at most N files per task (pilots)")
+
+    p_mstatus = mine_sub.add_parser("status", help="Queue depth and cache size")
+    _add_corpus_flags(p_mstatus, require_root=False, require_index=True)
+
+    p_mrun = mine_sub.add_parser("run", help="Work the queue for one window")
+    _add_corpus_flags(p_mrun, require_root=True, require_index=True)
+    p_mrun.add_argument("--tasks", default="list_archive,extract_text",
+                        help="Comma-separated task names, or 'all'")
+    p_mrun.add_argument("--for", dest="budget", default=None,
+                        help="Window length: 90s, 30m, 2h (or plain seconds)")
+    p_mrun.add_argument("--until", default=None,
+                        help="Stop at this clock time, e.g. 07:00")
+    p_mrun.add_argument("--max-items", type=int, default=None)
+    p_mrun.add_argument("--cache-root", type=Path, default=None,
+                        help="Where derived artefacts live "
+                             "(default: <index dir>/cache)")
+    p_mrun.add_argument("--lock", type=Path, default=None,
+                        help="Worker lock file (default: <index dir>/mine.lock)")
+    p_mrun.add_argument("--pause-file", type=Path, default=None,
+                        help="Pause flag (default: <index dir>/mine.pause)")
+    p_mrun.add_argument("--progress-every", type=int, default=200)
+
+    p_mpause = mine_sub.add_parser("pause", help="Ask the worker to stop between items")
+    _add_corpus_flags(p_mpause, require_root=False, require_index=False)
+    p_mpause.add_argument("--pause-file", type=Path, default=None)
+
+    p_mresume = mine_sub.add_parser("resume", help="Clear the pause flag")
+    _add_corpus_flags(p_mresume, require_root=False, require_index=False)
+    p_mresume.add_argument("--pause-file", type=Path, default=None)
+
+    p_mretry = mine_sub.add_parser("retry", help="Put failed items back in the queue")
+    _add_corpus_flags(p_mretry, require_root=False, require_index=True)
+    p_mretry.add_argument("--task", default=None)
+
     return parser
 
 
@@ -296,6 +349,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_optimize(args)
     elif args.command == "corpus":
         return _cmd_corpus(args)
+    elif args.command == "mine":
+        return _cmd_mine(args)
     else:
         parser.print_help()
         return 0
@@ -989,6 +1044,216 @@ def _parse_time(raw: str | None) -> float | None:
         return datetime.fromisoformat(text).timestamp()
     except ValueError:
         return None
+
+
+# ── mine ──────────────────────────────────────────────────────────────────
+
+def _parse_duration(raw: str | None) -> float | None:
+    """`90`, `90s`, `30m`, `2h` -> seconds."""
+    if raw is None:
+        return None
+    text = raw.strip().lower()
+    if not text:
+        return None
+    units = {"s": 1, "m": 60, "h": 3600}
+    if text[-1] in units:
+        number, factor = text[:-1], units[text[-1]]
+    else:
+        number, factor = text, 1
+    try:
+        return max(0.0, float(number) * factor)
+    except ValueError:
+        return None
+
+
+def _parse_deadline(raw: str | None) -> float | None:
+    """`07:00` (or `7:00`) -> the next time the clock reads that."""
+    if raw is None:
+        return None
+    from datetime import datetime, timedelta
+
+    text = raw.strip()
+    for fmt in ("%H:%M", "%H:%M:%S"):
+        try:
+            parsed = datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        now = datetime.now()
+        when = now.replace(hour=parsed.hour, minute=parsed.minute,
+                           second=parsed.second, microsecond=0)
+        if when <= now:
+            when += timedelta(days=1)
+        return when.timestamp()
+    return None
+
+
+def _mine_paths(args: argparse.Namespace) -> tuple[Path, Path, Path]:
+    """Cache root, lock and pause file, defaulting beside the index."""
+    base = Path(args.corpus_index).parent if args.corpus_index else Path.cwd()
+    cache_root = getattr(args, "cache_root", None) or base / "cache"
+    lock = getattr(args, "lock", None) or base / "mine.lock"
+    pause = getattr(args, "pause_file", None) or base / "mine.pause"
+    return Path(cache_root), Path(lock), Path(pause)
+
+
+def _open_mine(args: argparse.Namespace):
+    """Open the index and its mining tables, or explain what is missing."""
+    from rlm_kernel.corpus import CorpusIndex
+
+    if not args.corpus_index:
+        print("Error: --corpus-index is required (env RLM_CORPUS_INDEX).",
+              file=sys.stderr)
+        return None
+    if not Path(args.corpus_index).exists():
+        print(f"Error: no index at {args.corpus_index}.", file=sys.stderr)
+        return None
+    index = CorpusIndex(args.corpus_index)
+    store = index.mining()
+    store.ensure()
+    return index, store
+
+
+def _cmd_mine(args: argparse.Namespace) -> int:
+    from rlm_kernel.mine import (
+        ALL_TASKS,
+        IMPLEMENTED_TASKS,
+        DerivationCache,
+        acquire_lock,
+        format_status,
+        plan_queue,
+        release_lock,
+        run_queue,
+    )
+
+    sub = getattr(args, "mine_command", None)
+    if not sub:
+        print("Usage: rlm mine {plan,status,run,pause,resume,retry} ...")
+        return 2
+
+    cache_root, lock_path, pause_path = _mine_paths(args)
+
+    if sub == "pause":
+        pause_path.parent.mkdir(parents=True, exist_ok=True)
+        pause_path.write_text("paused\n", encoding="utf-8")
+        print(f"paused: the worker stops after the item in flight ({pause_path})")
+        return 0
+
+    if sub == "resume":
+        try:
+            pause_path.unlink()
+            print(f"resumed (removed {pause_path})")
+        except FileNotFoundError:
+            print("resumed (no pause flag was set)")
+        except OSError as e:
+            print(f"Error: cannot remove {pause_path}: {e}", file=sys.stderr)
+            return 2
+        return 0
+
+    opened = _open_mine(args)
+    if opened is None:
+        return 2
+    index, store = opened
+    try:
+        if sub == "plan":
+            plan = plan_queue(store, limit=args.limit)
+            print(f"queued {plan['enqueued']:,} new items from the map "
+                  f"(considered: {plan['considered']})")
+            print(format_status(store.status()))
+            return 0
+
+        if sub == "status":
+            caches = {
+                task: DerivationCache(cache_root, task).stats()
+                for task in IMPLEMENTED_TASKS
+            }
+            total = {
+                "entries": sum(c["entries"] for c in caches.values()),
+                "text_bytes": sum(c["text_bytes"] for c in caches.values()),
+            }
+            print(format_status(store.status(), cache=total))
+            for task, stats in sorted(caches.items()):
+                print(f"  cache/{task}: {stats['entries']:,} entries, "
+                      f"{stats['text_bytes'] / 1024 / 1024:.1f} MiB")
+            if pause_path.exists():
+                print("  PAUSED (remove with `rlm mine resume`)")
+            return 0
+
+        if sub == "retry":
+            n = store.reset_failed(args.task)
+            print(f"re-queued {n:,} failed item(s)"
+                  + (f" for {args.task}" if args.task else ""))
+            return 0
+
+        if sub == "run":
+            if not args.corpus_root:
+                print("Error: --corpus-root is required to run a batch.",
+                      file=sys.stderr)
+                return 2
+            tasks = (list(IMPLEMENTED_TASKS) if args.tasks.strip() == "all"
+                     else [t.strip() for t in args.tasks.split(",") if t.strip()])
+            unknown = [t for t in tasks if t not in ALL_TASKS]
+            if unknown:
+                print(f"Error: unknown task(s) {unknown}. Known: {list(ALL_TASKS)}",
+                      file=sys.stderr)
+                return 2
+            budget = _parse_duration(args.budget)
+            if args.budget is not None and budget is None:
+                print(f"Error: cannot read --for {args.budget!r} "
+                      "(use 90s, 30m, 2h or seconds).", file=sys.stderr)
+                return 2
+            deadline = _parse_deadline(args.until)
+            if args.until is not None and deadline is None:
+                print(f"Error: cannot read --until {args.until!r} "
+                      "(use HH:MM).", file=sys.stderr)
+                return 2
+
+            holder = acquire_lock(lock_path)
+            if holder is None:
+                print(f"Error: another mining worker holds {lock_path}. "
+                      "Stop it, or remove the file if it is stale.", file=sys.stderr)
+                return 2
+
+            from rlm_kernel.mounts import LocalTreeMount, ReadOnlyViolation
+
+            try:
+                mount = LocalTreeMount(args.corpus_root)
+            except ReadOnlyViolation as e:
+                release_lock(lock_path)
+                print(f"Error: {e}", file=sys.stderr)
+                return 2
+
+            every = max(1, int(args.progress_every or 200))
+
+            def progress(stats) -> None:
+                print(f"  {stats.processed:,} items "
+                      f"(done {stats.done:,}, skipped {stats.skipped:,}, "
+                      f"failed {stats.failed:,}, cache hits {stats.cache_hits:,})",
+                      flush=True)
+
+            print(f"mining for {args.budget or 'unbounded'}"
+                  + (f" until {args.until}" if args.until else "")
+                  + (f", at most {args.max_items:,} items" if args.max_items else ""))
+            try:
+                run = run_queue(
+                    store=store, conn=index._conn, mount=mount,
+                    cache_root=cache_root, tasks=tasks,
+                    budget_seconds=budget, deadline=deadline,
+                    max_items=args.max_items, pause_file=pause_path,
+                    lock_file=lock_path, progress=progress,
+                    progress_every=every,
+                )
+            finally:
+                release_lock(lock_path)
+            print(f"stopped: {run.stop_reason} after {run.seconds:,.1f}s")
+            print(f"  done {run.stats.done:,}, skipped {run.stats.skipped:,}, "
+                  f"failed {run.stats.failed:,}, cache hits {run.stats.cache_hits:,}")
+            print(f"  by task: {run.stats.by_task}")
+            print(format_status(store.status()))
+            return 0
+    finally:
+        index.close()
+    print(f"Error: unknown mine subcommand {sub!r}", file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":

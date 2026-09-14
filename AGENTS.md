@@ -137,6 +137,10 @@ uv run python -m rlm_local.cli corpus index --corpus-root /srv/corpus \
 uv run python -m rlm_local.cli corpus count --corpus-index ~/rlm-derived/corpus.sqlite
 uv run python -m rlm_local.cli corpus classify --corpus-root /srv/corpus \
     --corpus-index ~/rlm-derived/corpus.sqlite     # heads only, resumable
+uv run python -m rlm_local.cli mine plan --corpus-index ~/rlm-derived/corpus.sqlite
+uv run python -m rlm_local.cli mine run --corpus-root /srv/corpus \
+    --corpus-index ~/rlm-derived/corpus.sqlite --for 2h   # a window, then stop
+uv run python -m rlm_local.cli mine pause     # stop after the item in flight
 uv run python -m rlm_local.cli ask "…" --corpus-root /srv/corpus \
     --corpus-index ~/rlm-derived/corpus.sqlite     # corpus_find/read/… in a cell
 
