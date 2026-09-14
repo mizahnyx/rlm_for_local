@@ -42,24 +42,28 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from rlm_kernel.mounts import LocalTreeMount, ReadOnlyViolation
+# The origin label for derived text, shared with the text index so a citation from
+# a cache entry and a citation from a file cannot drift apart.
+from rlm_kernel.textindex import ORIGIN_CACHE
 
 MINING_VERSION = "1"
 
 #: Task names. Ordered here by the sequence they are built in, not by priority.
 LIST_ARCHIVE = "list_archive"
 EXTRACT_TEXT = "extract_text"
+INDEX_TEXT = "index_text"
 OCR_PAGE = "ocr_page"
 VLM_DESCRIBE = "vlm_describe"
 ASR_TRANSCRIBE = "asr_transcribe"
 SUMMARISE = "summarise"
 SYNTHESISE = "synthesise"
 
-ALL_TASKS = (LIST_ARCHIVE, EXTRACT_TEXT, OCR_PAGE, VLM_DESCRIBE, ASR_TRANSCRIBE,
-             SUMMARISE, SYNTHESISE)
+ALL_TASKS = (LIST_ARCHIVE, EXTRACT_TEXT, INDEX_TEXT, OCR_PAGE, VLM_DESCRIBE,
+             ASR_TRANSCRIBE, SUMMARISE, SYNTHESISE)
 
 #: Implemented so far. The rest are queued names with no handler yet, and
 #: `run_queue` reports them as skipped rather than pretending to do them.
-IMPLEMENTED_TASKS = (LIST_ARCHIVE, EXTRACT_TEXT)
+IMPLEMENTED_TASKS = (LIST_ARCHIVE, EXTRACT_TEXT, INDEX_TEXT)
 
 PENDING = "pending"
 DONE = "done"
@@ -69,6 +73,7 @@ SKIPPED = "skipped"
 #: Priority bands. Lower runs first; the bands are the mining order the owner
 #: confirmed: prose, then containers, then media, then everything else.
 PRIORITY_EXTRACT_DOCUMENT = 10
+PRIORITY_INDEX_TEXT = 20
 PRIORITY_LIST_ARCHIVE = 30
 PRIORITY_OCR_PAGE = 50
 PRIORITY_VLM_DESCRIBE = 60
@@ -78,6 +83,11 @@ PRIORITY_SUMMARISE = 90
 #: Cap on members read from one container. A single 26 GiB `.jar` can hold tens of
 #: thousands; listing is meant to be cheap and bounded, not exhaustive at any cost.
 MAX_MEMBERS = 20_000
+
+#: Cap on how much of one text file is read for indexing. Text files here are
+#: overwhelmingly small (1.49M are under a KiB); the cap exists so one
+#: pathological log cannot pull a gigabyte into memory mid-window.
+MAX_INDEX_BYTES = 32 * 1024 * 1024
 
 #: Extensions handled by `extract_text` through a text-layer engine (no OCR).
 PDF_EXTENSIONS = (".pdf",)
@@ -359,17 +369,26 @@ def plan_queue(store: MineStore, *, limit: int | None = None) -> dict[str, int]:
     counts: dict[str, int] = {}
 
     def collect(task: str, priority: int, where: str, params: tuple[Any, ...]) -> None:
+        """Enqueue every map row matching `where`, in batches.
+
+        Batched because the biggest class here is 2.88M text files: collecting
+        them into one list first would cost a few hundred MB of tuples for no
+        benefit, and the insert is idempotent anyway.
+        """
         nonlocal enqueued
         sql = (
             "SELECT e.raw FROM entries e JOIN classification c ON c.raw = e.raw"
             f" WHERE {where}"
         )
-        if limit is not None:
-            sql += " LIMIT ?"
-            params = (*params, int(limit))
-        rows = [(bytes(raw), task, priority) for (raw,) in store._conn.execute(sql, params)]
-        counts[task] = counts.get(task, 0) + len(rows)
-        enqueued += store.enqueue(rows)
+        cursor = store._conn.execute(sql, params)
+        counts[task] = 0
+        while True:
+            batch = cursor.fetchmany(50_000)
+            if not batch:
+                break
+            rows = [(bytes(raw), task, priority) for (raw,) in batch]
+            counts[task] += len(rows)
+            enqueued += store.enqueue(rows)
 
     # Documents are chosen by *name*, not by sniffed kind, and the reason is
     # concrete: a `.docx` is a zip container, so the sniff (correctly) calls it an
@@ -386,6 +405,9 @@ def plan_queue(store: MineStore, *, limit: int | None = None) -> dict[str, int]:
         LIST_ARCHIVE, PRIORITY_LIST_ARCHIVE,
         f"c.kind = 'archive' AND NOT ({doc_like})", patterns,
     )
+    # Plain text needs no conversion — its bytes are the text — so it is the one
+    # class that is indexed rather than extracted, and it is the largest by far.
+    collect(INDEX_TEXT, PRIORITY_INDEX_TEXT, "c.kind = 'text'", ())
     return {"enqueued": enqueued, "considered": counts}
 
 
@@ -401,6 +423,10 @@ class TaskContext:
     engines: dict[str, Callable[..., tuple[str, dict[str, Any]]]] = field(
         default_factory=dict
     )
+    text_index: Any = None
+    """The `TextIndex`, when one is attached. Tasks that produce or find text
+    feed it; a run without one still extracts, and says so rather than pretending
+    to have indexed anything."""
 
     def cache_for(self, task: str) -> DerivationCache:
         return DerivationCache(self.cache_root, task)
@@ -558,12 +584,51 @@ def task_extract_text(ctx: TaskContext, rel: str, size: int, source_hash: str) -
     if not text.strip():
         return TaskOutcome(SKIPPED, "needs_ocr", key, 0)
     cache.put(key, text, meta)
+    # A derived document goes into the text index straight away: the words are
+    # already in hand, and the chunk rows point at the cache entry rather than at
+    # the container, because the container cannot be read without extracting it
+    # again.
+    if ctx.text_index is not None:
+        ctx.text_index.add_text(
+            raw=_bytes_of(rel), display=rel, source_hash=source_hash,
+            text=text.encode("utf-8"), origin=ORIGIN_CACHE,
+            cache_task=EXTRACT_TEXT, cache_key=key, derived=True,
+            engine=str(meta.get("engine", "")), replace=True,
+        )
     return TaskOutcome(DONE, None, key, len(text))
+
+
+def task_index_text(ctx: TaskContext, rel: str, size: int, source_hash: str) -> TaskOutcome:
+    """Index a plain text file's own bytes.
+
+    These files need no conversion: their bytes *are* the text, so this is the
+    cheapest task in the queue and the one that covers most of the corpus
+    (2,882,822 files). The read is capped at `MAX_INDEX_BYTES`, and a file that
+    hit the cap says `truncated` rather than pretending to be fully indexed.
+    """
+    if ctx.text_index is None:
+        return TaskOutcome(SKIPPED, "no_text_index")
+    raw = _bytes_of(rel)
+    if ctx.text_index.has_source(raw):
+        return TaskOutcome(DONE, "cache")
+    try:
+        with ctx.mount.open_readonly(rel, max_bytes=MAX_INDEX_BYTES) as handle:
+            data = handle.read()
+    except (OSError, ReadOnlyViolation) as e:
+        return TaskOutcome(FAILED, type(e).__name__)
+    chunks = ctx.text_index.add_text(
+        raw=raw, display=rel, source_hash=source_hash, text=data,
+    )
+    if not chunks:
+        return TaskOutcome(SKIPPED, "no_text")
+    note = "truncated" if size > len(data) else None
+    return TaskOutcome(DONE, note, None, chunks)
 
 
 TASK_HANDLERS: dict[str, Callable[[TaskContext, str, int, str], TaskOutcome]] = {
     LIST_ARCHIVE: task_list_archive,
     EXTRACT_TEXT: task_extract_text,
+    INDEX_TEXT: task_index_text,
 }
 
 
@@ -617,6 +682,7 @@ def run_queue(
     max_items: int | None = None,
     pause_file: Path | None = None,
     lock_file: Path | None = None,
+    text_index: Any = None,
     progress: Callable[[MineStats], None] | None = None,
     progress_every: int = 100,
     now: Callable[[], float] = time.monotonic,
@@ -631,7 +697,8 @@ def run_queue(
     """
     started = now()
     stats = MineStats()
-    ctx = TaskContext(mount=mount, store=store, cache_root=Path(cache_root))
+    ctx = TaskContext(mount=mount, store=store, cache_root=Path(cache_root),
+                      text_index=text_index)
     wanted = [task for task in tasks]
     stop_reason = "queue_empty"
 

@@ -373,6 +373,81 @@ class TestCorpusClassifyCommand:
         assert "not a directory" in capsys.readouterr().err
 
 
+class TestCorpusSearchCommand:
+    """`rlm corpus search` — words inside the corpus, end to end."""
+
+    @pytest.fixture
+    def mined(self, corpus: Path, index_path: Path,
+              capsys: pytest.CaptureFixture) -> Path:
+        (corpus / "papers" / "needle.md").write_text(
+            "The engine was Godot, and Cuicani sang.\n", encoding="utf-8"
+        )
+        cli_main(["corpus", "index", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path)])
+        cli_main(["corpus", "classify", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path)])
+        cli_main(["mine", "plan", "--corpus-index", str(index_path)])
+        cli_main(["mine", "run", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path), "--tasks", "index_text"])
+        capsys.readouterr()
+        return index_path
+
+    def test_a_word_inside_a_file_is_found(self, corpus: Path, mined: Path,
+                                           capsys: pytest.CaptureFixture) -> None:
+        rc = cli_main(["corpus", "search", "Godot", "--corpus-root", str(corpus),
+                       "--corpus-index", str(mined)])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "needle.md#L" in out
+        assert "Godot" in out
+
+    def test_count_only_never_prints_content(self, corpus: Path, mined: Path,
+                                             capsys: pytest.CaptureFixture) -> None:
+        """The form that is safe to paste: counts and coverage, no path, no text."""
+        rc = cli_main(["corpus", "search", "Godot", "--corpus-root", str(corpus),
+                       "--corpus-index", str(mined), "--count-only"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "matches: 1" in out
+        assert "text_coverage:" in out
+        assert "needle.md" not in out
+        assert "Godot" not in out
+
+    def test_coverage_alone(self, corpus: Path, mined: Path,
+                            capsys: pytest.CaptureFixture) -> None:
+        rc = cli_main(["corpus", "search", "x", "--corpus-index", str(mined),
+                       "--coverage"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "sources_indexed" in out
+        assert "text_files_in_map" in out
+
+    def test_a_missing_word_reports_no_matches(self, corpus: Path, mined: Path,
+                                               capsys: pytest.CaptureFixture) -> None:
+        cli_main(["corpus", "search", "helicopter", "--corpus-root", str(corpus),
+                  "--corpus-index", str(mined)])
+        assert "(no matches)" in capsys.readouterr().out
+
+    def test_an_empty_text_index_says_so(self, corpus: Path, index_path: Path,
+                                         capsys: pytest.CaptureFixture) -> None:
+        """Nothing indexed yet: the search must report coverage, not silence."""
+        cli_main(["corpus", "index", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path)])
+        capsys.readouterr()
+        cli_main(["corpus", "search", "anything", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path)])
+        out = capsys.readouterr().out
+        assert "(no matches)" in out
+        assert "coverage:" in out
+
+    def test_it_needs_an_index(self, tmp_path: Path,
+                               capsys: pytest.CaptureFixture) -> None:
+        rc = cli_main(["corpus", "search", "x",
+                       "--corpus-index", str(tmp_path / "absent.sqlite")])
+        assert rc == 2
+        assert "no index at" in capsys.readouterr().err
+
+
 class TestAskWithACorpus:
     def test_ask_with_only_a_corpus_uses_the_stub_context(
         self, corpus: Path, index_path: Path, monkeypatch: pytest.MonkeyPatch,

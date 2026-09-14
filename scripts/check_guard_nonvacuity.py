@@ -1460,6 +1460,66 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "tests/test_cli_mine.py::TestDurations::test_seconds_minutes_hours",
         ],
     ),
+    # ── The text index: words, addresses and coverage (RO3) ───────────────
+    (
+        "RO3 text: the FTS table starts storing the text it must not store",
+        "src/rlm_kernel/textindex.py",
+        "            CREATE VIRTUAL TABLE IF NOT EXISTS text_fts USING fts5(\n"
+        "                body,\n"
+        "                content='',",
+        "            CREATE VIRTUAL TABLE IF NOT EXISTS text_fts USING fts5(\n"
+        "                body,",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestStorage"
+            "::test_the_fts_table_stores_no_text",
+        ],
+    ),
+    (
+        "RO3 text: vendored matches stop being filtered",
+        "src/rlm_kernel/textindex.py",
+        "        if not include_vendored:\n"
+        "            clauses.append(\"c.vendored = 0\")",
+        "        if False:\n"
+        "            clauses.append(\"c.vendored = 0\")",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestVendoredRanking"
+            "::test_vendored_matches_are_filtered_and_counted",
+        ],
+    ),
+    (
+        "RO3 text: vendored matches stop being counted",
+        "src/rlm_kernel/textindex.py",
+        "        if not include_vendored:\n"
+        "            row = self._conn.execute(",
+        "        if False:\n"
+        "            row = self._conn.execute(",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestVendoredRanking"
+            "::test_vendored_matches_are_filtered_and_counted",
+        ],
+    ),
+    (
+        "RO3 text: an incomplete index stops saying so",
+        "src/rlm_kernel/textindex.py",
+        "    if pct >= 99.5:\n        return \"\"",
+        "    if True:\n        return \"\"",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestCoverage"
+            "::test_an_incomplete_search_says_so",
+            "tests/test_cli_corpus.py::TestCorpusSearchCommand"
+            "::test_an_empty_text_index_says_so",
+        ],
+    ),
+    (
+        "RO3 text: query terms stop being quoted for FTS5",
+        "src/rlm_kernel/textindex.py",
+        "        return \" AND \".join(f'\"{term}\"' for term in terms[:16])",
+        "        return \" AND \".join(terms[:16])",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestSearchAndRead"
+            "::test_fts_syntax_cannot_be_injected",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

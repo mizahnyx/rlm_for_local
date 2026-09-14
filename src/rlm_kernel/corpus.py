@@ -316,6 +316,12 @@ class CorpusIndex:
 
         return MineStore(self._conn)
 
+    def text(self):
+        """The text index (`rlm_kernel.textindex`), for the same reason."""
+        from rlm_kernel.textindex import TextIndex
+
+        return TextIndex(self._conn)
+
     def _set_meta(self, key: str, value: str) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value)

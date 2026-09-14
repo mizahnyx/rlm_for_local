@@ -176,8 +176,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ccount.add_argument("--kind", default=None)
     p_ccount.add_argument("--under", default="")
 
-    p_cverify = corpus_sub.add_parser(
-        "verify",
+    p_cverify = corpus_sub.add_parser(        "verify",
         help="Read-only proof: what changed in the corpus since a marker",
         description=(
             "Walk the corpus through the mount provider and report, in "
@@ -244,6 +243,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_cclassify.add_argument("--redo", action="store_true",
                              help="Re-classify files that already have a row")
     p_cclassify.add_argument("--progress-every", type=int, default=100_000)
+
+    p_csearch = corpus_sub.add_parser(
+        "search",
+        help="Search the text index: words inside the corpus, with citations",
+        description=(
+            "Search what mining has indexed — the text of files and of everything "
+            "extracted from documents. Every hit is an address "
+            "(source#L<byte_start>-<byte_end>) that can be re-read, derived text is "
+            "labelled with the engine that produced it, vendored matches are "
+            "counted rather than hidden, and the result says how much of the "
+            "corpus is indexed at all."
+        ),
+    )
+    _add_corpus_flags(p_csearch, require_root=True, require_index=True)
+    p_csearch.add_argument("query")
+    p_csearch.add_argument("-k", "--limit", type=int, default=8)
+    p_csearch.add_argument("--include-vendored", action="store_true",
+                           help="Include matches from vendored/build/cache paths")
+    p_csearch.add_argument("--derived-only", action="store_true",
+                           help="Only matches from extracted text (PDF, office, OCR)")
+    p_csearch.add_argument("--count-only", action="store_true",
+                           help="Print match counts and coverage, never text")
+    p_csearch.add_argument("--coverage", action="store_true",
+                           help="Print indexing coverage and exit")
+    p_csearch.add_argument("--cache-root", type=Path, default=None)
 
     # ── mine ─────────────────────────────────────────────────────────────
     p_mine = sub.add_parser(
@@ -881,8 +905,76 @@ def _cmd_corpus(args: argparse.Namespace) -> int:
     if sub == "classify":
         return _cmd_corpus_classify(args)
 
+    if sub == "search":
+        return _cmd_corpus_search(args)
+
     print(f"Error: unknown corpus subcommand {sub!r}", file=sys.stderr)
     return 2
+
+
+def _cmd_corpus_search(args: argparse.Namespace) -> int:
+    """`rlm corpus search` — words inside the corpus, each with an address."""
+    from rlm_kernel.corpus import CorpusIndex
+    from rlm_kernel.mounts import LocalTreeMount, ReadOnlyViolation
+    from rlm_kernel.textindex import coverage_note, format_hits
+
+    if not args.corpus_index:
+        print("Error: --corpus-index is required (env RLM_CORPUS_INDEX).",
+              file=sys.stderr)
+        return 2
+    if not Path(args.corpus_index).exists():
+        print(f"Error: no index at {args.corpus_index}.", file=sys.stderr)
+        return 2
+
+    index = CorpusIndex(args.corpus_index)
+    try:
+        text_index = index.text()
+        text_index.ensure()
+        coverage = text_index.coverage()
+
+        if args.coverage:
+            for key, value in sorted(coverage.items()):
+                if isinstance(value, float):
+                    print(f"{key}: {value:.4f}")
+                else:
+                    print(f"{key}: {value:,}" if isinstance(value, int) else f"{key}: {value}")
+            note = coverage_note(coverage)
+            if note:
+                print(note)
+            return 0
+
+        result = text_index.search(
+            args.query, k=args.limit,
+            include_vendored=args.include_vendored,
+            derived_only=args.derived_only,
+        )
+        if args.count_only:
+            # Counts and coverage only: this is the form that is safe to paste
+            # anywhere, because it cannot carry a path or a fragment of content.
+            print(f"matches: {len(result.hits)}")
+            print(f"hidden_by_vendored_filter: {result.hidden_vendored}")
+            print(f"sources_indexed: {coverage['sources_indexed']:,}")
+            print(f"text_coverage: {coverage['text_coverage']:.4f}")
+            print(f"chunks: {coverage['chunks']:,}")
+            return 0
+
+        cache_root, _, _ = _mine_paths(args)
+        try:
+            mount = LocalTreeMount(args.corpus_root)
+        except ReadOnlyViolation as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 2
+        texts: list[str] = []
+        for hit in result.hits:
+            try:
+                texts.append(text_index.read(hit, mount=mount, cache_root=cache_root))
+            except ReadOnlyViolation as e:
+                texts.append(f"(cannot re-read: {e})")
+        result.coverage_note = coverage_note(coverage)
+        print(format_hits(result, texts))
+        return 0
+    finally:
+        index.close()
 
 
 def _cmd_corpus_classify(args: argparse.Namespace) -> int:
@@ -1224,6 +1316,9 @@ def _cmd_mine(args: argparse.Namespace) -> int:
 
             every = max(1, int(args.progress_every or 200))
 
+            text_index = index.text()
+            text_index.ensure()
+
             def progress(stats) -> None:
                 print(f"  {stats.processed:,} items "
                       f"(done {stats.done:,}, skipped {stats.skipped:,}, "
@@ -1237,6 +1332,7 @@ def _cmd_mine(args: argparse.Namespace) -> int:
                 run = run_queue(
                     store=store, conn=index._conn, mount=mount,
                     cache_root=cache_root, tasks=tasks,
+                    text_index=text_index,
                     budget_seconds=budget, deadline=deadline,
                     max_items=args.max_items, pause_file=pause_path,
                     lock_file=lock_path, progress=progress,

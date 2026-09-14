@@ -31,6 +31,7 @@ from rlm_kernel.mine import (
     EXTRACT_TEXT,
     FAILED,
     IMPLEMENTED_TASKS,
+    INDEX_TEXT,
     LIST_ARCHIVE,
     MAX_MEMBERS,
     PENDING,
@@ -143,14 +144,32 @@ def store(index: CorpusIndex) -> MineStore:
 
 
 class TestPlanningFromTheMap:
-    def test_it_queues_documents_and_archives_only(self, store: MineStore) -> None:
+    def test_it_queues_each_class_for_the_task_it_needs(self, store: MineStore) -> None:
         plan = plan_queue(store)
         tasks = store.status()["queued_by_task"]
-        # report.pdf + manual.docx need extraction; bundle.zip and broken.zip
-        # need listing; notes.txt does not (its bytes are already the text).
+        # report.pdf + manual.docx need extraction; bundle.zip and broken.zip need
+        # listing; notes.txt and misnamed.pdf are text and need indexing (their
+        # bytes *are* the text, so extraction would be pointless).
         assert tasks[EXTRACT_TEXT][PENDING] == 2
         assert tasks[LIST_ARCHIVE][PENDING] == 2
-        assert plan["enqueued"] == 4
+        assert tasks[INDEX_TEXT][PENDING] == 2
+        assert plan["enqueued"] == 6
+
+    def test_index_text_is_queued_after_documents_and_before_archives(
+        self, store: MineStore,
+    ) -> None:
+        plan_queue(store)
+        order: list[str] = []
+        while True:
+            claimed = store.claim(IMPLEMENTED_TASKS, limit=1)
+            if not claimed:
+                break
+            raw, task, _ = claimed[0]
+            order.append(task)
+            store.finish(raw, task, DONE)
+        assert order[0] == EXTRACT_TEXT
+        assert order[-1] == LIST_ARCHIVE
+        assert INDEX_TEXT in order
 
     def test_planning_twice_enqueues_nothing_new(self, store: MineStore) -> None:
         plan_queue(store)
