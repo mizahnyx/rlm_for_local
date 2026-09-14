@@ -223,6 +223,42 @@ class TestTheQueue:
         assert "list_archive" in text
 
 
+class TestTheClaimQueryStaysACheapSeek:
+    """The worst performance bug this project has hit, pinned by its query plan.
+
+    The claim is `WHERE state='pending' AND task IN (...) ORDER BY priority, raw
+    LIMIT 1`. With `raw` missing from the index, SQLite sorts every pending row to
+    find the smallest — *once per item*. On the real corpus that meant 0.7 files a
+    second at 95% CPU (612 files in 14 minutes) while looking exactly like slow
+    I/O, which is how it survived a full window before anyone measured it.
+
+    A timing assertion would be flaky; the query plan is not. `SEARCH` (an index
+    seek) is required, and `TEMP B-TREE` (a sort) is forbidden.
+    """
+
+    def _plan(self, store: MineStore) -> str:
+        rows = store._conn.execute(  # noqa: SLF001
+            "EXPLAIN QUERY PLAN SELECT raw, task, priority FROM mine_queue"
+            " WHERE state = 'pending' AND task IN ('index_text')"
+            " ORDER BY priority, raw LIMIT 1"
+        ).fetchall()
+        return " ".join(str(row[-1]) for row in rows)
+
+    def test_the_claim_is_an_index_seek_not_a_sort(self, store: MineStore) -> None:
+        store.enqueue([(f"{n}".encode(), INDEX_TEXT, 20) for n in range(50)])
+        plan = self._plan(store)
+        assert "SEARCH" in plan, f"the claim scans instead of seeking: {plan}"
+        assert "TEMP B-TREE" not in plan, f"the claim sorts on every item: {plan}"
+
+    def test_the_claim_index_covers_raw(self, store: MineStore) -> None:
+        """The plan above only holds while `raw` is the index's last column."""
+        row = store._conn.execute(  # noqa: SLF001
+            "SELECT sql FROM sqlite_master WHERE name = 'mine_queue_claim'"
+        ).fetchone()
+        assert row is not None, "the claim index is missing entirely"
+        assert "priority, raw" in row[0].replace("\n", " ")
+
+
 class TestTheDerivationCache:
     def test_key_is_content_addressed(self, derived: Path) -> None:
         cache = DerivationCache(derived, EXTRACT_TEXT)

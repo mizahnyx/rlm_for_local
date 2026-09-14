@@ -177,8 +177,16 @@ class MineStore:
                 updated_at REAL NOT NULL,
                 PRIMARY KEY (raw, task)
             );
-            CREATE INDEX IF NOT EXISTS mine_queue_pending
-                ON mine_queue(task, state, priority);
+            -- The claim index carries `raw` as its last column on purpose. The
+            -- claim is `WHERE state='pending' AND task IN (...) ORDER BY
+            -- priority, raw LIMIT 1`: without `raw` in the index, SQLite has to
+            -- sort every pending row to find the smallest one — *per item*. On
+            -- the real corpus that turned 2.88M queued files into 0.7 files a
+            -- second at 95% CPU (612 files in 14 minutes) while looking exactly
+            -- like a slow disk. With it, the row is an index seek.
+            CREATE INDEX IF NOT EXISTS mine_queue_claim
+                ON mine_queue(task, state, priority, raw);
+            DROP INDEX IF EXISTS mine_queue_pending;
             CREATE TABLE IF NOT EXISTS archive_members (
                 container BLOB NOT NULL,
                 member    TEXT NOT NULL,

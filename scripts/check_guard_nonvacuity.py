@@ -1462,6 +1462,20 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     ),
     # ── The text index: words, addresses and coverage (RO3) ───────────────
     (
+        "RO3 mining: the claim stops being an index seek",
+        "src/rlm_kernel/mine.py",
+        "            CREATE INDEX IF NOT EXISTS mine_queue_claim\n"
+        "                ON mine_queue(task, state, priority, raw);",
+        "            CREATE INDEX IF NOT EXISTS mine_queue_claim\n"
+        "                ON mine_queue(task, state, priority);",
+        [
+            "tests/rlm_kernel/test_mine.py::TestTheClaimQueryStaysACheapSeek"
+            "::test_the_claim_is_an_index_seek_not_a_sort",
+            "tests/rlm_kernel/test_mine.py::TestTheClaimQueryStaysACheapSeek"
+            "::test_the_claim_index_covers_raw",
+        ],
+    ),
+    (
         "RO3 text: the FTS table starts storing the text it must not store",
         "src/rlm_kernel/textindex.py",
         "            CREATE VIRTUAL TABLE IF NOT EXISTS text_fts USING fts5(\n"
