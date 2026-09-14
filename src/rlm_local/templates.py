@@ -146,6 +146,7 @@ WORKER_CORPUS_NO_ENTRIES = "(no corpus entries)"
 WORKER_CORPUS_NOT_FOUND = "Error: no such path in the corpus: {rel}"
 WORKER_CORPUS_READ_FAILED = "Error: corpus read failed: {rel}"
 WORKER_CORPUS_COUNT_FAILED = "Error: corpus count failed"
+WORKER_CORPUS_SEARCH_FAILED = "Error: corpus text search failed"
 
 # ---------------------------------------------------------------------------
 # Corpus runs (RO4)
@@ -156,11 +157,13 @@ WORKER_CORPUS_COUNT_FAILED = "Error: corpus count failed"
 # this corpus is far too large for any cell to walk.
 CORPUS_CONTEXT_STUB = (
     "The data for this task is a large read-only corpus, not a string. "
-    "`context` is NOT the corpus: reach it with corpus_find, corpus_list, "
+    "`context` is NOT the corpus: reach it with corpus_search (words inside "
+    "files), corpus_find (paths, and members inside archives), corpus_list, "
     "corpus_stat, corpus_read and corpus_count. Never walk the tree from a cell."
 )
 
-WORKER_MESSAGES: dict[str, str] = {    "invalid_regex": WORKER_INVALID_REGEX,
+WORKER_MESSAGES: dict[str, str] = {
+    "invalid_regex": WORKER_INVALID_REGEX,
     "no_harness_response": WORKER_NO_HARNESS_RESPONSE,
     "search_no_results": WORKER_SEARCH_NO_RESULTS,
     "propose_failed": WORKER_PROPOSE_FAILED,
@@ -169,5 +172,6 @@ WORKER_MESSAGES: dict[str, str] = {    "invalid_regex": WORKER_INVALID_REGEX,
     "corpus_not_found": WORKER_CORPUS_NOT_FOUND,
     "corpus_read_failed": WORKER_CORPUS_READ_FAILED,
     "corpus_count_failed": WORKER_CORPUS_COUNT_FAILED,
+    "corpus_search_failed": WORKER_CORPUS_SEARCH_FAILED,
 }
 

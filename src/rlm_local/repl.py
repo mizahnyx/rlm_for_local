@@ -367,6 +367,12 @@ def _harness_corpus_count(kind=None, under=""):
     resp = _recv()
     return resp.get('result', _MSG['corpus_count_failed'])
 
+def _harness_corpus_search(query, k=8, include_vendored=False):
+    _send({"cmd": "corpus_search", "query": query, "k": k,
+           "include_vendored": include_vendored, "cell_id": _cell_id})
+    resp = _recv()
+    return resp.get('result', _MSG['corpus_search_failed'])
+
 # Inject into globals so exec'd code can use them
 llm_query = _harness_llm_query
 llm_query_batched = _harness_llm_query_batched
@@ -377,6 +383,7 @@ corpus_list = _harness_corpus_list
 corpus_stat = _harness_corpus_stat
 corpus_read = _harness_corpus_read
 corpus_count = _harness_corpus_count
+corpus_search = _harness_corpus_search
 
 # ── Scaffold namespace ────────────────────────────────────────────────────
 
@@ -493,7 +500,7 @@ def show_vars():
 for _scaffold_name in ('peek', 'grep', 'chunk', 'map_query', 'show_vars',
                        'llm_query', 'llm_query_batched', 'search', 'propose',
                        'corpus_find', 'corpus_list', 'corpus_stat', 'corpus_read',
-                       'corpus_count'):
+                       'corpus_count', 'corpus_search'):
     _SCAFFOLD_ORIGINALS[_scaffold_name] = globals().get(_scaffold_name)
 
 # ── Main loop ─────────────────────────────────────────────────────────────
@@ -947,7 +954,7 @@ class REPLSandbox:
                 _send_msg(self._worker_sock, {"responses": ["Error: cell timed out"] * n})
             elif msg_type in ("subcall", "search", "propose",
                               "corpus_find", "corpus_list", "corpus_stat",
-                              "corpus_read", "corpus_count"):
+                              "corpus_read", "corpus_count", "corpus_search"):
                 _send_msg(self._worker_sock, {"response": "Error: cell timed out",
                                               "result": "Error: cell timed out"})
         except OSError:
@@ -1043,6 +1050,12 @@ class REPLSandbox:
             if msg_type == "corpus_count":
                 return bridge.handle_count(
                     kind=msg.get("kind"), under=msg.get("under") or ""
+                )
+            if msg_type == "corpus_search":
+                return bridge.handle_search(
+                    msg.get("query", ""),
+                    k=msg.get("k", 8),
+                    include_vendored=bool(msg.get("include_vendored")),
                 )
         except Exception as e:  # pragma: no cover - defensive
             return f"Error: corpus helper failed: {type(e).__name__}: {e}"

@@ -592,6 +592,7 @@ scope:
 | `corpus_stat(rel)` | function | **Corpus only.** Kind, size and mtime of one path |
 | `corpus_read(rel, max_bytes=20000)` | function | **Corpus only.** Read one file, bounded; truncation is reported |
 | `corpus_count(kind=None, under="")` | function | **Corpus only.** Counts and byte totals without listing anything |
+| `corpus_search(query, k=8, include_vendored=False)` | function | **Corpus only.** Search the **words** inside the corpus's files and extracted documents. Each hit is an address (`path#L<start>-<end>`) that can be re-read, derived text is labelled with its engine, and the result states its indexing coverage. `corpus_find` additionally searches inside listed archives and reports `container!member`. |
 
 The `corpus_*` helpers exist only when the run was given a corpus
 (`--corpus-root`, or the `corpus_bridge` argument to `completion()`), and they are

@@ -1534,6 +1534,51 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_fts_syntax_cannot_be_injected",
         ],
     ),
+    # ── The corpus helpers: search, members, coverage (RO4) ───────────────
+    (
+        "RO4 corpus_search stops reporting its coverage",
+        "src/rlm_kernel/corpus.py",
+        "        if note:\n            lines.append(note)\n        return \"\\n\".join(lines)",
+        "        if False:\n            lines.append(note)\n        return \"\\n\".join(lines)",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestBridgeContentSearch"
+            "::test_the_result_states_its_coverage",
+            "tests/test_corpus_repl.py::TestCorpusHelpersInALiveCell"
+            "::test_a_cell_can_search_the_words_inside_the_corpus",
+        ],
+    ),
+    (
+        "RO4 corpus_search stops labelling derived text",
+        "src/rlm_kernel/corpus.py",
+        "            if hit.derived:\n"
+        "                labels.append(f\"derived:{hit.engine or 'unknown'}\")",
+        "            if False:\n"
+        "                labels.append(f\"derived:{hit.engine or 'unknown'}\")",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestBridgeContentSearch"
+            "::test_derived_text_is_labelled_with_its_engine",
+        ],
+    ),
+    (
+        "RO4 corpus_find stops looking inside archives",
+        "src/rlm_kernel/corpus.py",
+        "        member_lines = self._find_members(query, limit=limit)",
+        "        member_lines = []",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestBridgeContentSearch"
+            "::test_archives_listed_for_search_are_searched_by_find",
+        ],
+    ),
+    (
+        "RO4 the worker stops exporting corpus_search",
+        "src/rlm_local/repl.py",
+        "\ncorpus_search = _harness_corpus_search\n",
+        "\ncorpus_search = None\n",
+        [
+            "tests/test_corpus_repl.py::TestWorkerDefinesTheCorpusVerbs"
+            "::test_every_advertised_helper_exists_in_the_worker",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

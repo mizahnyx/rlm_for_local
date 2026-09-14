@@ -278,6 +278,41 @@ class MineStore:
         row = self._conn.execute("SELECT COUNT(*) FROM archive_members").fetchone()
         return int(row[0]) if row else 0
 
+    def has_members(self) -> bool:
+        """Whether any archive listing has been recorded here.
+
+        A corpus that has only been indexed (never mined) has no such table, and
+        the search path must ask rather than assume.
+        """
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='archive_members'"
+        ).fetchone()
+        return row is not None
+
+    def find_members(
+        self, query: str, *, limit: int = 20,
+    ) -> list[tuple[str, str, int, str]]:
+        """Members whose *name* matches, as `(container, member, size, kind)`.
+
+        This is the "archives are directories" half of the design: a member cannot
+        be read without extracting it, but it can be found by name — and a hit
+        tells the caller exactly which container to open.
+        """
+        needle = (query or "").strip().strip("/")
+        if not needle:
+            return []
+        rows = self._conn.execute(
+            "SELECT container, member, size, kind FROM archive_members"
+            " WHERE member LIKE ? ESCAPE '\\'"
+            " ORDER BY length(member), member LIMIT ?",
+            (f"%{_escape_like(needle)}%", max(1, int(limit))),
+        ).fetchall()
+        out: list[tuple[str, str, int, str]] = []
+        for container, member, size, kind in rows:
+            display = bytes(container).decode("utf-8", "replace")
+            out.append((display, str(member), int(size), str(kind)))
+        return out
+
     # ── Reporting ─────────────────────────────────────────────────────────
 
     def status(self) -> dict[str, Any]:
@@ -649,6 +684,10 @@ def _kind_counts(members: Iterable[tuple[str, int, str]]) -> dict[str, int]:
 
 def _bytes_of(rel: str) -> bytes:
     return rel.encode("utf-8", "surrogateescape")
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _member_tsv(members: Iterable[tuple[str, int, str]]) -> str:

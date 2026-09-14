@@ -487,11 +487,43 @@ whether the recorded pid exists — see `AGENTS.md` §3 for why that check cost 
 project a night.) A second `run` refuses to start.
 
 Tasks implemented today: **`list_archive`** (zip/tar listings through the mount,
-capped at 20,000 members, members recorded for search) and **`extract_text`**
+capped at 20,000 members, members recorded for search), **`extract_text`**
 (pdftotext, or zip+XML for OOXML/ODF/EPUB; an empty text layer is recorded as
-`needs_ocr`, never as a failure). `vlm_describe`, `asr_transcribe`, `ocr_page`,
-`summarise` and `synthesise` are queued names with no handler yet, and the worker
-records them as `no_handler` rather than pretending to do them.
+`needs_ocr`, never as a failure), and **`index_text`** (a plain text file's own
+bytes go into the text index — no conversion needed, and this is the largest class
+at 2,882,822 files). `vlm_describe`, `asr_transcribe`, `ocr_page`, `summarise` and
+`synthesise` are queued names with no handler yet, and the worker records them as
+`no_handler` rather than pretending to do them.
+
+**Measured rates on the owner's corpus**, so a window can be planned: text
+extraction 5.3 items/s; archive listing and indexing ~33 items/s (with the claim
+fixed — see below). Indexing all 2.88M text files is therefore ~24 hours of
+windows, and every hour of it is independently useful because the queue commits
+per item.
+
+### `rlm corpus search` and the `corpus_search` helper
+
+```bash
+rlm corpus search "Cuicani" --corpus-root /srv/corpus \
+    --corpus-index ~/rlm-derived/corpus.sqlite
+rlm corpus search "Cuicani" --corpus-index ~/rlm-derived/corpus.sqlite --count-only
+rlm corpus search x --corpus-index ~/rlm-derived/corpus.sqlite --coverage
+```
+
+Search reaches the **words** inside the corpus, not just names. Inside a model
+cell the same capability is `corpus_search(query, k=8)`, alongside
+`corpus_find` (paths, **and members inside listed archives**, reported as
+`container!member`), `corpus_list`, `corpus_stat`, `corpus_read` and
+`corpus_count`.
+
+Every hit is an address — `path#L<byte_start>-<byte_end>` — that can be re-read;
+that is what makes it a citation rather than a lead. Text that came from an
+extraction is labelled (`derived:pdftotext`), vendored matches are counted and can
+be included with `include_vendored=True`, and every result states its **coverage**
+("5,973 sources indexed (0.2% of the 2,882,822 text files)"), because "no matches"
+over a partial index is a different fact from "no matches" over all of it.
+`--count-only` prints counts and coverage and no path or fragment — the form that
+is safe to paste anywhere.
 
 **`rlm corpus verify` is the read-only proof.** Take a marker before the run, and
 this walks the corpus afterwards through the same mount provider and reports, as

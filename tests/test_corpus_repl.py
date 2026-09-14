@@ -32,6 +32,7 @@ CORPUS_VERBS = (
     "corpus_stat",
     "corpus_read",
     "corpus_count",
+    "corpus_search",
 )
 
 
@@ -261,6 +262,54 @@ class TestCorpusHelpersInALiveCell:
         try:
             result = repl.execute("print(corpus_find('anything'))")
             assert "no corpus is configured" in result.stdout
+        finally:
+            repl.shutdown()
+
+    def test_a_cell_can_search_the_words_inside_the_corpus(
+        self, corpus: Path, bridge,
+    ) -> None:
+        """The helper this whole step exists for: text, not names."""
+        text_index = bridge.index.text()
+        text_index.ensure()
+        (corpus / "notes" / "budget.md").write_text(
+            "The engine was Godot and the budget was tight.\n", encoding="utf-8"
+        )
+        text_index.add_text(
+            raw=b"notes/budget.md", display="notes/budget.md", source_hash="h",
+            text=(corpus / "notes" / "budget.md").read_bytes(),
+        )
+        repl = REPLSandbox(cell_timeout=30.0)
+        repl._corpus_bridge = bridge
+        repl.start("no context", MockSubcallMgr())
+        try:
+            result = repl.execute("print(corpus_search('Godot'))")
+            assert "notes/budget.md#L" in result.stdout
+            assert "Godot" in result.stdout
+            assert "coverage" in result.stdout
+        finally:
+            repl.shutdown()
+
+    def test_a_cell_can_read_back_a_search_hit(self, corpus: Path, bridge) -> None:
+        """A hit is an address; reading it is what makes the citation real."""
+        text_index = bridge.index.text()
+        text_index.ensure()
+        (corpus / "notes" / "song.txt").write_text(
+            "Cuicani sang it first.\n", encoding="utf-8"
+        )
+        text_index.add_text(
+            raw=b"notes/song.txt", display="notes/song.txt", source_hash="h",
+            text=(corpus / "notes" / "song.txt").read_bytes(),
+        )
+        repl = REPLSandbox(cell_timeout=30.0)
+        repl._corpus_bridge = bridge
+        repl.start("no context", MockSubcallMgr())
+        try:
+            result = repl.execute(
+                "print(corpus_search('Cuicani').splitlines()[0])\n"
+                "print(corpus_read('notes/song.txt'))\n"
+            )
+            assert "notes/song.txt#L" in result.stdout
+            assert "Cuicani sang it first." in result.stdout
         finally:
             repl.shutdown()
 

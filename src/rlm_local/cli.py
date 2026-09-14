@@ -797,8 +797,12 @@ def _corpus_bridge_for(args: argparse.Namespace):
     if not root:
         return None
     index = getattr(args, "corpus_index", None)
+    # Derived text lives beside the index unless told otherwise, and the bridge
+    # needs it to re-read a chunk that came from an extracted document rather
+    # than from a file.
+    cache_root = _mine_paths(args)[0] if index else None
     try:
-        return CorpusBridge.open_for(root, index)
+        return CorpusBridge.open_for(root, index, cache_root=cache_root)
     except ReadOnlyViolation as e:
         print(f"Error: {e}", file=sys.stderr)
         return None

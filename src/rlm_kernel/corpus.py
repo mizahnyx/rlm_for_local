@@ -44,6 +44,7 @@ from rlm_kernel.mounts import (
     ReadOnlyViolation,
     assert_derived_outside_corpus,
 )
+from rlm_kernel.textindex import coverage_note
 
 #: Hard bounds. A tool result is read into a small model's context window, so the
 #: caps are part of the interface, not caller politeness: `FIND_LIMIT_MAX` keeps a
@@ -497,6 +498,12 @@ CORPUS_READ_TRUNCATED = "\n[... truncated: {shown} of {total} bytes shown ...]"
 CORPUS_NOT_A_FILE = "Error: not a regular file in the corpus: {rel!r}"
 CORPUS_READ_ERROR = "Error: could not read {rel!r}: {error}"
 CORPUS_NO_MATCHES = "(no corpus paths matched)"
+CORPUS_TEXT_NO_MATCHES = "(no text matches in what is indexed)"
+CORPUS_VENDORED_HIDDEN = (
+    "[{n:,} further matches are hidden by the vendored filter; search again with "
+    "include_vendored=True if the answer may be in dependency or build output]"
+)
+CORPUS_NOT_REREADABLE = "    (cannot re-read this chunk: {error})"
 CORPUS_INCOMPLETE = (
     "[warning: the path index is INCOMPLETE — {entries} entries as of its last "
     "checkpoint, so results may be missing. Rebuild it with `rlm corpus index`.]"
@@ -522,12 +529,17 @@ class CorpusBridge:
 
     mount: LocalTreeMount
     index: CorpusIndex | None = None
+    cache_root: Path | None = None
+    """Where derived text lives, for citations that point into the cache rather
+    than into a file. Without it, derived chunks report that they cannot be
+    re-read rather than pretending to have text."""
 
     @classmethod
     def open_for(
         cls,
         corpus_root: str | Path,
         index_path: str | Path | None = None,
+        cache_root: str | Path | None = None,
     ) -> "CorpusBridge":
         """Mount a corpus, and attach its index when one has been built.
 
@@ -542,7 +554,8 @@ class CorpusBridge:
             assert_derived_outside_corpus(mount.root, candidate)
             if candidate.exists():
                 index = CorpusIndex(candidate)
-        return cls(mount=mount, index=index)
+        return cls(mount=mount, index=index,
+                   cache_root=Path(cache_root) if cache_root else None)
 
     def close(self) -> None:
         if self.index is not None:
@@ -597,15 +610,92 @@ class CorpusBridge:
         kind: str | None = None,
         under: str = "",
     ) -> str:
+        """Find paths — and, when archives have been listed, find *inside* them.
+
+        A container's members are not in the path index (reading every archive
+        during the build is what the two-tier design avoids), so they are searched
+        in `archive_members`, which the mining `list_archive` task fills. The
+        result says which container to open, because a member cannot be read
+        directly — a hit that did not say that would be a dead end.
+        """
         if self.index is None:
             return CORPUS_NO_INDEX
         hits = self.index.find(query, limit=limit, kind=kind, under=under)
-        if not hits:
+        lines = [_format_entry(e) for e in hits]
+        member_lines = self._find_members(query, limit=limit)
+        if not lines and not member_lines:
             return self._honest(CORPUS_NO_MATCHES)
+        if member_lines:
+            lines.extend(member_lines)
         return self._honest(
-            "\n".join(_format_entry(e) for e in hits)
-            + _total_hint(self.index.count(kind=kind, under=under), len(hits))
+            "\n".join(lines)
+            + _total_hint(self.index.count(kind=kind, under=under), len(lines))
         )
+
+    def _find_members(self, query: str, *, limit: int) -> list[str]:
+        """Matches inside listed archives, as `container!member` lines."""
+        if self.index is None:
+            return []
+        try:
+            store = self.index.mining()
+            if not store.has_members():
+                return []
+            found = store.find_members(query, limit=limit)
+        except Exception:  # pragma: no cover - a corpus without mining tables
+            return []
+        return [
+            f"{container}!{member}  [inside {container}, {kind}, {size} bytes]"
+            for container, member, size, kind in found
+        ]
+
+    def handle_search(
+        self, query: str, k: int = 8, include_vendored: bool = False,
+        derived_only: bool = False,
+    ) -> str:
+        """Search the *words* inside the corpus, with addresses and coverage.
+
+        Three things this result must carry, and they are the whole reason the
+        text index exists in this shape: the address of every hit so it can be
+        re-read, the label of derived text (an OCR page is not a quote), and how
+        much of the corpus is indexed at all — because "no matches" over a 0.2%
+        index is a different fact from "no matches" over all of it.
+        """
+        if self.index is None:
+            return CORPUS_NO_INDEX
+        try:
+            text_index = self.index.text()
+            text_index.ensure()
+        except Exception as e:  # pragma: no cover - defensive
+            return CORPUS_READ_ERROR.format(rel="text index", error=e)
+
+        result = text_index.search(query, k=k, include_vendored=include_vendored,
+                                   derived_only=derived_only)
+        coverage = text_index.coverage()
+        note = coverage_note(coverage)
+        if not result.hits:
+            lines = [CORPUS_TEXT_NO_MATCHES, note] if note else [CORPUS_TEXT_NO_MATCHES]
+            if result.hidden_vendored:
+                lines.append(CORPUS_VENDORED_HIDDEN.format(n=result.hidden_vendored))
+            return "\n".join(lines)
+
+        lines = []
+        for hit in result.hits:
+            try:
+                text = text_index.read(hit, mount=self.mount, cache_root=self.cache_root)
+            except ReadOnlyViolation as e:
+                text = CORPUS_NOT_REREADABLE.format(error=e)
+            labels = [hit.origin]
+            if hit.derived:
+                labels.append(f"derived:{hit.engine or 'unknown'}")
+            if hit.vendored:
+                labels.append("vendored")
+            snippet = " ".join(text.split())[:300]
+            lines.append(f"{hit.address}  [{', '.join(labels)}]\n    {snippet}")
+        if result.hidden_vendored:
+            lines.append(CORPUS_VENDORED_HIDDEN.format(n=result.hidden_vendored))
+        if note:
+            lines.append(note)
+        return "\n".join(lines)
 
     def _honest(self, text: str) -> str:
         """Prefix a result from an incomplete index with the fact that it is one.

@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from rlm_kernel.classify import classify_entries
 from rlm_kernel.corpus import (
     CORPUS_NO_INDEX,
     CORPUS_NO_MATCHES,
@@ -33,6 +34,7 @@ from rlm_kernel.corpus import (
     _bounded,
 )
 from rlm_kernel.mounts import Entry, LocalTreeMount, ReadOnlyViolation
+from rlm_kernel.textindex import ORIGIN_CACHE
 
 CORPUS_SRC = Path(__file__).resolve().parents[2] / "src" / "rlm_kernel" / "corpus.py"
 
@@ -785,6 +787,89 @@ class TestNamesThatAreNotUtf8:
         out = bridge.handle_read(self.DAMAGED_SHOWN)
         assert "readable content" in out
         assert self.DAMAGED_SHOWN in out
+
+
+class TestBridgeContentSearch:
+    """`handle_search` — the helper that reaches words, not names."""
+
+    @pytest.fixture
+    def searched(self, corpus: Path, index: CorpusIndex,
+                 mount: LocalTreeMount, tmp_path: Path) -> CorpusBridge:
+        (corpus / "sub" / "story.txt").write_text(
+            "Cuicani sang at the festival.\n", encoding="utf-8"
+        )
+        index.build(mount)
+        table = index.classifications()
+        table.ensure()
+        classify_entries(mount, table)
+        text_index = index.text()
+        text_index.ensure()
+        text_index.add_text(
+            raw=b"sub/story.txt", display="sub/story.txt", source_hash="h1",
+            text=(corpus / "sub" / "story.txt").read_bytes(),
+        )
+        cache_root = tmp_path / "cache"
+        (cache_root / "extract_text" / "ab").mkdir(parents=True)
+        (cache_root / "extract_text" / "ab" / "abcdef.txt").write_text(
+            "the demo used the Godot engine\n", encoding="utf-8"
+        )
+        text_index.add_text(
+            raw=b"sub/deep.docx", display="sub/deep.docx", source_hash="h2",
+            text=b"the demo used the Godot engine\n", origin=ORIGIN_CACHE,
+            cache_task="extract_text", cache_key="abcdef", derived=True,
+            engine="zip+xml",
+        )
+        return CorpusBridge(mount=mount, index=index, cache_root=cache_root)
+
+    def test_a_word_is_found_with_its_address(self, searched: CorpusBridge) -> None:
+        out = searched.handle_search("Cuicani")
+        assert "sub/story.txt#L" in out
+        assert "Cuicani sang" in out
+
+    def test_the_result_states_its_coverage(self, searched: CorpusBridge) -> None:
+        assert "coverage:" in searched.handle_search("Cuicani")
+
+    def test_a_missing_word_says_no_matches_and_the_coverage(
+        self, searched: CorpusBridge,
+    ) -> None:
+        out = searched.handle_search("helicopter")
+        assert "no text matches" in out
+        assert "coverage:" in out
+
+    def test_derived_text_is_labelled_with_its_engine(
+        self, searched: CorpusBridge,
+    ) -> None:
+        assert "derived:zip+xml" in searched.handle_search("Godot")
+
+    def test_a_hit_whose_text_is_gone_says_so_rather_than_pretending(
+        self, corpus: Path, index: CorpusIndex, mount: LocalTreeMount,
+    ) -> None:
+        text_index = index.text()
+        text_index.ensure()
+        text_index.add_text(
+            raw=b"gone.docx", display="gone.docx", source_hash="h",
+            text=b"a missing artifact\n", origin=ORIGIN_CACHE,
+            cache_task="extract_text", cache_key="dead", derived=True,
+            engine="zip+xml",
+        )
+        bridge = CorpusBridge(mount=mount, index=index, cache_root=None)
+        assert "cannot re-read" in bridge.handle_search("missing")
+
+    def test_archives_listed_for_search_are_searched_by_find(
+        self, corpus: Path, index: CorpusIndex, mount: LocalTreeMount,
+    ) -> None:
+        """A member cannot be read directly, so a hit must name its container."""
+        store = index.mining()
+        store.ensure()
+        store.add_members(b"bundle.zip", [("inner/treasure.txt", 12, "file")])
+        out = CorpusBridge(mount=mount, index=index).handle_find("treasure")
+        assert "bundle.zip!inner/treasure.txt" in out
+        assert "inside bundle.zip" in out
+
+    def test_a_corpus_without_mining_tables_still_searches_paths(
+        self, corpus: Path, index: CorpusIndex, mount: LocalTreeMount,
+    ) -> None:
+        assert "readme.md" in CorpusBridge(mount=mount, index=index).handle_find("readme")
 
 
 class TestBridgeWithoutAnIndex:

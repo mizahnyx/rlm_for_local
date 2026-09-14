@@ -141,9 +141,14 @@ def build_system_prompt(prompt_vars: dict) -> str:
 CORPUS_SECTION_HEADER = "The corpus (read-only)"
 CORPUS_SECTION_LINES = (
     "- A large read-only file tree is available: {root}.",
-    "- corpus_find(query, limit=20, kind=None, under=\"\") — search the corpus"
-    " path index. Results are relative paths. A query with a '/' searches full"
-    " paths; without one it searches file names.",
+    "- corpus_search(query, k=8) — search the WORDS inside the corpus's files and"
+    " documents. This is the helper for a question about content, and the only one"
+    " that reaches text rather than names. Every hit is an address you can re-read,"
+    " and derived text (extracted from a PDF, OCR'd from a scan) is labelled as"
+    " derived.",
+    "- corpus_find(query, limit=20, kind=None, under=\"\") — search paths by name."
+    " It also searches inside archives that have been listed, and reports those"
+    " hits as `container!member`.",
     "- corpus_list(rel=\"\", limit=50) — one directory level (not the subtree).",
     "- corpus_stat(rel) — kind, size and mtime of one path.",
     "- corpus_read(rel, max_bytes=20000) — read one file, bounded. Long files are"
@@ -152,8 +157,10 @@ CORPUS_SECTION_LINES = (
     " listing anything.",
     "- Never walk the corpus from a cell, and never build a list of every path:"
     " it holds millions of files and a single walk takes tens of minutes. Search"
-    " with corpus_find, count with corpus_count.",
+    " with corpus_search, count with corpus_count.",
     "- The corpus is read-only: nothing you run can or may change it.",
+    "- Only part of the corpus may be indexed yet: every search result states its"
+    " coverage, and 'no matches' over partial coverage is not proof of absence.",
 )
 CORPUS_SECTION_NO_INDEX = (
     "- No path index is built yet, so corpus_find and corpus_count will say so."
