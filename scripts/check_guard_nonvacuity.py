@@ -1347,6 +1347,84 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_compare_reports_a_change_and_exits_one",
         ],
     ),
+    # ── Mining: the queue, its caches and its windows (RO3) ───────────────
+    (
+        # The incident this project must never repeat: `os.kill(pid, 0)` is a
+        # harmless liveness probe on POSIX, but on Windows it calls
+        # TerminateProcess, so it *kills the process it asks about*. It killed a
+        # test run and the harness running it. The named test scans the module's
+        # source, so applying this mutation cannot cause a kill — nothing executes
+        # the inserted call.
+        "RO3 mining: the lock probes a process instead of reading its heartbeat",
+        "src/rlm_kernel/mine.py",
+        "        if age is not None and age < stale_after:",
+        "        os.kill(int(lock_file.read_text().split()[0]), 0)\n"
+        "        if age is not None and age < stale_after:",
+        [
+            "tests/rlm_kernel/test_mine.py::TestReadOnlyByConstruction"
+            "::test_the_module_never_probes_a_process",
+        ],
+    ),
+    (
+        "RO3 mining: the cache key stops being content-addressed",
+        "src/rlm_kernel/mine.py",
+        "        digest.update(source_hash.encode(\"ascii\", \"replace\"))",
+        "        digest.update(b\"constant\")",
+        [
+            "tests/rlm_kernel/test_mine.py::TestTheDerivationCache"
+            "::test_key_is_content_addressed",
+        ],
+    ),
+    (
+        "RO3 mining: an archive listing ignores its member cap",
+        "src/rlm_kernel/mine.py",
+        "        for info in archive.infolist():\n"
+        "            if len(members) >= MAX_MEMBERS:\n"
+        "                break",
+        "        for info in archive.infolist():\n"
+        "            if False:\n"
+        "                break",
+        [
+            "tests/rlm_kernel/test_mine.py::TestArchiveListing"
+            "::test_the_listing_is_bounded",
+        ],
+    ),
+    (
+        "RO3 mining: a damaged container aborts the run",
+        "src/rlm_kernel/mine.py",
+        "    except (zipfile.BadZipFile, tarfile.TarError, EOFError, OSError,\n"
+        "            ReadOnlyViolation, ValueError) as e:\n"
+        "        return TaskOutcome(FAILED, type(e).__name__)",
+        "    except (zipfile.BadZipFile, tarfile.TarError, EOFError, OSError,\n"
+        "            ReadOnlyViolation, ValueError) as e:\n"
+        "        raise",
+        [
+            "tests/rlm_kernel/test_mine.py::TestArchiveListing"
+            "::test_the_handler_reports_rather_than_raises",
+            "tests/rlm_kernel/test_mine.py::TestArchiveListing"
+            "::test_a_damaged_container_is_a_row_not_a_crash",
+        ],
+    ),
+    (
+        "RO3 mining: the pause file is ignored",
+        "src/rlm_kernel/mine.py",
+        "        if pause_file is not None and Path(pause_file).exists():",
+        "        if False:",
+        [
+            "tests/rlm_kernel/test_mine.py::TestWindows"
+            "::test_a_pause_file_stops_the_run",
+        ],
+    ),
+    (
+        "RO3 mining: text files get queued for extraction they do not need",
+        "src/rlm_kernel/mine.py",
+        "        f\"c.kind IN ('document', 'archive') AND ({doc_like})\", patterns,",
+        "        f\"c.kind IN ('document', 'archive', 'text') AND ({doc_like})\", patterns,",
+        [
+            "tests/rlm_kernel/test_mine.py::TestPlanningFromTheMap"
+            "::test_it_queues_documents_and_archives_only",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

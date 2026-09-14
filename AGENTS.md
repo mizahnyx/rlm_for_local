@@ -66,6 +66,13 @@ exist, written down in one place so they stop being re-derived per session.
    and substitutes a default is worse than no probe: it produces confident wrong
    answers, which is how a working mount got reported as broken.
 
+   **Second corollary — a probe must not be able to *change* what it measures.**
+   `os.kill(pid, 0)` is the standard liveness check on POSIX and **terminates the
+   process** on Windows. A mining lock used it to ask "is the worker alive?", and
+   the answer cost a test run, the DSH harness hosting it, and the config write
+   that was in flight. Liveness is decided by a heartbeat now (§3). The question a
+   probe asks must not be answered by the probe itself.
+
 9. **Corpus-derived data does not leave the machine that holds the corpus.**
    The census, any path listing, any per-file table, and any extract is
    sensitive: it is a consolidated index of someone's private files, which is
@@ -150,6 +157,15 @@ Use `-m`. (Measured on 2026-09-11: `-m` 744 passed / 12 deselected vs `-k` 724 /
 
 ## 3. Environment traps (all of these have bitten this repo)
 
+- **Never probe a process with `os.kill(pid, 0)`.** On POSIX that is the standard
+  liveness check; on Windows Python's `os.kill` falls through to
+  `TerminateProcess(handle, sig)`, so signal `0` **kills the process it asks
+  about**. On 2026-09-14 it killed a pytest run, then the DSH harness hosting it,
+  and — because the harness died mid-write — the owner's API key disappeared from
+  the DSH configuration. Liveness is now decided by a heartbeat (the lock file's
+  mtime, refreshed per item in `rlm_kernel/mine.py`), and
+  `tests/rlm_kernel/test_mine.py` tokenises that module and fails if any
+  process-signalling call comes back. Never "check" a process by signalling it.
 - **Windows + sandbox temp dirs.** `tempfile.mkdtemp` creates `0o700`
   directories, which the sandbox cannot enter, which fails ~271 tests. The fix
   lives in `.venv/Lib/site-packages/sitecustomize.py` (0o700 → 0o750 on Windows)
