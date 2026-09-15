@@ -27,9 +27,10 @@ logs/trajectories/
 
 # Sandbox temp roots. `.tmp_*` is the convention for scratch work whenever a
 # root cannot be cleaned up in-session (the sandbox forbids deleting some
-# modes); the validation docs have referred to this rule since 2026-09-10, and
-# until now only the two roots below were actually covered.
-.tmp_*/
+# modes); the validation docs have referred to this rule since 2026-09-10.
+# The pattern covers *files* as well as directories, because a one-off commit
+# message written to `.tmp_msg.txt` was staged by `git add -A` once and shipped.
+.tmp_*
 .tmp_pytest/
 .tmp_rt/
 
