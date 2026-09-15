@@ -486,6 +486,15 @@ for five minutes is stale and may be taken over. (It deliberately does not check
 whether the recorded pid exists — see `AGENTS.md` §3 for why that check cost this
 project a night.) A second `run` refuses to start.
 
+**Windows can be chained** (`~/rlm-derived/mine-index-chain.sh`, on `lunacode`):
+it starts a fresh 12-hour `index_text` window whenever the previous one ends and
+stops for good when the queue empties or when `~/rlm-derived/PAUSE-INDEX` exists
+— the pause file stops the *chain*, not just the window in flight. It waits out a
+live worker by reading the heartbeat lock's age, never by probing a process.
+`tail -f ~/rlm-derived/mine-index-chain.log` shows both the chain's decisions and
+the worker's progress lines, so "why is it running?" and "how far along is it?"
+are one command apart.
+
 Tasks implemented today: **`list_archive`** (zip/tar listings through the mount,
 capped at 20,000 members, members recorded for search), **`extract_text`**
 (pdftotext, or zip+XML for OOXML/ODF/EPUB; an empty text layer is recorded as
