@@ -109,7 +109,7 @@ exist, written down in one place so they stop being re-derived per session.
 
 ```bash
 # Fast suite — select on MARKERS, never on names
-uv run pytest -m "not slow and not load" -q        # ~800 tests, ~4-7 min
+uv run pytest -m "not slow and not load" -q        # ~1180 tests, ~7 min
 
 # Everything, including tests needing a live model server and the load corpus
 uv run pytest -q
@@ -137,12 +137,16 @@ uv run python -m rlm_local.cli corpus index --corpus-root /srv/corpus \
 uv run python -m rlm_local.cli corpus count --corpus-index ~/rlm-derived/corpus.sqlite
 uv run python -m rlm_local.cli corpus classify --corpus-root /srv/corpus \
     --corpus-index ~/rlm-derived/corpus.sqlite     # heads only, resumable
+uv run python -m rlm_local.cli corpus search "…" --corpus-index ~/rlm-derived/corpus.sqlite
+uv run python -m rlm_local.cli corpus search "…" --corpus-index ~/rlm-derived/corpus.sqlite \
+    --count-only                                    # counts + coverage, no path, safe to paste
 uv run python -m rlm_local.cli mine plan --corpus-index ~/rlm-derived/corpus.sqlite
+uv run python -m rlm_local.cli mine status --corpus-index ~/rlm-derived/corpus.sqlite
 uv run python -m rlm_local.cli mine run --corpus-root /srv/corpus \
     --corpus-index ~/rlm-derived/corpus.sqlite --for 2h   # a window, then stop
 uv run python -m rlm_local.cli mine pause     # stop after the item in flight
 uv run python -m rlm_local.cli ask "…" --corpus-root /srv/corpus \
-    --corpus-index ~/rlm-derived/corpus.sqlite     # corpus_find/read/… in a cell
+    --corpus-index ~/rlm-derived/corpus.sqlite     # corpus_find/read/search/… in a cell
 
 # The read-only proof. A marker scan CANNOT clear this corpus: it contains
 # future-dated files, so "newer than the marker" is true forever. Compare two
@@ -153,11 +157,20 @@ uv run python -m rlm_local.cli corpus digest --corpus-root /srv/corpus \
     --compare /tmp/before.json
 ```
 
+`rlm ask` with a corpus hands the model `corpus_find`, `corpus_list`,
+`corpus_stat`, `corpus_read`, `corpus_count`, `corpus_search` and
+`corpus_coverage`, and **refuses a submission from a run that called none of
+them** — see `docs/20260914-2135-corpus-live-runs-and-the-unsearched-nudge.md`.
+That guard is evidence-based (the parent serves every helper request), so a live
+run whose answer looks ungrounded is checked against `corpus_calls`, not against
+the model's prose.
+
 `-k "not slow and not load"` is **wrong**: `-k` matches a substring of the node
 id, so it also drops ~20 tests that merely mention "load" in their name
 (`test_ingest_loads_file`, the upload-cap tests) and reports them as "deselected".
 Use `-m`. (Measured on 2026-09-11: `-m` 744 passed / 12 deselected vs `-k` 724 /
-32.)
+32. The suite has grown since: measured 2026-09-14, `-m "not slow and not load"`
+over `tests/` is **1179 passed, 7 skipped, 12 deselected** in ~7 min.)
 
 ## 3. Environment traps (all of these have bitten this repo)
 
@@ -179,6 +192,10 @@ Use `-m`. (Measured on 2026-09-11: `-m` 744 passed / 12 deselected vs `-k` 724 /
   Set-Content -Encoding utf8` mangles non-ASCII (U+FFFD plus a BOM). Use the
   file-editing tools; the doc linter catches the damage after the fact.
 - **Scratch roots** are `.tmp_*/`, gitignored. Do not leave scratch anywhere else.
+  One scratch root from a permission probe (`rt_<pid>/`) cannot be deleted from
+  inside this environment at all, so it is gitignored too; the removal
+  instruction is written beside it in `.gitignore`. If `git status` reports an
+  unreadable *directory* instead of an untracked file, that is this case.
 - **`git push` needs an escalated sandbox** in this environment: MSYS `ssh`
   cannot create its signal pipe under the default sandbox (`WinError 5`). The
   denial is expected; retry the same command once with `sandbox_permissions`.

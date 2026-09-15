@@ -887,17 +887,30 @@ Each turn follows this exact sequence:
 7. **Termination checked.** If `result.final_answer is not None`, the loop breaks.
    Note `is not None`, never truthiness: an empty string is a *submission*.
 
-8. **Empty submission nudged (R6).** If the submission is empty or whitespace
+8. **Unsearched corpus submission nudged (RO4).** When the run has a corpus
+   bridge and the sandbox has served **no** `corpus_*` helper request,
+   `NUDGE_CORPUS_UNSEARCHED` is appended and the submission is refused — the
+   turn restarts. This nudge is *evidence*, not a guess: the parent process
+   serves every helper request, so `REPLSandbox.corpus_calls`
+   (`src/rlm_local/repl.py`) is a fact the harness owns, counted for every
+   corpus request it answers, successful or not. `context` in a corpus run is a
+   placeholder, so a submission with zero helper calls is a claim about a
+   corpus the model never opened. The third live run did exactly that — one
+   `print(len(context))`, then "not mentioned in the corpus" — and it is the
+   reason this step exists. A run without a corpus is unaffected, and one
+   helper call of any kind (even a failed search) satisfies it.
+
+9. **Empty submission nudged (R6).** If the submission is empty or whitespace
    only, `NUDGE_EMPTY_ANSWER` is appended and the turn restarts, counted against
    `max_consecutive_nudges`. After that budget is exhausted the loop breaks into
    forced finalization. Before R6 an empty submission silently continued the
    loop (the truthiness check read `""` as "not final"), wasting turns with no
    explanation.
 
-9. **Output formatted.** The REPL stdout/stderr is converted to a templated
-   `"REPL output:"` message and appended.
+10. **Output formatted.** The REPL stdout/stderr is converted to a templated
+    `"REPL output:"` message and appended.
 
-10. **Error budget checked.** If `consecutive_errors > max_consecutive_errors`,
+11. **Error budget checked.** If `consecutive_errors > max_consecutive_errors`,
     the loop breaks into forced finalization.
 
 ### 8.5 Termination Paths
@@ -917,8 +930,12 @@ The loop terminates by one of five mechanisms, in priority order:
 4. **Error budget exhaustion.** `max_consecutive_errors` exceeded. Triggers
    forced finalization.
 
-5. **Empty-submission nudge exhaustion.** Repeated empty submissions past
-   `max_consecutive_nudges`. Triggers forced finalization.
+5. **Nudge exhaustion.** Repeated empty submissions, or repeated submissions
+   from a corpus run that has not called a single `corpus_*` helper, past
+   `max_consecutive_nudges`. Triggers forced finalization. Each nudged
+   submission restarts the turn, so `NUDGE_EMPTY_ANSWER` and
+   `NUDGE_CORPUS_UNSEARCHED` each carry their own counter and the same bound
+   (`max_consecutive_nudges`); a model that ignores both still terminates.
 
 ### 8.6 Forced Finalization
 

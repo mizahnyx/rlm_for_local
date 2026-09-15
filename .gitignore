@@ -32,3 +32,10 @@ logs/trajectories/
 .tmp_*/
 .tmp_pytest/
 .tmp_rt/
+
+# Permission-probe roots: a directory created with a restrictive mode that this
+# session cannot delete (the environment's ACL broker denies the child — see
+# AGENTS.md §3), which `git status` therefore reports as an unreadable directory
+# rather than an untracked one. Ignored so it stops polluting the tree; remove it
+# by hand from an elevated shell.
+rt_*/

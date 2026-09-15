@@ -756,6 +756,10 @@ class REPLSandbox:
         # Set as an attribute after construction (like `_kernel_bridge`) because
         # the bridge is opened by the caller, not by the sandbox.
         self._corpus_bridge: Any = None
+        #: How many corpus helper requests this sandbox has served. The root loop
+        #: reads it to tell "answered" from "never looked" — a fact the harness
+        #: owns, rather than something it has to infer from the model's prose.
+        self.corpus_calls = 0
         # R4 protocol state
         self._cell_seq = 0
         self._init_payload: dict | None = None
@@ -1043,6 +1047,10 @@ class REPLSandbox:
         traceback in the model's context instead of an answer. Every failure mode
         here is reported as text, including the ones that should be impossible.
         """
+        # Counted here, before dispatch, so a call that fails still counts as a
+        # call: the fact the root loop needs is "did the model look at the
+        # corpus at all", not "did its look succeed".
+        self.corpus_calls += 1
         bridge = self._corpus_bridge
         try:
             if msg_type == "corpus_find":

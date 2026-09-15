@@ -371,6 +371,162 @@ class TestAnswerFinalizationGuards:
         assert nudges >= 1
 
 
+class TestCorpusUnsearchedNudge:
+    """A corpus run that never touched the corpus is nudged, not accepted.
+
+    Live run 3 answered "not mentioned in the corpus" after a single
+    `print(len(context))`: no `corpus_search`, no `corpus_read`, nothing. The
+    harness served every helper request, so it knows the difference between
+    "searched and found nothing" and "never looked" — and only the second one is
+    a lie about the corpus.
+    """
+
+    @pytest.fixture
+    def corpus_bridge(self, tmp_path: Path):
+        from rlm_kernel.corpus import CorpusBridge, CorpusIndex
+        from rlm_kernel.mounts import LocalTreeMount
+
+        root = tmp_path / "corpus"
+        (root / "notes").mkdir(parents=True)
+        (root / "notes" / "song.txt").write_text("Cuicani sang it first.\n",
+                                                 encoding="utf-8")
+        index_path = tmp_path / "derived" / "corpus.sqlite"
+        index_path.parent.mkdir()
+        idx = CorpusIndex.open_for(root, index_path)
+        idx.build(LocalTreeMount(root))
+        b = CorpusBridge(mount=LocalTreeMount(root), index=idx)
+        yield b
+        b.close()
+
+    def test_a_submission_with_no_helper_call_is_refused_once(
+        self, tiny_cfg, corpus_bridge,
+    ) -> None:
+        from rlm_local.templates import NUDGE_CORPUS_UNSEARCHED
+
+        backend = StubBackend(responses=[
+            # Turn 0 — the live-run-3 shape: submission with nothing behind it.
+            "\n".join([
+                "I checked the context.",
+                "```repl",
+                "print(len(context))",
+                "answer['content'] = 'not mentioned in the corpus'",
+                "answer['ready'] = True",
+                "```",
+            ]),
+            # Turn 1 — a real search, then the answer.
+            "\n".join([
+                "```repl",
+                "hits = corpus_search('Cuicani')",
+                "print(hits)",
+                "answer['content'] = 'found it'",
+                "answer['ready'] = True",
+                "```",
+            ]),
+        ])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            answer = loop.run("Who is Cuicani?", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert answer == "found it"
+        assert backend.count_appended(NUDGE_CORPUS_UNSEARCHED) == 1
+
+    def test_an_unsupported_claim_is_not_accepted_the_first_time(
+        self, tiny_cfg, corpus_bridge,
+    ) -> None:
+        """The unsearched answer must not become the run's final answer."""
+        unsearched = "\n".join([
+            "```repl",
+            "answer['content'] = 'nothing here'",
+            "answer['ready'] = True",
+            "```",
+        ])
+        searched = "\n".join([
+            "```repl",
+            "print(corpus_find('song'))",
+            "answer['content'] = 'the searched answer'",
+            "answer['ready'] = True",
+            "```",
+        ])
+        backend = StubBackend(responses=[unsearched, searched])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            answer = loop.run("Question", "stub context")
+        finally:
+            loop.shutdown()
+        assert answer == "the searched answer"
+
+    def test_a_search_before_submitting_is_accepted_without_a_nudge(
+        self, tiny_cfg, corpus_bridge,
+    ) -> None:
+        """The nudge is evidence-based: one helper call and it never fires."""
+        from rlm_local.templates import NUDGE_CORPUS_UNSEARCHED
+
+        backend = StubBackend(responses=[
+            "\n".join([
+                "```repl",
+                "print(corpus_coverage())",
+                "answer['content'] = 'answered after looking'",
+                "answer['ready'] = True",
+                "```",
+            ]),
+        ])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            answer = loop.run("Question", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert answer == "answered after looking"
+        assert backend.count_appended(NUDGE_CORPUS_UNSEARCHED) == 0
+        # One model call means the first submission was the answer: no retry.
+        assert len(backend.calls) == 1
+
+    def test_without_a_corpus_the_nudge_does_not_exist(
+        self, tiny_cfg,
+    ) -> None:
+        """A plain (non-corpus) run must not be told to search a corpus."""
+        from rlm_local.templates import NUDGE_CORPUS_UNSEARCHED
+
+        backend = StubBackend(responses=[
+            "```repl\nanswer['content'] = 'no corpus here'\nanswer['ready'] = True\n```",
+        ])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None)
+        try:
+            answer = loop.run("Question", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert answer == "no corpus here"
+        assert backend.count_appended(NUDGE_CORPUS_UNSEARCHED) == 0
+
+    def test_the_nudge_budget_is_bounded(self, tiny_cfg, corpus_bridge) -> None:
+        """A model that ignores the nudge forever must still terminate."""
+        from rlm_local.templates import NUDGE_CORPUS_UNSEARCHED
+
+        backend = StubBackend(responses=[
+            "```repl\nanswer['content'] = 'still not looking'\nanswer['ready'] = True\n```",
+        ] * 50 + ["FINAL: gave up"])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            answer = loop.run("Question", "stub context")
+        finally:
+            loop.shutdown()
+
+        nudges = backend.count_appended(NUDGE_CORPUS_UNSEARCHED)
+        assert 0 < nudges <= tiny_cfg.max_consecutive_nudges, (
+            f"{nudges} corpus nudges exceeds the budget "
+            f"{tiny_cfg.max_consecutive_nudges}"
+        )
+        assert answer.strip() != ""
+        assert len(backend.calls) <= tiny_cfg.max_turns + 2
+
+
 class TestStderrSelfCorrectionWiring:
     """R5 — §5.6 stage 4 must actually run: a traceback must engage the
     consecutive-error budget and hand the model a correction nudge."""

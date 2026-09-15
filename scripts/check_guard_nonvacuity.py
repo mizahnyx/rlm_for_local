@@ -1049,7 +1049,7 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         "RO4 a clobbered corpus verb stops being repaired",
         "src/rlm_local/repl.py",
         "                       'corpus_find', 'corpus_list', 'corpus_stat', 'corpus_read',\n"
-        "                       'corpus_count'):",
+        "                       'corpus_count', 'corpus_search', 'corpus_coverage'):",
         "                       'corpus_find'):",
         [
             "tests/test_corpus_repl.py::TestWorkerDefinesTheCorpusVerbs"
@@ -1622,6 +1622,56 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         [
             "tests/rlm_kernel/test_read_address.py::TestAddressParsing"
             "::test_an_unindexed_address_is_refused_not_misread",
+        ],
+    ),
+    # ── The unsearched-submission nudge (RO4, live run 3) ─────────────────
+    # Live run 3 submitted "not mentioned in the corpus" after a single
+    # `print(len(context))`. The nudge is driven by the fact that the parent
+    # process serves every corpus helper request, so the counter and the nudge
+    # both have to be real for the guard to mean anything.
+    (
+        "RO4 the sandbox stops counting served corpus calls",
+        "src/rlm_local/repl.py",
+        "        self.corpus_calls += 1\n        bridge = self._corpus_bridge",
+        "        bridge = self._corpus_bridge",
+        [
+            "tests/test_corpus_repl.py::TestTheSandboxCountsCorpusCalls"
+            "::test_every_served_verb_counts[corpus_search]",
+            "tests/test_corpus_repl.py::TestTheSandboxCountsCorpusCalls"
+            "::test_calls_accumulate_across_verb_kinds",
+            "tests/test_root_loop_integration.py::TestCorpusUnsearchedNudge"
+            "::test_a_search_before_submitting_is_accepted_without_a_nudge",
+        ],
+    ),
+    (
+        "RO4 an unsearched submission stops being nudged",
+        "src/rlm_local/root_loop.py",
+        "                    if (self._corpus_bridge is not None\n"
+        "                            and self._repl is not None\n"
+        "                            and not self._repl.corpus_calls):",
+        "                    if (False\n"
+        "                            and self._repl is not None\n"
+        "                            and not self._repl.corpus_calls):",
+        [
+            "tests/test_root_loop_integration.py::TestCorpusUnsearchedNudge"
+            "::test_a_submission_with_no_helper_call_is_refused_once",
+            "tests/test_root_loop_integration.py::TestCorpusUnsearchedNudge"
+            "::test_an_unsupported_claim_is_not_accepted_the_first_time",
+        ],
+    ),
+    (
+        "RO4 the unsearched submission is nudged but the turn does not restart",
+        "src/rlm_local/root_loop.py",
+        "                        self._logger.log_root_message(\"user\",\n"
+        "                                                      NUDGE_CORPUS_UNSEARCHED)\n"
+        "                    continue\n"
+        "                break",
+        "                        self._logger.log_root_message(\"user\",\n"
+        "                                                      NUDGE_CORPUS_UNSEARCHED)\n"
+        "                break",
+        [
+            "tests/test_root_loop_integration.py::TestCorpusUnsearchedNudge"
+            "::test_a_submission_with_no_helper_call_is_refused_once",
         ],
     ),
 ]

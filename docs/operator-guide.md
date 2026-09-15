@@ -513,19 +513,26 @@ rlm corpus search x --corpus-index ~/rlm-derived/corpus.sqlite --coverage
 Search reaches the **words** inside the corpus, not just names. Inside a model
 cell the same capability is `corpus_search(query, k=8)`, alongside
 `corpus_find` (paths, **and members inside listed archives**, reported as
-`container!member`), `corpus_list`, `corpus_stat`, `corpus_read` and
-`corpus_count`.
+`container!member`), `corpus_list`, `corpus_stat`, `corpus_read`,
+`corpus_count` and `corpus_coverage`.
 
 Every hit is an address — `path#L<byte_start>-<byte_end>` — that can be re-read
 **verbatim**: `corpus_read(hit)` or `corpus_read(<address>)` returns exactly that
 passage, which is what makes it a citation rather than a lead. Text that came from
 an extraction is labelled (`derived:pdftotext`), vendored matches are counted and
 can be included with `include_vendored=True`, and `corpus_coverage()` reports how
-much of the corpus is indexed at all ("5,973 sources indexed (0.2% of the
-2,882,822 text files)"), because "no matches" over a partial index is a different
-fact from "no matches" over all of it. A search returning nothing yields a single
-element carrying both the reason and the coverage — the case where a false
-negative would otherwise look like proof of absence.
+much of the corpus is indexed at all. Its output on 2026-09-14 — a live number,
+not a constant:
+
+```
+[coverage: 36,745 sources indexed (1.3% of the 2,882,822 text files;
+ 5,354 documents extracted, 517 awaiting OCR)]
+```
+
+because "no matches" over a partial index is a different fact from "no matches"
+over all of it. A search returning nothing yields a single element carrying both
+the reason and the coverage — the case where a false negative would otherwise
+look like proof of absence.
 
 Inside a cell, `corpus_search` returns a **list of hits**: `len(hits)`, `hits[0]`
 and iteration all behave as a caller expects, and each element is
@@ -533,6 +540,19 @@ and iteration all behave as a caller expects, and each element is
 hard way — the first version returned one formatted string, and the first live run
 saw the model write `len(hits)` and `hits[0]` against it, get a character count and
 the letter `A`, then report "malformed data" and give up.
+
+**A corpus run that never calls a helper is nudged, not accepted.** The parent
+process serves every `corpus_*` request, so it *knows* whether the model looked:
+`rlm ask --corpus-index …` refuses the first submission from a run with zero
+helper calls, appends `NUDGE_CORPUS_UNSEARCHED`, and restarts the turn (at most
+`max_consecutive_nudges` times, then forced finalization). A `context` in a
+corpus run is a placeholder, so "not mentioned in the corpus" delivered after one
+`print(len(context))` is a claim about a corpus nobody opened — which is what the
+third live run did, and what this guard is for. One helper call of any kind
+clears it, including a search that finds nothing or raises: the guard asks "did
+it look", not "did it win". When it fires, the trajectory JSONL carries
+`{"event": "guardrail", "guardrail": "corpus_unsearched"}`, so an operator can
+tell a nudged run from an unlooked-at one without reading the transcript.
 
 `--count-only` prints counts and coverage and no path or fragment — the form that
 is safe to paste anywhere.

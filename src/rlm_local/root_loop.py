@@ -22,6 +22,7 @@ from rlm_local.templates import (
     FINALIZATION_FAILED,
     FORCED_FINALIZATION_PROMPT,
     NO_ANSWER_PRODUCED,
+    NUDGE_CORPUS_UNSEARCHED,
     NUDGE_EMPTY_ANSWER,
     REPL_BLOCK_LABEL,
     REPL_RESULT_TEMPLATE,
@@ -187,6 +188,9 @@ class RootLoop:
         # over, so a model stuck in a submit-empty loop cannot burn the turn
         # budget in silence.
         empty_answer_nudges = 0
+        # A corpus run's submission only means something if the corpus was
+        # actually searched; counted separately from empty-submission nudges.
+        corpus_nudges = 0
 
         for turn in range(max_turns):
             display_turn = turn + 1
@@ -246,6 +250,7 @@ class RootLoop:
 
             stderr_nudge: str | None = None
             empty_submission = False
+            corpus_unsearched = False
 
             for bi, block in enumerate(result.blocks):
                 # Static read of the block: does it *declare* a submission, and
@@ -295,6 +300,28 @@ class RootLoop:
                                 f"nudges={empty_answer_nudges}/{cfg.max_consecutive_nudges}",
                             )
                         break
+                    # A corpus run that never touched the corpus cannot have
+                    # answered a question about it, and the harness *knows*
+                    # whether it did: the parent sees every helper request. The
+                    # third live run submitted "not mentioned in the corpus" after
+                    # a single `print(len(context))` — no search, no read. So this
+                    # is a nudge driven by evidence, not by hope. The flag is
+                    # handled with `empty_submission` after the block loop, for the
+                    # same reason: the response declared itself ready, so nothing
+                    # after this block should still execute.
+                    if (self._corpus_bridge is not None
+                            and self._repl is not None
+                            and not self._repl.corpus_calls):
+                        corpus_unsearched = True
+                        corpus_nudges += 1
+                        if self._logger:
+                            self._logger.log_guardrail(
+                                display_turn, "corpus_unsearched",
+                                f"block={bi + 1} submission with no corpus helper "
+                                f"call (nudges={corpus_nudges}/"
+                                f"{cfg.max_consecutive_nudges})",
+                            )
+                        break
                     final_answer = repl_result.final_answer
                     break
 
@@ -325,6 +352,20 @@ class RootLoop:
                         self._logger.log_root_message("user", NUDGE_EMPTY_ANSWER)
                     continue
                 # Nudge budget exhausted — fall through to forced finalization.
+                break
+
+            # RO4: the same treatment for a corpus run that submitted without ever
+            # asking the corpus anything. The model is told to look, and the turn
+            # is spent doing it; once the budget is exhausted the loop falls
+            # through to forced finalization rather than spinning.
+            if corpus_unsearched:
+                if corpus_nudges <= cfg.max_consecutive_nudges:
+                    messages.append({"role": "user",
+                                     "content": NUDGE_CORPUS_UNSEARCHED})
+                    if self._logger:
+                        self._logger.log_root_message("user",
+                                                      NUDGE_CORPUS_UNSEARCHED)
+                    continue
                 break
 
             # R5: hand the model the traceback-derived correction nudge.

@@ -67,6 +67,19 @@ NUDGE_STDERR_ERROR = (
     "Read the traceback above, fix the cause, and emit exactly one ```repl block."
 )
 
+# Raised when a corpus run tries to submit without having called a single corpus
+# helper. The harness knows this for a fact — the parent process serves every
+# helper request — so the nudge is evidence, not a guess. The third live run
+# answered "not mentioned in the corpus" after one `print(len(context))`, which
+# is how that looked from the outside.
+NUDGE_CORPUS_UNSEARCHED = (
+    "You have not searched the corpus, so you cannot have answered a question "
+    "about it — `context` is a placeholder, not the data. Emit exactly one "
+    "```repl block that calls corpus_search(\"<the key terms of the question>\") "
+    "and prints the hits, then read the best hit with corpus_read before you "
+    "submit. If the search finds nothing, call corpus_coverage() and say so."
+)
+
 # ---------------------------------------------------------------------------
 # Sub-call budget / warning messages (§5.4)
 # ---------------------------------------------------------------------------

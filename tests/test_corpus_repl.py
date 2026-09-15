@@ -198,6 +198,79 @@ class TestParentDispatchesCorpusVerbs:
         assert "unsupported corpus helper" in sock.frames[-1]["result"]
 
 
+class TestTheSandboxCountsCorpusCalls:
+    """`corpus_calls` is the evidence the root loop nudges on.
+
+    The third live run submitted "not mentioned in the corpus" after a single
+    `print(len(context))` — no search, no read, no helper call of any kind. The
+    parent process serves every helper request, so "did it look?" is a fact the
+    harness owns rather than something it has to guess from the model's prose.
+    These tests pin the fact to the mechanism.
+    """
+
+    def _sandbox_with(self, bridge) -> REPLSandbox:
+        repl = REPLSandbox()
+        repl._worker_sock = FakeWorkerSock()  # type: ignore[assignment]
+        repl._corpus_bridge = bridge
+        return repl
+
+    def test_a_fresh_sandbox_has_not_looked(self) -> None:
+        assert REPLSandbox().corpus_calls == 0
+
+    @pytest.mark.parametrize("msg_type,msg", [
+        ("corpus_find", {"query": "budget"}),
+        ("corpus_list", {"rel": ""}),
+        ("corpus_stat", {"rel": "x"}),
+        ("corpus_read", {"rel": "x"}),
+        ("corpus_count", {}),
+        ("corpus_coverage", {}),
+        ("corpus_search", {"query": "budget"}),
+    ])
+    def test_every_served_verb_counts(self, msg_type: str, msg: dict) -> None:
+        repl = self._sandbox_with(RecordingBridge())
+        repl._handle_request(msg_type, msg)
+        assert repl.corpus_calls == 1, f"{msg_type} was served but not counted"
+
+    def test_a_failed_call_still_counts_as_having_looked(self) -> None:
+        """The nudge asks "did the model look at the corpus", not "did it win".
+
+        A search that raises is still a search: the model read the corpus and
+        learned something from the failure. Nudging it to search *again* would
+        restate an instruction it already followed.
+        """
+        class Exploding(RecordingBridge):
+            def handle_search(self, query, k=8, include_vendored=False):  # type: ignore[override]
+                raise RuntimeError("index is busy")
+
+        repl = self._sandbox_with(Exploding())
+        repl._handle_request("corpus_search", {"query": "x"})
+        assert repl.corpus_calls == 1
+
+    def test_even_a_typoed_verb_counts_as_an_attempt(self) -> None:
+        """`corpus_teleport` is not data, but the model *tried* to reach the corpus.
+
+        Counting attempts rather than successes is deliberate: any request the
+        parent answers puts a harness-written error back into the cell, which is
+        feedback the model can act on. The nudge exists for the run that produced
+        no corpus request at all — where there is nothing to act on.
+        """
+        repl = self._sandbox_with(RecordingBridge())
+        repl._handle_request("corpus_teleport", {})
+        assert repl.corpus_calls == 1
+
+    def test_without_a_corpus_nothing_was_looked_at(self) -> None:
+        repl = self._sandbox_with(None)
+        repl._handle_request("corpus_find", {"query": "anything"})
+        assert repl.corpus_calls == 0
+
+    def test_calls_accumulate_across_verb_kinds(self) -> None:
+        repl = self._sandbox_with(RecordingBridge())
+        repl._handle_request("corpus_find", {"query": "a"})
+        repl._handle_request("corpus_read", {"rel": "b"})
+        repl._handle_request("corpus_coverage", {})
+        assert repl.corpus_calls == 3
+
+
 class TestCorpusHelpersInALiveCell:
     def test_a_cell_can_search_and_read_the_corpus(self, corpus: Path, bridge) -> None:
         repl = REPLSandbox(cell_timeout=30.0)
