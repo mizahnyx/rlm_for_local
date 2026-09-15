@@ -102,6 +102,38 @@ The third mutation is the one worth naming: emitting the nudge while letting the
 turn end would look like a fix in the logs and change nothing about the answer.
 It was checked.
 
+## The fix, live (the guard works; the answer still cites nothing)
+
+The same question was run again after the guard was deployed to `lunacode`
+(`d9a3382`, pulled 22:12). `live-ask.sh` appends to one trajectory, so all four
+of its invocations are in the same file; they are labelled `T1`–`T4` in append
+order below, which is *not* the narrative's numbering above (the narrative's
+"run 3", the unsearched one, is `T3` here — the one entry with no helper call).
+
+| Run | Turns | Elapsed | Helper calls in cells | Addresses printed | Answer | Citations in answer |
+|---|---|---|---|---|---|---|
+| T1 | 5 | 632 s | `corpus_search` ×2, `corpus_read` ×1 | 0 | 165 chars | 0 |
+| T2 | 5 | 572 s | `corpus_search` ×2, `corpus_read` ×1 | 0 | 147 chars | 0 |
+| T3 | 2 | 323 s | **none** | 0 | 144 chars | 0 |
+| T4 | 7 | 1517 s | `corpus_search` ×2, `corpus_read` ×3 | 7 | 179 chars | **0** |
+
+`T4` is the one this change was for. It searched, read, and printed seven
+addresses into its own cell output — and no `corpus_unsearched` guardrail fired,
+because it never submitted unsearched. The guard's job is done: the run that
+produced nothing to act on (`T3`) is the run that no longer happens.
+
+The remaining defect is one level up and is **not** fixed here: the final answer
+is 179 characters and cites none of the seven addresses it printed. The harness
+knows the model looked; it cannot from that alone know the answer is *grounded*.
+That is a prompt/contract question — whether a corpus answer must carry its
+citations — and it is the owner's call, not a guard to invent quietly. It is
+recorded as the next step for RO4 rather than patched over.
+
+After `T4` a 12-hour `index_text` window was started on `lunacode`
+(22:40, `--tasks index_text`, pause file `~/rlm-derived/PAUSE-INDEX`), which is
+the only lever that changes what a search *can* find: the queue went from 36,745
+to 37,143 indexed sources in its first two minutes, of 2,882,822 text files.
+
 ## One observation about the mutation harness itself
 
 While running the full table for this change, one entry came back **VACUOUS** —
