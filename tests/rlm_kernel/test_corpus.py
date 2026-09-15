@@ -822,24 +822,36 @@ class TestBridgeContentSearch:
         return CorpusBridge(mount=mount, index=index, cache_root=cache_root)
 
     def test_a_word_is_found_with_its_address(self, searched: CorpusBridge) -> None:
-        out = searched.handle_search("Cuicani")
-        assert "sub/story.txt#L" in out
-        assert "Cuicani sang" in out
+        hits = searched.handle_search("Cuicani")
+        assert isinstance(hits, list), "a list of hits must be a list"
+        assert len(hits) == 1
+        assert "sub/story.txt#L" in hits[0]
+        assert "Cuicani sang" in hits[0]
 
-    def test_the_result_states_its_coverage(self, searched: CorpusBridge) -> None:
-        assert "coverage:" in searched.handle_search("Cuicani")
+    def test_the_result_is_indexable_like_a_list(self, searched: CorpusBridge) -> None:
+        """The shape the first live run assumed and the interface denied it."""
+        hits = searched.handle_search("Cuicani")
+        assert len(hits) >= 1
+        assert hits[0].startswith("sub/story.txt#L")
+        assert hits[:1] == [hits[0]]
 
-    def test_a_missing_word_says_no_matches_and_the_coverage(
+    def test_coverage_is_available_on_its_own(self, searched: CorpusBridge) -> None:
+        assert "coverage:" in searched.handle_coverage()
+
+    def test_a_missing_word_carries_the_coverage_in_its_only_element(
         self, searched: CorpusBridge,
     ) -> None:
-        out = searched.handle_search("helicopter")
-        assert "no text matches" in out
-        assert "coverage:" in out
+        """No hits is the case where a false negative would look like proof."""
+        hits = searched.handle_search("helicopter")
+        assert len(hits) == 1
+        assert "no text matches" in hits[0]
+        assert "coverage:" in hits[0]
 
     def test_derived_text_is_labelled_with_its_engine(
         self, searched: CorpusBridge,
     ) -> None:
-        assert "derived:zip+xml" in searched.handle_search("Godot")
+        hits = searched.handle_search("Godot")
+        assert any("derived:zip+xml" in hit for hit in hits)
 
     def test_a_hit_whose_text_is_gone_says_so_rather_than_pretending(
         self, corpus: Path, index: CorpusIndex, mount: LocalTreeMount,
@@ -853,7 +865,7 @@ class TestBridgeContentSearch:
             engine="zip+xml",
         )
         bridge = CorpusBridge(mount=mount, index=index, cache_root=None)
-        assert "cannot re-read" in bridge.handle_search("missing")
+        assert "cannot re-read" in "\n".join(bridge.handle_search("missing"))
 
     def test_archives_listed_for_search_are_searched_by_find(
         self, corpus: Path, index: CorpusIndex, mount: LocalTreeMount,

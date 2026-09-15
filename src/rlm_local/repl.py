@@ -368,10 +368,21 @@ def _harness_corpus_count(kind=None, under=""):
     return resp.get('result', _MSG['corpus_count_failed'])
 
 def _harness_corpus_search(query, k=8, include_vendored=False):
+    # Returns a LIST of hit strings, not one blob. The first live run had the model
+    # write len(hits), hits[0] and hits[:3] against a returned string, and get the
+    # character count and the letter 'A' — so this shape is the contract.
     _send({"cmd": "corpus_search", "query": query, "k": k,
            "include_vendored": include_vendored, "cell_id": _cell_id})
     resp = _recv()
-    return resp.get('result', _MSG['corpus_search_failed'])
+    result = resp.get('result')
+    if isinstance(result, list):
+        return result
+    return [_MSG['corpus_search_failed']]
+
+def _harness_corpus_coverage():
+    _send({"cmd": "corpus_coverage", "cell_id": _cell_id})
+    resp = _recv()
+    return resp.get('result', _MSG['corpus_count_failed'])
 
 # Inject into globals so exec'd code can use them
 llm_query = _harness_llm_query
@@ -384,6 +395,7 @@ corpus_stat = _harness_corpus_stat
 corpus_read = _harness_corpus_read
 corpus_count = _harness_corpus_count
 corpus_search = _harness_corpus_search
+corpus_coverage = _harness_corpus_coverage
 
 # ── Scaffold namespace ────────────────────────────────────────────────────
 
@@ -500,7 +512,7 @@ def show_vars():
 for _scaffold_name in ('peek', 'grep', 'chunk', 'map_query', 'show_vars',
                        'llm_query', 'llm_query_batched', 'search', 'propose',
                        'corpus_find', 'corpus_list', 'corpus_stat', 'corpus_read',
-                       'corpus_count', 'corpus_search'):
+                       'corpus_count', 'corpus_search', 'corpus_coverage'):
     _SCAFFOLD_ORIGINALS[_scaffold_name] = globals().get(_scaffold_name)
 
 # ── Main loop ─────────────────────────────────────────────────────────────
@@ -954,7 +966,8 @@ class REPLSandbox:
                 _send_msg(self._worker_sock, {"responses": ["Error: cell timed out"] * n})
             elif msg_type in ("subcall", "search", "propose",
                               "corpus_find", "corpus_list", "corpus_stat",
-                              "corpus_read", "corpus_count", "corpus_search"):
+                              "corpus_read", "corpus_count", "corpus_search",
+                              "corpus_coverage"):
                 _send_msg(self._worker_sock, {"response": "Error: cell timed out",
                                               "result": "Error: cell timed out"})
         except OSError:
@@ -1051,6 +1064,8 @@ class REPLSandbox:
                 return bridge.handle_count(
                     kind=msg.get("kind"), under=msg.get("under") or ""
                 )
+            if msg_type == "corpus_coverage":
+                return bridge.handle_coverage()
             if msg_type == "corpus_search":
                 return bridge.handle_search(
                     msg.get("query", ""),

@@ -1538,11 +1538,27 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO4 corpus_search stops reporting its coverage",
         "src/rlm_kernel/corpus.py",
-        "        if note:\n            lines.append(note)\n        return \"\\n\".join(lines)",
-        "        if False:\n            lines.append(note)\n        return \"\\n\".join(lines)",
+        "            note = coverage_note(text_index.coverage())\n"
+        "            if note:\n"
+        "                lines.append(note)",
+        "            note = coverage_note(text_index.coverage())\n"
+        "            if False:\n"
+        "                lines.append(note)",
         [
             "tests/rlm_kernel/test_corpus.py::TestBridgeContentSearch"
-            "::test_the_result_states_its_coverage",
+            "::test_a_missing_word_carries_the_coverage_in_its_only_element",
+        ],
+    ),
+    (
+        "RO4 corpus_search returns one string instead of a list of hits",
+        "src/rlm_local/repl.py",
+        "    result = resp.get('result')\n"
+        "    if isinstance(result, list):\n"
+        "        return result",
+        "    result = resp.get('result')\n"
+        "    if isinstance(result, list):\n"
+        "        return \"\\n\".join(result)",
+        [
             "tests/test_corpus_repl.py::TestCorpusHelpersInALiveCell"
             "::test_a_cell_can_search_the_words_inside_the_corpus",
         ],

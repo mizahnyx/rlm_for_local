@@ -44,7 +44,7 @@ from rlm_kernel.mounts import (
     ReadOnlyViolation,
     assert_derived_outside_corpus,
 )
-from rlm_kernel.textindex import coverage_note
+from rlm_kernel.textindex import ADDRESS_RE, coverage_note
 
 #: Hard bounds. A tool result is read into a small model's context window, so the
 #: caps are part of the interface, not caller politeness: `FIND_LIMIT_MAX` keeps a
@@ -576,9 +576,17 @@ class CorpusBridge:
         return CORPUS_REFUSED.format(rel=rel)
 
     def _read_address(self, address: str) -> str | None:
-        """Read a printed address, or None when it is not one / not indexed."""
-        if "#L" not in (address or ""):
+        """Read an address, wherever it appears in the string given.
+
+        Not anchored on purpose: a hit is printed as `<address>  [labels]`, and a
+        caller that hands back the whole line — which the first live run showed is
+        exactly what a small model does — should get its passage rather than a
+        "no such path" for a filename that contains a space and a bracket.
+        """
+        match = ADDRESS_RE.search(address or "")
+        if match is None:
             return None
+        address = match.group(0)
         try:
             text_index = self.index.text() if self.index is not None else None
         except Exception:  # pragma: no cover - a corpus without the text tables
@@ -670,34 +678,44 @@ class CorpusBridge:
     def handle_search(
         self, query: str, k: int = 8, include_vendored: bool = False,
         derived_only: bool = False,
-    ) -> str:
-        """Search the *words* inside the corpus, with addresses and coverage.
+    ) -> list[str]:
+        """Search the *words* inside the corpus. Returns a **list of hits**.
 
-        Three things this result must carry, and they are the whole reason the
-        text index exists in this shape: the address of every hit so it can be
-        re-read, the label of derived text (an OCR page is not a quote), and how
-        much of the corpus is indexed at all — because "no matches" over a 0.2%
-        index is a different fact from "no matches" over all of it.
+        The list is the contract, and it was learned the hard way. The first
+        version returned one formatted string; the first live run showed the model
+        writing `hits = corpus_search(...)`, then `len(hits)`, `hits[0]`,
+        `hits[:3]` — and getting 1233, `'A'`, `'no'`, because it was indexing into
+        characters. It then called `corpus_read('A')` and reported "malformed
+        data". The harness was right and the interface was wrong: a thing that is a
+        list of hits has to *be* a list, so `len`, indexing and iteration do what a
+        caller expects.
+
+        Each element is `<address>  [labels]\\n    <snippet>`: the address works
+        verbatim in `corpus_read`, derived text is labelled, and vendored matches
+        are named. With no hits the list holds one explanatory line, which also
+        carries the coverage note — the case where a false negative would
+        otherwise look like proof of absence.
         """
         if self.index is None:
-            return CORPUS_NO_INDEX
+            return [CORPUS_NO_INDEX]
         try:
             text_index = self.index.text()
             text_index.ensure()
         except Exception as e:  # pragma: no cover - defensive
-            return CORPUS_READ_ERROR.format(rel="text index", error=e)
+            return [CORPUS_READ_ERROR.format(rel="text index", error=e)]
 
         result = text_index.search(query, k=k, include_vendored=include_vendored,
                                    derived_only=derived_only)
-        coverage = text_index.coverage()
-        note = coverage_note(coverage)
         if not result.hits:
-            lines = [CORPUS_TEXT_NO_MATCHES, note] if note else [CORPUS_TEXT_NO_MATCHES]
+            lines = [CORPUS_TEXT_NO_MATCHES]
             if result.hidden_vendored:
                 lines.append(CORPUS_VENDORED_HIDDEN.format(n=result.hidden_vendored))
-            return "\n".join(lines)
+            note = coverage_note(text_index.coverage())
+            if note:
+                lines.append(note)
+            return ["\n".join(lines)]
 
-        lines = []
+        hits: list[str] = []
         for hit in result.hits:
             try:
                 text = text_index.read(hit, mount=self.mount, cache_root=self.cache_root)
@@ -709,12 +727,31 @@ class CorpusBridge:
             if hit.vendored:
                 labels.append("vendored")
             snippet = " ".join(text.split())[:300]
-            lines.append(f"{hit.address}  [{', '.join(labels)}]\n    {snippet}")
+            hits.append(f"{hit.address}  [{', '.join(labels)}]\n    {snippet}")
         if result.hidden_vendored:
-            lines.append(CORPUS_VENDORED_HIDDEN.format(n=result.hidden_vendored))
+            hits.append(CORPUS_VENDORED_HIDDEN.format(n=result.hidden_vendored))
+        return hits
+
+    def handle_coverage(self) -> str:
+        """One line saying how much of the corpus is indexed.
+
+        A separate helper because hits are a list now: a list cannot also carry a
+        footer without corrupting `len(hits)`, and the number a searcher most needs
+        to hear — "how much of this did you even look at?" — deserves a name.
+        """
+        if self.index is None:
+            return CORPUS_NO_INDEX
+        try:
+            coverage = self.index.text().coverage()
+        except Exception as e:  # pragma: no cover - defensive
+            return CORPUS_READ_ERROR.format(rel="text index", error=e)
+        note = coverage_note(coverage)
         if note:
-            lines.append(note)
-        return "\n".join(lines)
+            return note
+        return (
+            f"[coverage: complete — {coverage['sources_indexed']:,} sources, "
+            f"{coverage['chunks']:,} chunks, {coverage['indexed_bytes']:,} bytes]"
+        )
 
     def _honest(self, text: str) -> str:
         """Prefix a result from an incomplete index with the fact that it is one.

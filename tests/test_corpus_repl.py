@@ -33,6 +33,7 @@ CORPUS_VERBS = (
     "corpus_read",
     "corpus_count",
     "corpus_search",
+    "corpus_coverage",
 )
 
 
@@ -282,7 +283,13 @@ class TestCorpusHelpersInALiveCell:
         repl._corpus_bridge = bridge
         repl.start("no context", MockSubcallMgr())
         try:
-            result = repl.execute("print(corpus_search('Godot'))")
+            result = repl.execute(
+                "hits = corpus_search('Godot')\n"
+                "print(type(hits).__name__, len(hits))\n"
+                "print(hits[0])\n"
+                "print(corpus_coverage())\n"
+            )
+            assert "list 1" in result.stdout, "a list of hits must be a list"
             assert "notes/budget.md#L" in result.stdout
             assert "Godot" in result.stdout
             assert "coverage" in result.stdout
@@ -305,8 +312,9 @@ class TestCorpusHelpersInALiveCell:
         repl.start("no context", MockSubcallMgr())
         try:
             result = repl.execute(
-                "print(corpus_search('Cuicani').splitlines()[0])\n"
-                "print(corpus_read('notes/song.txt'))\n"
+                "hits = corpus_search('Cuicani')\n"
+                "print(len(hits))\n"
+                "print(corpus_read(hits[0]))\n"
             )
             assert "notes/song.txt#L" in result.stdout
             assert "Cuicani sang it first." in result.stdout

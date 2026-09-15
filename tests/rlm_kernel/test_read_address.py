@@ -57,25 +57,35 @@ def wired(corpus: Path, tmp_path: Path) -> CorpusBridge:
 
 
 class TestAddressParsing:
+    def _first_address(self, wired: CorpusBridge, query: str) -> str:
+        """The address exactly as a search prints it: the first token of hit 0."""
+        hits = wired.handle_search(query)
+        assert hits, f"fixture bug: no hits for {query!r}"
+        return hits[0].split()[0]
+
     def test_an_address_round_trips_through_the_index(self, wired: CorpusBridge) -> None:
-        hit_address = wired.handle_search("Cuicani").splitlines()[0].split()[0]
-        assert "#L" in hit_address
-        assert wired.handle_search("Cuicani")  # sanity: there is a hit to use
-        text_index = wired.index.text()
-        chunk = text_index.find_chunk(hit_address)
+        address = self._first_address(wired, "Cuicani")
+        assert "#L" in address
+        chunk = wired.index.text().find_chunk(address)
         assert chunk is not None
         assert chunk.source == "notes/story.txt"
 
     def test_a_file_address_reads_verbatim(self, wired: CorpusBridge) -> None:
         """The exact string a search printed is what corpus_read is given."""
-        address = wired.handle_search("Cuicani").splitlines()[0].split()[0]
+        address = self._first_address(wired, "Cuicani")
         out = wired.handle_read(address)
         assert "Cuicani sang at the festival" in out
         assert address in out, "the read must say which address it answered"
 
+    def test_a_whole_hit_line_also_reads(self, wired: CorpusBridge) -> None:
+        """A model hands back the whole element, labels and snippet included."""
+        hit = wired.handle_search("Cuicani")[0]
+        out = wired.handle_read(hit)
+        assert "Cuicani sang at the festival" in out
+
     def test_a_derived_address_reads_from_the_cache(self, wired: CorpusBridge) -> None:
-        address = wired.handle_search("Godot").splitlines()[0].split()[0]
-        assert "extract_text" not in address, "the address is a source path, not a store"
+        address = self._first_address(wired, "Godot")
+        assert "extract_text" not in address, "the address names the source, not the store"
         out = wired.handle_read(address)
         assert "Godot engine" in out
 

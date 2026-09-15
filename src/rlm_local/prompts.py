@@ -142,12 +142,14 @@ CORPUS_SECTION_HEADER = "The corpus (read-only)"
 CORPUS_SECTION_LINES = (
     "- A large read-only file tree is available: {root}.",
     "- corpus_search(query, k=8) — search the WORDS inside the corpus's files and"
-    " documents. This is the helper for a question about content, and the only one"
-    " that reaches text rather than names. It prints one hit per result as"
-    " `address  [labels]` followed by a snippet; pass that address straight to"
-    " corpus_read (it accepts the `#L…` suffix) to read the whole passage, and"
-    " quote the address in your answer. Derived text (extracted from a PDF, OCR'd"
-    " from a scan) is labelled as derived.",
+    " documents, and the only helper that reaches text rather than names. It"
+    " returns a LIST of hits: use len(hits), hits[0], or iterate. Each element is"
+    " `<address>  [labels]` then a snippet on the next line; pass an element"
+    " straight to corpus_read to read that passage in full, and quote its address"
+    " in your answer. Derived text (extracted from a PDF, OCR'd from a scan) is"
+    " labelled as derived.",
+    "- corpus_coverage() — one line saying how much of the corpus is indexed. Call"
+    " it before concluding that something is absent.",
     "- corpus_find(query, limit=20, kind=None, under=\"\") — search paths by name."
     " It also searches inside archives that have been listed, and reports those"
     " hits as `container!member`.",
