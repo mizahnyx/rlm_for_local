@@ -30,6 +30,11 @@ from rlm_local.templates import (
     TURN_ZERO_SAFEGUARD,
 )
 
+# The address shape, imported from the module that owns the citation grammar
+# rather than re-spelled here: a second copy of `#L\d+-\d+` is how the harness
+# would come to disagree with the corpus about what an address is.
+from rlm_kernel.textindex import ADDRESS_IN_TEXT_RE
+
 
 class RootLoop:
     """Manages one completion(query, context) invocation.
@@ -56,6 +61,11 @@ class RootLoop:
         # separate from the kernel bridge because a corpus run needs no vault:
         # "answer questions about a file tree" is its own capability.
         self._corpus_bridge = corpus_bridge
+        # RO4 provenance telemetry: how many answers a corpus run produced, and
+        # how many of them carried no address. Measured, never enforced — see
+        # `_record_citations` for why the owner's call was to measure first.
+        self.corpus_answers = 0
+        self.corpus_answers_uncited = 0
 
         # Subsystem instances (created fresh per run)
         self._parser: Parser | None = None
@@ -240,6 +250,7 @@ class RootLoop:
             # Handle courtesy FINAL:
             if result.final_answer is not None:
                 final_answer = result.final_answer
+                self._record_citations(display_turn, final_answer)
                 break
 
             # ── Execute blocks in REPL ────────────────────────────────────
@@ -323,6 +334,7 @@ class RootLoop:
                             )
                         break
                     final_answer = repl_result.final_answer
+                    self._record_citations(display_turn, final_answer)
                     break
 
                 # Build templated REPL output message
@@ -404,6 +416,10 @@ class RootLoop:
             except Exception:
                 final_answer = FINALIZATION_FAILED
 
+            # RO4: a forced answer is still an answer, and a corpus run's forced
+            # answer is exactly the one most likely to be uncited.
+            self._record_citations(turn + 1, final_answer)
+
             if self._logger:
                 self._logger.log_end(
                     final_answer if final_answer is not None else "",
@@ -423,6 +439,35 @@ class RootLoop:
         if final_answer is None or final_answer == "":
             return NO_ANSWER_PRODUCED
         return final_answer
+
+    def _record_citations(self, turn: int, answer: str | None) -> None:
+        """Note whether a corpus answer carried the evidence it used (RO4).
+
+        Measured, never enforced, and the distinction is the owner's call
+        (2026-09-14) rather than an oversight: the prompt now requires a
+        `Citations:` line, and the next decision — whether to refuse an answer
+        that cites nothing — is supposed to be taken on evidence. So this counts
+        the answer and writes one `corpus_citation` guardrail event
+        (`answers_with_address=True|False`), which an operator can tally with
+        `grep -c` over the trajectory. A run with no corpus records nothing.
+
+        The check is for *an address somewhere in the answer*, not for the
+        `Citations:` line: an answer that quotes the addresses it read is
+        grounded even if it formats them differently, whereas a line saying
+        `Citations:` with nothing checkable after it is not.
+        """
+        if self._corpus_bridge is None:
+            return
+        text = answer or ""
+        cited = bool(ADDRESS_IN_TEXT_RE.search(text))
+        self.corpus_answers += 1
+        if not cited:
+            self.corpus_answers_uncited += 1
+        if self._logger:
+            self._logger.log_guardrail(
+                turn, "corpus_citation",
+                f"answers_with_address={cited} chars={len(text)}",
+            )
 
     def shutdown(self) -> None:
         """Clean up all resources."""

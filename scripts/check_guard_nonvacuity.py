@@ -21,8 +21,11 @@ Exit code is 0 only when every guard went red as required.
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1222,6 +1225,17 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         "    stamp = 0.0 if entry.kind == \"dir\" else entry.mtime",
         "    stamp = int(round(entry.mtime * 1_000_000_000))",
         [
+            # The first target is the deterministic one: it moves a directory's
+            # mtime and requires the digest not to move, so the mutation is red
+            # every time. The walk-vs-index comparison below is only *usually*
+            # sensitive to this mutation (it depends on whether the two reads saw
+            # the same directory timestamp), which is why the verdict no longer
+            # rests on it — it made the table report VACUOUS about once in four
+            # runs until this target was added.
+            "tests/rlm_kernel/test_corpus.py::TestTheCorpusDigest"
+            "::test_a_directory_mtime_change_does_not_move_the_digest",
+            "tests/rlm_kernel/test_corpus.py::TestTheCorpusDigest"
+            "::test_a_file_mtime_change_moves_the_digest",
             "tests/rlm_kernel/test_corpus.py::TestTheCorpusDigest"
             "::test_a_walk_and_an_index_of_the_same_corpus_agree",
         ],
@@ -1674,6 +1688,39 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_submission_with_no_helper_call_is_refused_once",
         ],
     ),
+    # ── RO4 provenance: the citation requirement, and the measurement of it ──
+    (
+        "RO4 the prompt stops requiring the answer to cite its evidence",
+        "src/rlm_local/prompts.py",
+        "    \"- **Cite your evidence.** Every claim you make about the corpus must carry\"",
+        "    \"Mention your sources only if you feel like it.\"",
+        [
+            "tests/test_corpus_repl.py::TestWorkerDefinesTheCorpusVerbs"
+            "::test_the_section_requires_the_answer_to_cite_its_evidence",
+        ],
+    ),
+    (
+        "RO4 the citation check stops looking at the answer",
+        "src/rlm_local/root_loop.py",
+        "        cited = bool(ADDRESS_IN_TEXT_RE.search(text))",
+        "        cited = True",
+        [
+            "tests/test_root_loop_integration.py::TestCorpusCitationTelemetry"
+            "::test_an_answer_with_no_address_is_recorded_as_uncited",
+            "tests/test_root_loop_integration.py::TestCorpusCitationTelemetry"
+            "::test_the_forced_finalization_answer_is_measured_too",
+        ],
+    ),
+    (
+        "RO4 a forced corpus answer stops being measured",
+        "src/rlm_local/root_loop.py",
+        "            self._record_citations(turn + 1, final_answer)",
+        "            pass",
+        [
+            "tests/test_root_loop_integration.py::TestCorpusCitationTelemetry"
+            "::test_the_forced_finalization_answer_is_measured_too",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
@@ -1688,12 +1735,34 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
 
 
 def run_tests(node_ids: list[str]) -> int:
+    """Run one mutation's named tests, in a process with its own bytecode cache.
+
+    The separate cache is not hygiene, it is correctness. CPython validates a
+    cached `.pyc` against the source's size and its mtime **truncated to whole
+    seconds**, so a mutation that leaves the file the same length and lands in the
+    same second as an earlier compile is imported from the *previous* bytecode and
+    the guard looks vacuous. That is the shape of the 2026-09-14/15 false alarms
+    (roadmap CL5): `R23 the migration does not rewrite the key` shortens
+    `schema_version` to `schema`, and so does the entry before it, and in a full
+    run the two land close enough together for the second run to reuse the first
+    one's bytecode. A per-run cache prefix makes every run compile from the source
+    it was handed.
+    """
+    cache = Path(tempfile.mkdtemp(prefix="rlm-pycache-"))
+    env = dict(os.environ)
+    env["PYTHONPYCACHEPREFIX"] = str(cache)
     cmd = [
         str(PY), "-m", "pytest", *node_ids,
         "-p", "no:cacheprovider", "-q", "--no-header", "-x", "--timeout=180",
     ]
-    proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True)
-    return proc.returncode
+    try:
+        proc = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True,
+                              env=env)
+        return proc.returncode
+    finally:
+        # Best effort: a locked cache directory in the temp area is not worth
+        # failing a run over, and it is outside the repository either way.
+        shutil.rmtree(cache, ignore_errors=True)
 
 
 def main() -> int:
@@ -1725,6 +1794,16 @@ def main() -> int:
         path.write_text(original.replace(old, new, 1), encoding="utf-8")
         try:
             rc = run_tests(nodes)
+            if rc == 0:
+                # A VACUOUS verdict is a claim that a guard does not work, and on
+                # 2026-09-15 this table made that claim about an entry whose
+                # isolated runs are red — twice, in three full runs (roadmap
+                # CL5). A false alarm about a dead guard costs more than a second
+                # test run, and an instrument that cries wolf stops being read,
+                # so a green first result is confirmed once before it is
+                # reported. The confirmation's verdict is the one recorded.
+                print(f"RERUN    {label}: green on the first run; confirming")
+                rc = run_tests(nodes)
         finally:
             path.write_text(original, encoding="utf-8")
 

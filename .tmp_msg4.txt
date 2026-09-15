@@ -1,0 +1,65 @@
+feat: cite your evidence — required in the prompt, measured in the trajectory
+
+Owner call (2026-09-14): require citations in the prompt first, measure, and add
+a refusal only if the requirement does not take. This is the first two thirds.
+
+What was wrong: the live rerun searched twice, read three passages, printed seven
+addresses into its own cell output — and submitted 179 characters citing none of
+them. The only citation instruction was a clause inside the `corpus_search`
+helper's description ("quote its address in your answer"), which is a place a
+model under a turn budget skips.
+
+What changed:
+
+- `CORPUS_SECTION_LINES` now carries the requirement as a standing rule of the
+  run: every claim about the corpus carries the address it came from, in a final
+  `Citations: <path>#L<start>-<end>; …` line, and an answer with no address and
+  no coverage note is named as a guess. The helper bullet keeps its output shape
+  and loses the buried clause.
+- `ADDRESS_IN_TEXT_RE` in `rlm_kernel/textindex.py` is the unanchored form of the
+  citation grammar — one place owns what an address looks like, so the harness
+  cannot drift from the corpus about it.
+- `RootLoop._record_citations` runs at all three points where an answer becomes
+  final (answer dict, courtesy `FINAL:`, forced finalization). It counts
+  (`corpus_answers`, `corpus_answers_uncited`) and writes one `corpus_citation`
+  guardrail event with `answers_with_address=True|False`. It never blocks — that
+  is the owner's call, not an omission: on a partly-indexed corpus "found nothing
+  citable" and "ignored the instruction" are indistinguishable from outside.
+- The check is for an address anywhere in the answer, not for the line's format:
+  an answer that quotes its addresses is grounded even if it lays them out
+  differently, while a `Citations:` heading with nothing checkable after it is
+  not.
+
+Verified: 4 kernel tests on the address shape, a prompt test that the requirement
+is present and spells the address form out, 4 loop tests (uncited recorded,
+cited recorded, no-corpus records nothing, forced answer measured), and 3 new
+mutation entries observed red. Full fast suite 1195 passed / 7 skipped /
+12 deselected; mutation table 134 guards, 0 problems; doc lint 0 problems across
+21 documents.
+
+Two mutation-harness defects found while doing this, both fixed and both recorded
+as roadmap CL5 because they are the reason a guard verdict could be wrong:
+
+- **Stale bytecode hid a mutation.** CPython validates a `.pyc` against the
+  source's size and its mtime truncated to whole seconds, so a mutation that
+  keeps the file the same length and lands in the same second as an earlier
+  compile is imported from the old bytecode and looks vacuous. The R23 entry
+  shortens `schema_version` to `schema` (7 bytes), exactly as the entry before it
+  does — which is why it read VACUOUS in 2 of 3 full runs. Each mutation run now
+  compiles into its own `PYTHONPYCACHEPREFIX`; that entry is red 5/5.
+- **A coin-flip test.** The RO2 directory-timestamp mutation was caught by a
+  walk-vs-index comparison that only usually sees the difference (green about 1
+  run in 4). It is now asserted directly — move a directory's mtime, the digest
+  must not move — plus a control that moves a file's mtime and requires it to
+  move. Red 5/5.
+- The table also confirms a green first result once before reporting it (`RERUN`
+  is printed and the confirmation is the recorded verdict), because an instrument
+  that cries wolf stops being read. `tests/test_guard_nonvacuity.py` (5 tests)
+  pins that behaviour rather than a self-mutation: a table that mutates its own
+  source mid-run is a new hazard, not a new guard.
+
+Unverified, and not claimed: whether a 4B model complies with the citation
+requirement. That is the next measurement, on the live run, and the decision to
+refuse an uncited answer stays open until it exists. Also open from before: the
+read-only digest proof has not been re-run since the mining windows, and the RO2
+sample-of-contents hashing obligation.

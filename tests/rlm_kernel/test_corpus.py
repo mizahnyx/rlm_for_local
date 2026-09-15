@@ -397,6 +397,55 @@ class TestTheCorpusDigest:
         after = digest_of_mount(mount)
         assert compare_digests(before, after).startswith("PROOF")
 
+    def test_a_directory_mtime_change_does_not_move_the_digest(
+        self, corpus: Path, derived: Path, mount: LocalTreeMount,
+    ) -> None:
+        """Directory mtimes are excluded, and that is a decision with evidence.
+
+        Directory mtimes move on their own here: on the real corpus two
+        consecutive reads of the same directory differed by a millisecond, which
+        made a digest that covered them report a breach that never happened. So
+        the digest covers files and zeroes the directory term.
+
+        This is asserted directly, by moving a directory's mtime and requiring the
+        digest not to move, rather than by comparing a walk against an index
+        build: that comparison is only *usually* sensitive to the mutation that
+        puts directory mtimes back (it depends on whether the two reads happened
+        to see the same timestamp), and a guard whose verdict is a coin flip is
+        not a guard.
+        """
+        from rlm_kernel.corpus import digest_of_mount
+
+        notes = corpus / "sub"
+        assert notes.is_dir(), "fixture bug: no directory to move"
+        before = digest_of_mount(mount)
+
+        stat = os.stat(notes)
+        os.utime(notes, (stat.st_atime, stat.st_mtime - 3600))
+        assert os.stat(notes).st_mtime != stat.st_mtime, "fixture bug: mtime unmoved"
+
+        after = digest_of_mount(mount)
+        assert before["digest"] == after["digest"]
+
+    def test_a_file_mtime_change_moves_the_digest(
+        self, corpus: Path, derived: Path, mount: LocalTreeMount,
+    ) -> None:
+        """The control for the test above: the digest *can* see an mtime move.
+
+        Without this, a digest that covered nothing at all would satisfy "a
+        directory mtime change does not move it".
+        """
+        from rlm_kernel.corpus import digest_of_mount
+
+        readme = corpus / "readme.md"
+        before = digest_of_mount(mount)
+
+        stat = os.stat(readme)
+        os.utime(readme, (stat.st_atime, stat.st_mtime - 3600))
+
+        after = digest_of_mount(mount)
+        assert before["digest"] != after["digest"]
+
     def test_a_changed_size_is_caught(
         self, corpus: Path, derived: Path, mount: LocalTreeMount,
     ) -> None:

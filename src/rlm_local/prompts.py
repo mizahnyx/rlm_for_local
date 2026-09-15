@@ -145,9 +145,15 @@ CORPUS_SECTION_LINES = (
     " documents, and the only helper that reaches text rather than names. It"
     " returns a LIST of hits: use len(hits), hits[0], or iterate. Each element is"
     " `<address>  [labels]` then a snippet on the next line; pass an element"
-    " straight to corpus_read to read that passage in full, and quote its address"
-    " in your answer. Derived text (extracted from a PDF, OCR'd from a scan) is"
-    " labelled as derived.",
+    " straight to corpus_read to read that passage in full. Derived text"
+    " (extracted from a PDF, OCR'd from a scan) is labelled as derived.",
+    "- **Cite your evidence.** Every claim you make about the corpus must carry"
+    " the address it came from, in a final line of your answer:"
+    " `Citations: <path>#L<start>-<end>; <path>#L<start>-<end>`. An address is the"
+    " one form that can be checked — quote the ones you read, not the ones you"
+    " searched for. If the corpus does not contain the answer, say that instead"
+    " and give corpus_coverage(), because an answer with no address and no"
+    " coverage note is a guess wearing the corpus's name.",
     "- corpus_coverage() — one line saying how much of the corpus is indexed. Call"
     " it before concluding that something is absent.",
     "- corpus_find(query, limit=20, kind=None, under=\"\") — search paths by name."

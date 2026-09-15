@@ -138,18 +138,32 @@ to 37,143 indexed sources in its first two minutes, of 2,882,822 text files.
 
 While running the full table for this change, one entry came back **VACUOUS** —
 `R23 the migration does not rewrite the key` — and the same entry is **red** in
-isolation: three isolated runs, and the full run immediately afterwards, all
-reported red, and the mutation applied by hand makes both of its named tests fail
-with an unambiguous assertion. One other entry was reported as *target not found*
-because the worker's scaffold list had gained two verbs in an earlier commit; its
-target text is updated and it goes red again.
+isolation. A later full run reported a second entry VACUOUS
+(`RO2 the digest starts covering directory timestamps`), and repeating that one
+in isolation showed a green verdict in roughly one run in four. One other entry
+was reported as *target not found* because the worker's scaffold list had gained
+two verbs in an earlier commit; its target text is updated and it goes red again.
 
-The VACUOUS reading is therefore not reproducible and is recorded as such rather
-than explained away: see `CL5` in the roadmap. The operational consequence is
-worth stating, because this project's whole discipline rests on the table — a
-VACUOUS verdict from a full run is evidence to **re-run that entry alone**, not
-proof that the guard is dead, and a `target not found` verdict means the code
-moved and the entry has to move with it.
+Both VACUOUS results turned out to have real causes, neither of them in the
+table's own logic, and both are now fixed (roadmap `CL5`):
+
+1. **Stale bytecode made a mutation invisible.** CPython validates a cached
+   `.pyc` against the source's *size* and its *mtime truncated to whole seconds*.
+   The R23 entry shortens `schema_version` to `schema` — exactly 7 bytes, the same
+   shortening as the entry immediately before it — so in a full run the second
+   entry's test process could import the first entry's bytecode, see none of its
+   own mutation, and pass. Each mutation run now compiles into its own
+   `PYTHONPYCACHEPREFIX`, and that entry went red 5 times out of 5.
+2. **A test whose sensitivity to the mutation was a coin flip.** The RO2 entry
+   puts directory mtimes into the corpus digest; the test that caught it compared
+   a walk against an index build, which only *usually* sees a directory-timestamp
+   difference. It is now asserted directly — move a directory's mtime, require the
+   digest not to move — with a control that moves a *file*'s mtime and requires it
+   to move. That entry is red 5 times out of 5 too.
+
+The table also confirms a green first result once before reporting it (it prints
+`RERUN`), because an instrument that cries wolf stops being read, and a false
+alarm about a dead guard costs more than a second test run.
 
 ## What is still not good enough
 

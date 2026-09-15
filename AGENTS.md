@@ -165,6 +165,14 @@ That guard is evidence-based (the parent serves every helper request), so a live
 run whose answer looks ungrounded is checked against `corpus_calls`, not against
 the model's prose.
 
+The same run's answer must cite its evidence — a final `Citations:` line of
+addresses — and whether it did is **measured, not enforced**: each accepted
+corpus answer writes one `corpus_citation` guardrail event with
+`answers_with_address=True|False`. Read the counts with `grep -c` rather than
+reading the answers, and do not turn this into a refusal without the owner's
+call: on a partly-indexed corpus "found nothing citable" and "ignored the
+instruction" are indistinguishable from the outside.
+
 `-k "not slow and not load"` is **wrong**: `-k` matches a substring of the node
 id, so it also drops ~20 tests that merely mention "load" in their name
 (`test_ingest_loads_file`, the upload-cap tests) and reports them as "deselected".

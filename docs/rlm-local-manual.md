@@ -913,6 +913,19 @@ Each turn follows this exact sequence:
 11. **Error budget checked.** If `consecutive_errors > max_consecutive_errors`,
     the loop breaks into forced finalization.
 
+`_record_citations` runs at each of the three places an answer becomes final (the
+answer-dict submission, a courtesy `FINAL:` line, and the forced-finalization
+answer). In a corpus run it counts the answer (`RootLoop.corpus_answers`,
+`RootLoop.corpus_answers_uncited`) and writes one `corpus_citation` guardrail
+event carrying `answers_with_address=True|False`. It never blocks, and that is a
+decision rather than an omission: the prompt requires a `Citations:` line
+(`CORPUS_SECTION_LINES`, "Cite your evidence"), the owner's call was to require
+it and *measure* first, and refusing an uncited answer is a separate decision
+that would be taken on this evidence. The check is for an address anywhere in the
+answer, not for the line's format — an answer that quotes its addresses is
+grounded even if it lays them out differently, while a `Citations:` heading with
+nothing checkable after it is not.
+
 ### 8.5 Termination Paths
 
 The loop terminates by one of five mechanisms, in priority order:

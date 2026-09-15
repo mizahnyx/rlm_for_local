@@ -371,6 +371,25 @@ class TestAnswerFinalizationGuards:
         assert nudges >= 1
 
 
+@pytest.fixture
+def corpus_bridge(tmp_path: Path):
+    """A real read-only bridge over a tiny corpus, for corpus runs."""
+    from rlm_kernel.corpus import CorpusBridge, CorpusIndex
+    from rlm_kernel.mounts import LocalTreeMount
+
+    root = tmp_path / "corpus"
+    (root / "notes").mkdir(parents=True)
+    (root / "notes" / "song.txt").write_text("Cuicani sang it first.\n",
+                                             encoding="utf-8")
+    index_path = tmp_path / "derived" / "corpus.sqlite"
+    index_path.parent.mkdir()
+    idx = CorpusIndex.open_for(root, index_path)
+    idx.build(LocalTreeMount(root))
+    b = CorpusBridge(mount=LocalTreeMount(root), index=idx)
+    yield b
+    b.close()
+
+
 class TestCorpusUnsearchedNudge:
     """A corpus run that never touched the corpus is nudged, not accepted.
 
@@ -380,23 +399,6 @@ class TestCorpusUnsearchedNudge:
     "searched and found nothing" and "never looked" — and only the second one is
     a lie about the corpus.
     """
-
-    @pytest.fixture
-    def corpus_bridge(self, tmp_path: Path):
-        from rlm_kernel.corpus import CorpusBridge, CorpusIndex
-        from rlm_kernel.mounts import LocalTreeMount
-
-        root = tmp_path / "corpus"
-        (root / "notes").mkdir(parents=True)
-        (root / "notes" / "song.txt").write_text("Cuicani sang it first.\n",
-                                                 encoding="utf-8")
-        index_path = tmp_path / "derived" / "corpus.sqlite"
-        index_path.parent.mkdir()
-        idx = CorpusIndex.open_for(root, index_path)
-        idx.build(LocalTreeMount(root))
-        b = CorpusBridge(mount=LocalTreeMount(root), index=idx)
-        yield b
-        b.close()
 
     def test_a_submission_with_no_helper_call_is_refused_once(
         self, tiny_cfg, corpus_bridge,
@@ -525,6 +527,125 @@ class TestCorpusUnsearchedNudge:
         )
         assert answer.strip() != ""
         assert len(backend.calls) <= tiny_cfg.max_turns + 2
+
+
+class TestCorpusCitationTelemetry:
+    """RO4: whether a corpus answer carried its evidence is *measured*, not assumed.
+
+    Owner call (2026-09-14), after the live rerun read three passages, printed
+    seven addresses, and submitted an answer citing none of them: require
+    citations in the prompt first, measure, and add a refusal only if the
+    requirement does not take. So the harness records the fact and never blocks
+    on it — two counters on the loop, and a `corpus_citation` guardrail event in
+    the trajectory that an operator can count with `grep`.
+    """
+
+    def _logger(self, tmp_path: Path):
+        from rlm_local.logger import TrajectoryLogger
+
+        return TrajectoryLogger(tmp_path / "traj.jsonl")
+
+    def _guardrails(self, logger) -> list[dict]:
+        import json
+
+        events = []
+        for line in logger.path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            ev = json.loads(line)
+            if ev.get("event") == "guardrail":
+                events.append(ev)
+        return events
+
+    def test_an_answer_with_no_address_is_recorded_as_uncited(
+        self, tiny_cfg, corpus_bridge, tmp_path,
+    ) -> None:
+        backend = StubBackend(responses=[
+            "\n".join([
+                "```repl",
+                "print(corpus_search('Cuicani'))",
+                "answer['content'] = 'It is mentioned without quoting anything.'",
+                "answer['ready'] = True",
+                "```",
+            ]),
+        ])
+        logger = self._logger(tmp_path)
+        loop = RootLoop(tiny_cfg, backend, logger=logger, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            loop.run("Who is Cuicani?", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert loop.corpus_answers == 1
+        assert loop.corpus_answers_uncited == 1
+        events = [e for e in self._guardrails(logger)
+                  if e.get("guardrail") == "corpus_citation"]
+        assert len(events) == 1, "one citation record per accepted answer"
+        assert "answers_with_address=False" in events[0]["detail"]
+
+    def test_an_answer_carrying_an_address_is_recorded_as_cited(
+        self, tiny_cfg, corpus_bridge, tmp_path,
+    ) -> None:
+        backend = StubBackend(responses=[
+            "\n".join([
+                "```repl",
+                "print(corpus_search('Cuicani'))",
+                "answer['content'] = ('It is in the notes.\\n"
+                "Citations: notes/song.txt#L0-21')",
+                "answer['ready'] = True",
+                "```",
+            ]),
+        ])
+        logger = self._logger(tmp_path)
+        loop = RootLoop(tiny_cfg, backend, logger=logger, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            answer = loop.run("Who is Cuicani?", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert "#L0-21" in answer
+        assert loop.corpus_answers == 1
+        assert loop.corpus_answers_uncited == 0
+        events = [e for e in self._guardrails(logger)
+                  if e.get("guardrail") == "corpus_citation"]
+        assert "answers_with_address=True" in events[0]["detail"]
+
+    def test_a_run_without_a_corpus_records_nothing(
+        self, tiny_cfg, tmp_path,
+    ) -> None:
+        backend = StubBackend(responses=[
+            "```repl\nanswer['content'] = 'plain answer'\nanswer['ready'] = True\n```",
+        ])
+        logger = self._logger(tmp_path)
+        loop = RootLoop(tiny_cfg, backend, logger=logger, kernel_bridge=None)
+        try:
+            loop.run("Question", "Some context")
+        finally:
+            loop.shutdown()
+
+        assert loop.corpus_answers == 0
+        assert [e for e in self._guardrails(logger)
+                if e.get("guardrail") == "corpus_citation"] == []
+
+    def test_the_forced_finalization_answer_is_measured_too(
+        self, tiny_cfg, corpus_bridge, tmp_path,
+    ) -> None:
+        """A run that never converges still produces an answer worth counting."""
+        backend = StubBackend(responses=[
+            "```repl\nraise ValueError('never converges')\n```",
+        ] * 40 + ["FINAL: best effort with no citation"])
+        logger = self._logger(tmp_path)
+        loop = RootLoop(tiny_cfg, backend, logger=logger, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            loop.run("Question", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert loop.corpus_answers == 1
+        assert loop.corpus_answers_uncited == 1
 
 
 class TestStderrSelfCorrectionWiring:

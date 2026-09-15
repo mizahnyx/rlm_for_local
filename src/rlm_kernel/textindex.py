@@ -64,6 +64,14 @@ ORIGIN_CACHE = "cache"
 #: a small model got wrong the first time it was asked to use a hit.
 ADDRESS_RE = re.compile(r"^(?P<source>.+?)#L(?P<start>\d+)-(?P<end>\d+)$")
 
+#: The same shape, unanchored: does this text cite *any* address? Used to measure
+#: whether a corpus answer carried its evidence (RO4), where the answer is prose
+#: with addresses somewhere inside it rather than an address on its own. It is a
+#: shape check, not a validator — whether a cited address resolves is the index's
+#: business, and answering that here would make an unindexed citation look like a
+#: fabricated one.
+ADDRESS_IN_TEXT_RE = re.compile(r"#L\d+-\d+")
+
 
 def is_vendored(display_path: str) -> bool:
     """Whether a path looks like it arrived with something else.

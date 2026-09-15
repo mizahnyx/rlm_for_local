@@ -22,6 +22,7 @@ import pytest
 
 from rlm_kernel.mounts import LocalTreeMount
 from rlm_kernel.textindex import (
+    ADDRESS_IN_TEXT_RE,
     DEFAULT_CHUNK_BYTES,
     MAX_CHUNK_BYTES,
     ORIGIN_CACHE,
@@ -31,6 +32,35 @@ from rlm_kernel.textindex import (
     format_hits,
     is_vendored,
 )
+
+
+class TestAddressShapeInProse:
+    """The unanchored address pattern: does an answer cite anything at all?
+
+    `ADDRESS_RE` validates a whole string as an address; this one finds an
+    address *inside* prose, which is what measuring a corpus answer's citations
+    needs. It is deliberately a shape check, not a validator: whether the address
+    resolves is the index's business.
+    """
+
+    def test_it_finds_an_address_inside_a_sentence(self) -> None:
+        found = ADDRESS_IN_TEXT_RE.findall(
+            "The notes agree (notes/song.txt#L120-480) and so does the memo."
+        )
+        assert found == ["#L120-480"]
+
+    def test_it_finds_several_addresses(self) -> None:
+        found = ADDRESS_IN_TEXT_RE.findall(
+            "Citations: a.txt#L1-2; b/c.pdf#L300-900"
+        )
+        assert found == ["#L1-2", "#L300-900"]
+
+    def test_a_hash_L_without_offsets_is_not_an_address(self) -> None:
+        assert ADDRESS_IN_TEXT_RE.search("see #L for the line marker") is None
+        assert ADDRESS_IN_TEXT_RE.search("no addresses here at all") is None
+
+    def test_a_bare_offset_range_is_not_an_address(self) -> None:
+        assert ADDRESS_IN_TEXT_RE.search("L120-480") is None
 
 
 @pytest.fixture

@@ -139,6 +139,24 @@ class TestWorkerDefinesTheCorpusVerbs:
         section = corpus_helpers_section("/srv/corpus", has_index=True)
         assert "Never walk the corpus" in section
 
+    def test_the_section_requires_the_answer_to_cite_its_evidence(self) -> None:
+        """RO4, owner call 2026-09-14: the answer must carry the addresses it used.
+
+        The requirement is stated as a standing rule of the run, not as a clause
+        inside a helper's description — the live rerun read three passages,
+        printed seven addresses, and then submitted an answer citing none of
+        them. The address shape is spelled out because a model told only "cite"
+        invents a format, and then the harness cannot tell a citation from a
+        guess.
+        """
+        section = corpus_helpers_section("/srv/corpus", has_index=True)
+        assert "Cite your evidence" in section
+        assert "Citations:" in section
+        assert "#L<start>-<end>" in section
+        # ...and what to do when the corpus does not hold the answer: an answer
+        # with no address and no coverage note is the shape this rule forbids.
+        assert "corpus_coverage()" in section
+
 
 class TestParentDispatchesCorpusVerbs:
     def _sandbox_with(self, bridge) -> tuple[REPLSandbox, FakeWorkerSock]:

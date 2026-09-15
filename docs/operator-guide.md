@@ -554,6 +554,25 @@ it look", not "did it win". When it fires, the trajectory JSONL carries
 `{"event": "guardrail", "guardrail": "corpus_unsearched"}`, so an operator can
 tell a nudged run from an unlooked-at one without reading the transcript.
 
+**Citations are required, and compliance is measured rather than enforced.** The
+corpus section of the system prompt asks for a final line of the form
+`Citations: <path>#L<start>-<end>; …`, and every accepted answer in a corpus run
+is recorded as one `corpus_citation` guardrail event:
+
+```bash
+# How did this run's answers do on provenance? (counts only, no answer text)
+grep -c '"guardrail": "corpus_citation"' "$LOG"                    # answers recorded
+grep -c 'answers_with_address=True' "$LOG"                          # of which cited one
+```
+
+That is the measurement to make before deciding whether an answer with no address
+should be refused; the harness does **not** refuse one today, because "the model
+found nothing citable" and "the model ignored the instruction" look identical
+from the outside on a partly-indexed corpus. The live rerun that motivated the
+requirement read three passages, printed seven addresses, and submitted an answer
+citing none of them — so the requirement exists, the measurement is in place, and
+the enforcement decision is still open.
+
 `--count-only` prints counts and coverage and no path or fragment — the form that
 is safe to paste anywhere.
 
