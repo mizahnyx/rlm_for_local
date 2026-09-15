@@ -1579,6 +1579,35 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_every_advertised_helper_exists_in_the_worker",
         ],
     ),
+    (
+        "RO4 corpus_read stops accepting a printed address",
+        "src/rlm_kernel/corpus.py",
+        "        via_address = self._read_address(rel)\n"
+        "        if via_address is not None:\n"
+        "            return via_address",
+        "        via_address = None\n"
+        "        if via_address is not None:\n"
+        "            return via_address",
+        [
+            "tests/rlm_kernel/test_read_address.py::TestAddressParsing"
+            "::test_a_file_address_reads_verbatim",
+            "tests/rlm_kernel/test_read_address.py::TestAddressParsing"
+            "::test_a_derived_address_reads_from_the_cache",
+        ],
+    ),
+    (
+        "RO4 an address that names no chunk is misread as a file",
+        "src/rlm_kernel/textindex.py",
+        "        if row is None:\n            return None",
+        "        if row is None:\n            return Hit(\n"
+        "                chunk_id=0, source=source, origin=ORIGIN_FILE,\n"
+        "                source_hash=\"\", byte_start=start, byte_end=end,\n"
+        "                derived=False, engine=None, vendored=False, score=0.0)",
+        [
+            "tests/rlm_kernel/test_read_address.py::TestAddressParsing"
+            "::test_an_unindexed_address_is_refused_not_misread",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

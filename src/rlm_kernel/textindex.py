@@ -58,6 +58,12 @@ VENDORED_MARKERS: tuple[str, ...] = (
 ORIGIN_FILE = "file"
 ORIGIN_CACHE = "cache"
 
+#: `path#L<byte_start>-<byte_end>`, the one citable form. Parsed by
+#: `TextIndex.find_chunk`, which is what lets a printed hit be handed straight
+#: back to `corpus_read` instead of being re-parsed by whoever read it — the step
+#: a small model got wrong the first time it was asked to use a hit.
+ADDRESS_RE = re.compile(r"^(?P<source>.+?)#L(?P<start>\d+)-(?P<end>\d+)$")
+
 
 def is_vendored(display_path: str) -> bool:
     """Whether a path looks like it arrived with something else.
@@ -355,6 +361,47 @@ class TextIndex:
                 handle.seek(hit.byte_start)
                 data = handle.read(hit.byte_end - hit.byte_start)
         return data.decode("utf-8", "replace")
+
+    def find_chunk(self, address: str) -> Hit | None:
+        """The chunk an address names, or None if it is not indexed.
+
+        This is what turns a printed hit into something a caller can *use*: the
+        address already says which store holds the text (a file or a derivation
+        cache), so nothing downstream has to guess or re-parse.
+        """
+        match = ADDRESS_RE.match((address or "").strip())
+        if match is None:
+            return None
+        source = match.group("source")
+        start = int(match.group("start"))
+        end = int(match.group("end"))
+        row = self._conn.execute(
+            "SELECT id, source, display, source_hash, origin, byte_start, byte_end,"
+            " derived, engine, vendored, cache_task, cache_key FROM text_chunks"
+            " WHERE display = ? AND byte_start = ? AND byte_end = ? LIMIT 1",
+            (source, start, end),
+        ).fetchone()
+        if row is None:
+            return None
+        return Hit(
+            chunk_id=int(row[0]), source=str(row[2]), origin=str(row[4]),
+            source_hash=str(row[3]), byte_start=int(row[5]), byte_end=int(row[6]),
+            derived=bool(row[7]), engine=row[8], vendored=bool(row[9]),
+            score=0.0, cache_task=row[10], cache_key=row[11],
+        )
+
+    def read_address(
+        self,
+        address: str,
+        *,
+        mount: LocalTreeMount | None = None,
+        cache_root: Path | None = None,
+    ) -> str | None:
+        """Read an address, or None when it names nothing indexed."""
+        hit = self.find_chunk(address)
+        if hit is None:
+            return None
+        return self.read(hit, mount=mount, cache_root=cache_root)
 
     # ── Coverage and stats ────────────────────────────────────────────────
 

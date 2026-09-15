@@ -575,6 +575,25 @@ class CorpusBridge:
             return None
         return CORPUS_REFUSED.format(rel=rel)
 
+    def _read_address(self, address: str) -> str | None:
+        """Read a printed address, or None when it is not one / not indexed."""
+        if "#L" not in (address or ""):
+            return None
+        try:
+            text_index = self.index.text() if self.index is not None else None
+        except Exception:  # pragma: no cover - a corpus without the text tables
+            return None
+        if text_index is None:
+            return None
+        try:
+            text = text_index.read_address(address, mount=self.mount,
+                                           cache_root=self.cache_root)
+        except ReadOnlyViolation as e:
+            return CORPUS_NOT_REREADABLE.format(error=e)
+        if text is None:
+            return CORPUS_NOT_FOUND.format(rel=address)
+        return f"# {address}\n{text}"
+
     def _readable(self, rel: str) -> str | None:
         """The path to hand the mount, or None if nothing there can be opened.
 
@@ -764,11 +783,23 @@ class CorpusBridge:
         )
 
     def handle_read(self, rel: str, max_bytes: int = DEFAULT_READ_BYTES) -> str:
-        """Read a bounded slice of one file. The only content access there is."""
+        """Read a bounded slice of one file — or the chunk an address names.
+
+        Accepting the address form (`path#L<start>-<end>`) matters more than it
+        looks. A search hit prints its address, and the first live run showed a
+        small model handed exactly that string indexing into it character by
+        character (`corpus_read('A')`) rather than using it. Making the printed
+        citation work verbatim removes the parsing step the model got wrong.
+        """
         cap = _bounded(max_bytes, READ_BYTES_MAX)
         refusal = self._refusal(rel)
         if refusal is not None:
             return refusal
+
+        via_address = self._read_address(rel)
+        if via_address is not None:
+            return via_address
+
         target = self._readable(rel)
         if target is None:
             return CORPUS_NOT_FOUND.format(rel=rel)
