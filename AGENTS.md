@@ -166,12 +166,15 @@ run whose answer looks ungrounded is checked against `corpus_calls`, not against
 the model's prose.
 
 The same run's answer must cite its evidence — a final `Citations:` line of
-addresses — and whether it did is **measured, not enforced**: each accepted
-corpus answer writes one `corpus_citation` guardrail event with
-`answers_with_address=True|False`. Read the counts with `grep -c` rather than
-reading the answers, and do not turn this into a refusal without the owner's
-call: on a partly-indexed corpus "found nothing citable" and "ignored the
-instruction" are indistinguishable from the outside.
+addresses — and an answer that cites nothing and names no coverage is **refused
+once** (`NUDGE_CORPUS_UNCITED`, both submission channels), with the escape hatch
+that makes the refusal safe: "the corpus does not contain this, here is the
+coverage" is accepted. The order was measured first, enforced second: the prompt
+requirement alone produced 0 cited answers in 3 live runs of the 4B laptop model
+(`docs/20260915-0655-corpus-citation-compliance-measured.md`). Each accepted
+answer writes one `corpus_citation` guardrail event with
+`answers_with_address=True|False`, and each refusal a `corpus_uncited` event —
+read the counts with `grep -c` rather than reading the answers.
 
 `-k "not slow and not load"` is **wrong**: `-k` matches a substring of the node
 id, so it also drops ~20 tests that merely mention "load" in their name

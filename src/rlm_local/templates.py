@@ -80,6 +80,20 @@ NUDGE_CORPUS_UNSEARCHED = (
     "submit. If the search finds nothing, call corpus_coverage() and say so."
 )
 
+# Raised when a corpus run submits an answer that cites nothing and says nothing
+# about coverage. The prompt-only version of this rule was measured and failed —
+# three consecutive live runs of the 4B laptop model searched, read up to five
+# passages, printed the addresses, and cited none of them — so the requirement is
+# enforced once now, with the escape hatch the instruction already names.
+NUDGE_CORPUS_UNCITED = (
+    "Your answer cites nothing, so it cannot be checked. Submit the same answer "
+    "again with a final `Citations:` line naming the addresses you actually "
+    "read — `Citations: <path>#L<start>-<end>; <path>#L<start>-<end>`. If you "
+    "did not read anything that answers the question, say that instead and quote "
+    "the coverage line from corpus_coverage(): 'the corpus does not contain "
+    "this' is an acceptable answer, an uncited claim about it is not."
+)
+
 # ---------------------------------------------------------------------------
 # Sub-call budget / warning messages (§5.4)
 # ---------------------------------------------------------------------------

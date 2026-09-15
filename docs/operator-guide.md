@@ -554,24 +554,33 @@ it look", not "did it win". When it fires, the trajectory JSONL carries
 `{"event": "guardrail", "guardrail": "corpus_unsearched"}`, so an operator can
 tell a nudged run from an unlooked-at one without reading the transcript.
 
-**Citations are required, and compliance is measured rather than enforced.** The
+**Citations are required, and now enforced once — with an escape hatch.** The
 corpus section of the system prompt asks for a final line of the form
-`Citations: <path>#L<start>-<end>; …`, and every accepted answer in a corpus run
-is recorded as one `corpus_citation` guardrail event:
+`Citations: <path>#L<start>-<end>; …`, and an answer that cites no address and
+names no coverage is refused: `NUDGE_CORPUS_UNCITED` restarts the turn, at most
+`max_consecutive_nudges` times, and then the run falls through to forced
+finalization. The escape hatch is deliberate — *"the corpus does not contain this,
+here is the coverage"* is a truthful answer and is accepted — because at partial
+coverage "nothing citable" is the common case, and a refusal a truthful run cannot
+satisfy is a trap rather than a guard.
+
+The order of events is worth keeping: the requirement was added and **measured**
+first, and the refusal only after the measurement failed. Three consecutive live
+runs of the 4B laptop model searched, read up to five passages, printed addresses,
+and cited nothing — 0 for 3 (`docs/20260915-0655-corpus-citation-compliance-measured.md`).
+
+Every accepted answer is recorded as one `corpus_citation` guardrail event, and
+every refusal as `corpus_uncited`:
 
 ```bash
 # How did this run's answers do on provenance? (counts only, no answer text)
 grep -c '"guardrail": "corpus_citation"' "$LOG"                    # answers recorded
 grep -c 'answers_with_address=True' "$LOG"                          # of which cited one
+grep -c '"guardrail": "corpus_uncited"' "$LOG"                      # refusals
 ```
 
-That is the measurement to make before deciding whether an answer with no address
-should be refused; the harness does **not** refuse one today, because "the model
-found nothing citable" and "the model ignored the instruction" look identical
-from the outside on a partly-indexed corpus. The live rerun that motivated the
-requirement read three passages, printed seven addresses, and submitted an answer
-citing none of them — so the requirement exists, the measurement is in place, and
-the enforcement decision is still open.
+A run with many `corpus_uncited` events and few cited answers is a run the model
+fought; a run with none of either cites everything first time.
 
 `--count-only` prints counts and coverage and no path or fragment — the form that
 is safe to paste anywhere.

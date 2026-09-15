@@ -415,12 +415,15 @@ class TestCorpusUnsearchedNudge:
                 "answer['ready'] = True",
                 "```",
             ]),
-            # Turn 1 — a real search, then the answer.
+            # Turn 1 — a real search, then a cited answer. The citation is what
+            # keeps this test about the *unsearched* guard: without it the answer
+            # is refused for citing nothing and the assertions below would be
+            # measuring the other guard.
             "\n".join([
                 "```repl",
                 "hits = corpus_search('Cuicani')",
                 "print(hits)",
-                "answer['content'] = 'found it'",
+                "answer['content'] = 'found it\\nCitations: notes/song.txt#L0-21'",
                 "answer['ready'] = True",
                 "```",
             ]),
@@ -432,7 +435,7 @@ class TestCorpusUnsearchedNudge:
         finally:
             loop.shutdown()
 
-        assert answer == "found it"
+        assert answer.startswith("found it")
         assert backend.count_appended(NUDGE_CORPUS_UNSEARCHED) == 1
 
     def test_an_unsupported_claim_is_not_accepted_the_first_time(
@@ -448,7 +451,8 @@ class TestCorpusUnsearchedNudge:
         searched = "\n".join([
             "```repl",
             "print(corpus_find('song'))",
-            "answer['content'] = 'the searched answer'",
+            "answer['content'] = 'the searched answer\\n"
+            "Citations: notes/song.txt#L0-21'",
             "answer['ready'] = True",
             "```",
         ])
@@ -459,7 +463,7 @@ class TestCorpusUnsearchedNudge:
             answer = loop.run("Question", "stub context")
         finally:
             loop.shutdown()
-        assert answer == "the searched answer"
+        assert answer.startswith("the searched answer")
 
     def test_a_search_before_submitting_is_accepted_without_a_nudge(
         self, tiny_cfg, corpus_bridge,
@@ -471,7 +475,8 @@ class TestCorpusUnsearchedNudge:
             "\n".join([
                 "```repl",
                 "print(corpus_coverage())",
-                "answer['content'] = 'answered after looking'",
+                "answer['content'] = ('answered after looking\\n"
+                "Citations: notes/song.txt#L0-21')",
                 "answer['ready'] = True",
                 "```",
             ]),
@@ -483,7 +488,7 @@ class TestCorpusUnsearchedNudge:
         finally:
             loop.shutdown()
 
-        assert answer == "answered after looking"
+        assert answer.startswith("answered after looking")
         assert backend.count_appended(NUDGE_CORPUS_UNSEARCHED) == 0
         # One model call means the first submission was the answer: no retry.
         assert len(backend.calls) == 1
@@ -560,11 +565,18 @@ class TestCorpusCitationTelemetry:
     def test_an_answer_with_no_address_is_recorded_as_uncited(
         self, tiny_cfg, corpus_bridge, tmp_path,
     ) -> None:
+        """An *accepted* answer with no address is measured as uncited.
+
+        The answer names coverage, which is the escape hatch: it is accepted even
+        though it cites nothing, and the record says exactly that. The refusal
+        path has its own tests; this one is about the measurement.
+        """
         backend = StubBackend(responses=[
             "\n".join([
                 "```repl",
                 "print(corpus_search('Cuicani'))",
-                "answer['content'] = 'It is mentioned without quoting anything.'",
+                "answer['content'] = ('It is mentioned without quoting anything.\\n"
+                "[coverage: 999 sources indexed (0.0% of the text files)]')",
                 "answer['ready'] = True",
                 "```",
             ]),
@@ -646,6 +658,169 @@ class TestCorpusCitationTelemetry:
 
         assert loop.corpus_answers == 1
         assert loop.corpus_answers_uncited == 1
+
+
+class TestCorpusCitationGuard:
+    """RO4: an answer that cites nothing is refused, unless it names coverage.
+
+    The prompt-only phase was measured and failed: three consecutive live runs of
+    `Qwen3.5-4B-Abliterated` searched, read up to five passages, printed addresses,
+    and cited none of them (0 for 3 —
+    `docs/20260915-0655-corpus-citation-compliance-measured.md`). The owner made
+    the refusal conditional on exactly that, so the guard exists now.
+
+    Its escape hatch is the other half of the instruction, and it is the reason a
+    refusal cannot loop: an answer is acceptable when it cites an address **or**
+    when it says the corpus does not hold the answer and gives its coverage. On a
+    partly-indexed corpus "nothing citable" is the common case, not the exception.
+    """
+
+    def _searched(self, content: str) -> str:
+        """A cell that searches first (so the unsearched guard stays quiet)."""
+        return "\n".join([
+            "```repl",
+            "print(corpus_search('Cuicani'))",
+            content,
+            "```",
+        ])
+
+    def test_an_uncited_answer_is_refused_and_then_a_cited_one_wins(
+        self, tiny_cfg, corpus_bridge,
+    ) -> None:
+        from rlm_local.templates import NUDGE_CORPUS_UNCITED
+
+        backend = StubBackend(responses=[
+            self._searched("answer['content'] = 'A prose answer with no citation.'\n"
+                           "answer['ready'] = True"),
+            self._searched("answer['content'] = 'Cited.\\n"
+                           "Citations: notes/song.txt#L0-21'\n"
+                           "answer['ready'] = True"),
+        ])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            answer = loop.run("Who is Cuicani?", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert "#L0-21" in answer
+        assert backend.count_appended(NUDGE_CORPUS_UNCITED) == 1
+        assert loop.corpus_answers == 1
+        assert loop.corpus_answers_uncited == 0
+
+    def test_an_answer_that_names_coverage_is_accepted_without_a_nudge(
+        self, tiny_cfg, corpus_bridge,
+    ) -> None:
+        """The escape hatch: "I looked, it is not there, here is how much I saw"."""
+        from rlm_local.templates import NUDGE_CORPUS_UNCITED
+
+        backend = StubBackend(responses=[
+            self._searched(
+                "answer['content'] = ('The corpus does not answer this.\\n"
+                "[coverage: 999 sources indexed (0.0% of the text files)]')\n"
+                "answer['ready'] = True"
+            ),
+        ])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            answer = loop.run("Who is Cuicani?", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert "does not answer" in answer
+        assert backend.count_appended(NUDGE_CORPUS_UNCITED) == 0
+        assert loop.corpus_answers == 1
+        assert loop.corpus_answers_uncited == 1  # measured: no address was cited
+        assert len(backend.calls) == 1
+
+    def test_a_courtesy_final_line_is_guarded_too(
+        self, tiny_cfg, corpus_bridge,
+    ) -> None:
+        """`FINAL:` is a submission channel, so both corpus rules apply to it.
+
+        A pure `FINAL:` line with no cell isolates this path: the run has not
+        called a helper, so it is told to look first, and once it has looked an
+        uncited final line is told to cite.
+        """
+        from rlm_local.templates import NUDGE_CORPUS_UNCITED, NUDGE_CORPUS_UNSEARCHED
+
+        backend = StubBackend(responses=[
+            "FINAL: a prose answer with no cell and no citation",
+            self._searched("answer['content'] = 'Cited.\\n"
+                           "Citations: notes/song.txt#L0-21'\n"
+                           "answer['ready'] = True"),
+        ])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            answer = loop.run("Who is Cuicani?", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert "#L0-21" in answer
+        assert backend.count_appended(NUDGE_CORPUS_UNSEARCHED) == 1
+        assert backend.count_appended(NUDGE_CORPUS_UNCITED) == 0
+
+    def test_an_uncited_final_line_after_a_search_is_refused(
+        self, tiny_cfg, corpus_bridge,
+    ) -> None:
+        from rlm_local.templates import NUDGE_CORPUS_UNCITED
+
+        backend = StubBackend(responses=[
+            self._searched("print('probe')"),
+            "FINAL: a prose answer, uncited",
+            self._searched("answer['content'] = 'Cited.\\n"
+                           "Citations: notes/song.txt#L0-21'\n"
+                           "answer['ready'] = True"),
+        ])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            answer = loop.run("Who is Cuicani?", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert "#L0-21" in answer
+        assert backend.count_appended(NUDGE_CORPUS_UNCITED) == 1
+
+    def test_the_refusal_budget_is_bounded(self, tiny_cfg, corpus_bridge) -> None:
+        """A model that never cites anything must still terminate."""
+        from rlm_local.templates import NUDGE_CORPUS_UNCITED
+
+        stubborn = self._searched(
+            "answer['content'] = 'still uncited'\nanswer['ready'] = True")
+        backend = StubBackend(responses=[stubborn] * 50 + ["FINAL: gave up"])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            answer = loop.run("Question", "stub context")
+        finally:
+            loop.shutdown()
+
+        nudges = backend.count_appended(NUDGE_CORPUS_UNCITED)
+        assert 0 < nudges <= tiny_cfg.max_consecutive_nudges
+        assert answer.strip() != ""
+        # Forced finalization accepted the last uncited answer, and it is measured.
+        assert loop.corpus_answers >= 1
+
+    def test_without_a_corpus_an_uncited_answer_is_simply_an_answer(
+        self, tiny_cfg,
+    ) -> None:
+        from rlm_local.templates import NUDGE_CORPUS_UNCITED
+
+        backend = StubBackend(responses=[
+            "```repl\nanswer['content'] = 'no corpus, no citations needed'\n"
+            "answer['ready'] = True\n```",
+        ])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None)
+        try:
+            answer = loop.run("Question", "Some context")
+        finally:
+            loop.shutdown()
+
+        assert answer == "no corpus, no citations needed"
+        assert backend.count_appended(NUDGE_CORPUS_UNCITED) == 0
 
 
 class TestStderrSelfCorrectionWiring:

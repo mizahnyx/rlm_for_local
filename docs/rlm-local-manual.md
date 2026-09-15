@@ -913,18 +913,30 @@ Each turn follows this exact sequence:
 11. **Error budget checked.** If `consecutive_errors > max_consecutive_errors`,
     the loop breaks into forced finalization.
 
-`_record_citations` runs at each of the three places an answer becomes final (the
-answer-dict submission, a courtesy `FINAL:` line, and the forced-finalization
+12. **Uncited answer refused (RO4).** In a corpus run, an answer that cites no
+    address and names no coverage is refused — `NUDGE_CORPUS_UNCITED` is appended
+    and the turn restarts, on its own budget (`corpus_uncited_nudges`, bounded by
+    `max_consecutive_nudges`). `_refuses_uncited` is the rule; the second arm is
+    the escape hatch and the reason it cannot trap a run: *"the corpus does not
+    contain this, here is the coverage"* is a truthful answer and is accepted, and
+    on a partly-indexed corpus it is the common one. The rule is applied on both
+    submission channels — the answer dict and a courtesy `FINAL:` line — and the
+    `FINAL:` channel gets the unsearched rule as well, because a final line is
+    still an answer about a corpus the run may never have opened.
+
+`_record_citations` runs at each of the three places an answer becomes **final**
+(the answer-dict submission, a courtesy `FINAL:` line, and the forced-finalization
 answer). In a corpus run it counts the answer (`RootLoop.corpus_answers`,
 `RootLoop.corpus_answers_uncited`) and writes one `corpus_citation` guardrail
-event carrying `answers_with_address=True|False`. It never blocks, and that is a
-decision rather than an omission: the prompt requires a `Citations:` line
-(`CORPUS_SECTION_LINES`, "Cite your evidence"), the owner's call was to require
-it and *measure* first, and refusing an uncited answer is a separate decision
-that would be taken on this evidence. The check is for an address anywhere in the
-answer, not for the line's format — an answer that quotes its addresses is
-grounded even if it lays them out differently, while a `Citations:` heading with
-nothing checkable after it is not.
+event carrying `answers_with_address=True|False`; refusals are recorded separately
+as `corpus_uncited`. The prompt requires a `Citations:` line
+(`CORPUS_SECTION_LINES`, "Cite your evidence"), and the order matters: it was
+required and *measured* first, and the refusal was added only because three
+consecutive live runs of the 4B laptop model cited nothing at all
+(`docs/20260915-0655-corpus-citation-compliance-measured.md`). The check is for an
+address anywhere in the answer, not for the line's format — an answer that quotes
+its addresses is grounded even if it lays them out differently, while a
+`Citations:` heading with nothing checkable after it is not.
 
 ### 8.5 Termination Paths
 

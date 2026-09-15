@@ -22,6 +22,7 @@ from rlm_local.templates import (
     FINALIZATION_FAILED,
     FORCED_FINALIZATION_PROMPT,
     NO_ANSWER_PRODUCED,
+    NUDGE_CORPUS_UNCITED,
     NUDGE_CORPUS_UNSEARCHED,
     NUDGE_EMPTY_ANSWER,
     REPL_BLOCK_LABEL,
@@ -34,6 +35,13 @@ from rlm_local.templates import (
 # rather than re-spelled here: a second copy of `#L\d+-\d+` is how the harness
 # would come to disagree with the corpus about what an address is.
 from rlm_kernel.textindex import ADDRESS_IN_TEXT_RE
+
+#: The word a corpus answer must contain when it has no address to offer. It is
+#: how both sides mark "I looked and the corpus does not have this": the prompt
+#: says to quote `corpus_coverage()`, and that helper's own output starts
+#: `[coverage: …`. Matching the word rather than the full line keeps the guard
+#: from demanding a format the model was never given.
+COVERAGE_MARKER = "coverage"
 
 
 class RootLoop:
@@ -201,6 +209,9 @@ class RootLoop:
         # A corpus run's submission only means something if the corpus was
         # actually searched; counted separately from empty-submission nudges.
         corpus_nudges = 0
+        # ...and an answer only means something if it can be checked: one nudge
+        # budget for uncited answers, shared by every channel they arrive on.
+        corpus_uncited_nudges = 0
 
         for turn in range(max_turns):
             display_turn = turn + 1
@@ -249,6 +260,34 @@ class RootLoop:
 
             # Handle courtesy FINAL:
             if result.final_answer is not None:
+                # RO4: `FINAL:` is a submission channel, so both corpus rules
+                # apply here — the run must have looked, and the answer must be
+                # checkable. Budget exhausted means the answer is taken: a final
+                # line the model chose to write is still an answer, and
+                # `_record_citations` measures it either way.
+                if (self._corpus_bridge is not None
+                        and self._repl is not None
+                        and not self._repl.corpus_calls
+                        and corpus_nudges < cfg.max_consecutive_nudges):
+                    corpus_nudges += 1
+                    if self._logger:
+                        self._logger.log_guardrail(
+                            display_turn, "corpus_unsearched",
+                            f"FINAL: line with no corpus helper call "
+                            f"(nudges={corpus_nudges}/{cfg.max_consecutive_nudges})",
+                        )
+                    messages.append({"role": "user", "content": NUDGE_CORPUS_UNSEARCHED})
+                    if self._logger:
+                        self._logger.log_root_message("user", NUDGE_CORPUS_UNSEARCHED)
+                    continue
+                if (self._refuses_uncited(result.final_answer)
+                        and corpus_uncited_nudges < cfg.max_consecutive_nudges):
+                    corpus_uncited_nudges += 1
+                    self._log_uncited(display_turn, corpus_uncited_nudges, cfg)
+                    messages.append({"role": "user", "content": NUDGE_CORPUS_UNCITED})
+                    if self._logger:
+                        self._logger.log_root_message("user", NUDGE_CORPUS_UNCITED)
+                    continue
                 final_answer = result.final_answer
                 self._record_citations(display_turn, final_answer)
                 break
@@ -262,6 +301,7 @@ class RootLoop:
             stderr_nudge: str | None = None
             empty_submission = False
             corpus_unsearched = False
+            corpus_uncited = False
 
             for bi, block in enumerate(result.blocks):
                 # Static read of the block: does it *declare* a submission, and
@@ -333,6 +373,16 @@ class RootLoop:
                                 f"{cfg.max_consecutive_nudges})",
                             )
                         break
+                    # RO4: an answer about the corpus that cites nothing and says
+                    # nothing about coverage is refused once, with the escape
+                    # hatch named in the nudge. Handled with the other flags after
+                    # the block loop, for the same reason: a declaring block ends
+                    # the response.
+                    if self._refuses_uncited(repl_result.final_answer):
+                        corpus_uncited = True
+                        corpus_uncited_nudges += 1
+                        self._log_uncited(display_turn, corpus_uncited_nudges, cfg, bi)
+                        break
                     final_answer = repl_result.final_answer
                     self._record_citations(display_turn, final_answer)
                     break
@@ -377,6 +427,21 @@ class RootLoop:
                     if self._logger:
                         self._logger.log_root_message("user",
                                                       NUDGE_CORPUS_UNSEARCHED)
+                    continue
+                break
+
+            # RO4: an answer that cites nothing and names no coverage is told to
+            # fix exactly that, once per nudge of its own budget. The escape hatch
+            # travels in the nudge, so a truthful "the corpus does not have this,
+            # here is the coverage" is always available and the guard cannot trap
+            # a run on a 34%-indexed corpus.
+            if corpus_uncited:
+                if corpus_uncited_nudges <= cfg.max_consecutive_nudges:
+                    messages.append({"role": "user",
+                                     "content": NUDGE_CORPUS_UNCITED})
+                    if self._logger:
+                        self._logger.log_root_message("user",
+                                                      NUDGE_CORPUS_UNCITED)
                     continue
                 break
 
@@ -440,21 +505,48 @@ class RootLoop:
             return NO_ANSWER_PRODUCED
         return final_answer
 
+    def _refuses_uncited(self, answer: str | None) -> bool:
+        """Whether a corpus answer must be sent back for citing nothing (RO4).
+
+        True only for a corpus run, and only when the answer offers neither an
+        address nor a coverage statement. The second arm is the escape hatch and
+        it is the reason this cannot loop: "the corpus does not contain this, here
+        is the coverage" is a truthful answer, and on a partly-indexed corpus it
+        is the common one. A refusal that a truthful run can always satisfy is a
+        guard; one that cannot is a trap.
+        """
+        if self._corpus_bridge is None:
+            return False
+        text = answer or ""
+        return (ADDRESS_IN_TEXT_RE.search(text) is None
+                and COVERAGE_MARKER not in text.lower())
+
+    def _log_uncited(self, turn: int, nudges: int, cfg: Config,
+                     block: int | None = None) -> None:
+        """Record one refusal, so the guard's own hit rate is measurable."""
+        if not self._logger:
+            return
+        where = f"block={block + 1} " if block is not None else "FINAL: "
+        self._logger.log_guardrail(
+            turn, "corpus_uncited",
+            f"{where}answer cites no address and names no coverage "
+            f"(nudges={nudges}/{cfg.max_consecutive_nudges})",
+        )
+
     def _record_citations(self, turn: int, answer: str | None) -> None:
         """Note whether a corpus answer carried the evidence it used (RO4).
 
-        Measured, never enforced, and the distinction is the owner's call
-        (2026-09-14) rather than an oversight: the prompt now requires a
-        `Citations:` line, and the next decision — whether to refuse an answer
-        that cites nothing — is supposed to be taken on evidence. So this counts
-        the answer and writes one `corpus_citation` guardrail event
-        (`answers_with_address=True|False`), which an operator can tally with
-        `grep -c` over the trajectory. A run with no corpus records nothing.
+        Every answer that is *accepted* is counted here, whether or not it cited
+        anything: `corpus_answers` / `corpus_answers_uncited` on the loop, and one
+        `corpus_citation` guardrail event with `answers_with_address=True|False`
+        that an operator can tally with `grep -c`. A run with no corpus records
+        nothing.
 
         The check is for *an address somewhere in the answer*, not for the
-        `Citations:` line: an answer that quotes the addresses it read is
-        grounded even if it formats them differently, whereas a line saying
-        `Citations:` with nothing checkable after it is not.
+        `Citations:` line: an answer that quotes the addresses it read is grounded
+        even if it formats them differently, whereas a line saying `Citations:`
+        with nothing checkable after it is not. Refused answers never reach here —
+        they are recorded by `_log_uncited` and re-attempted.
         """
         if self._corpus_bridge is None:
             return

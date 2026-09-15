@@ -1721,6 +1721,60 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_the_forced_finalization_answer_is_measured_too",
         ],
     ),
+    # ── RO4 provenance: the refusal, and its escape hatch ─────────────────
+    (
+        "RO4 an answer that cites nothing stops being refused",
+        "src/rlm_local/root_loop.py",
+        "        text = answer or \"\"\n"
+        "        return (ADDRESS_IN_TEXT_RE.search(text) is None\n"
+        "                and COVERAGE_MARKER not in text.lower())",
+        "        text = answer or \"\"\n"
+        "        return False",
+        [
+            "tests/test_root_loop_integration.py::TestCorpusCitationGuard"
+            "::test_an_uncited_answer_is_refused_and_then_a_cited_one_wins",
+        ],
+    ),
+    (
+        "RO4 the coverage escape hatch stops counting as an answer",
+        "src/rlm_local/root_loop.py",
+        "        return (ADDRESS_IN_TEXT_RE.search(text) is None\n"
+        "                and COVERAGE_MARKER not in text.lower())",
+        "        return (ADDRESS_IN_TEXT_RE.search(text) is None\n"
+        "                )",
+        [
+            "tests/test_root_loop_integration.py::TestCorpusCitationGuard"
+            "::test_an_answer_that_names_coverage_is_accepted_without_a_nudge",
+        ],
+    ),
+    (
+        "RO4 a FINAL: line escapes the citation rule",
+        "src/rlm_local/root_loop.py",
+        "                if (self._refuses_uncited(result.final_answer)\n"
+        "                        and corpus_uncited_nudges < cfg.max_consecutive_nudges):",
+        "                if (False\n"
+        "                        and corpus_uncited_nudges < cfg.max_consecutive_nudges):",
+        [
+            "tests/test_root_loop_integration.py::TestCorpusCitationGuard"
+            "::test_an_uncited_final_line_after_a_search_is_refused",
+        ],
+    ),
+    (
+        "RO4 a FINAL: line escapes the unsearched rule",
+        "src/rlm_local/root_loop.py",
+        "                if (self._corpus_bridge is not None\n"
+        "                        and self._repl is not None\n"
+        "                        and not self._repl.corpus_calls\n"
+        "                        and corpus_nudges < cfg.max_consecutive_nudges):",
+        "                if (False\n"
+        "                        and self._repl is not None\n"
+        "                        and not self._repl.corpus_calls\n"
+        "                        and corpus_nudges < cfg.max_consecutive_nudges):",
+        [
+            "tests/test_root_loop_integration.py::TestCorpusCitationGuard"
+            "::test_a_courtesy_final_line_is_guarded_too",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
