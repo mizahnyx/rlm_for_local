@@ -823,6 +823,65 @@ class TestCorpusCitationGuard:
         assert backend.count_appended(NUDGE_CORPUS_UNCITED) == 0
 
 
+class TestForcedFinalizationCarriesProvenance:
+    """RO4: the answer that *is* delivered must carry its evidence (2026-09-16).
+
+    Measured twice: on an unanswerable question the model explored for the whole
+    turn budget and never submitted, so the answer arrived by forced finalization
+    — uncited, and with no coverage line, while the citation guard (which refuses
+    uncited *submissions*) never fired at all. The terminal path is the one place
+    an answer is guaranteed to be delivered, so the corpus requirement has to be
+    restated there. Refusing at that point would be worse than useless: it would
+    turn a weak answer into no answer.
+    """
+
+    def _exhausted_backend(self) -> StubBackend:
+        return StubBackend(responses=[
+            "```repl\nraise ValueError('never converges')\n```",
+        ] * 40 + ["The corpus does not contain this. [coverage: complete]"])
+
+    def test_a_corpus_run_is_asked_for_its_evidence(
+        self, tiny_cfg, corpus_bridge,
+    ) -> None:
+        from rlm_local.templates import FORCED_FINALIZATION_CORPUS_PROMPT
+
+        backend = self._exhausted_backend()
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            loop.run("Who is Cuicani?", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert FORCED_FINALIZATION_CORPUS_PROMPT in backend.user_messages()
+        assert "Citations:" in FORCED_FINALIZATION_CORPUS_PROMPT
+        assert "corpus_coverage()" in FORCED_FINALIZATION_CORPUS_PROMPT
+        # The escape arm has to be in the terminal prompt too, or the requirement
+        # is unsatisfiable on a question the corpus cannot answer.
+        assert "does not contain" in FORCED_FINALIZATION_CORPUS_PROMPT
+        # ...and it is the *last* user message, i.e. the answer was asked for it
+        # after the loop gave up rather than before.
+        assert backend.trailing_user_messages()[-1] == FORCED_FINALIZATION_CORPUS_PROMPT
+
+    def test_a_run_without_a_corpus_keeps_the_plain_prompt(
+        self, tiny_cfg,
+    ) -> None:
+        from rlm_local.templates import (
+            FORCED_FINALIZATION_CORPUS_PROMPT,
+            FORCED_FINALIZATION_PROMPT,
+        )
+
+        backend = self._exhausted_backend()
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None)
+        try:
+            loop.run("Question", "Some context")
+        finally:
+            loop.shutdown()
+
+        assert FORCED_FINALIZATION_PROMPT in backend.user_messages()
+        assert FORCED_FINALIZATION_CORPUS_PROMPT not in backend.user_messages()
+
+
 class TestStderrSelfCorrectionWiring:
     """R5 — §5.6 stage 4 must actually run: a traceback must engage the
     consecutive-error budget and hand the model a correction nudge."""

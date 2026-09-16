@@ -130,6 +130,24 @@ FORCED_FINALIZATION_PROMPT = (
     "answer now. Summarize your findings in plain text."
 )
 
+# The corpus variant of the same request (§5.5, RO4). The terminal answer is the
+# one guaranteed to be delivered, so it is where the corpus's provenance
+# requirement has to be restated: two live runs on an unanswerable question spent
+# the whole turn budget exploring, never submitted, and were answered here — both
+# times uncited, with the citation guard (which refuses uncited *submissions*)
+# never firing at all. Both arms are named because a question the corpus cannot
+# answer has to remain answerable: cite what you read, or say the corpus does not
+# contain it and quote its coverage.
+FORCED_FINALIZATION_CORPUS_PROMPT = (
+    "Based on everything you have learned so far, provide your best final "
+    "answer now, in plain text. This run had a read-only corpus, so end your "
+    "answer with a `Citations:` line naming the addresses you actually read — "
+    "`Citations: <path>#L<start>-<end>` — or, if you did not read anything that "
+    "answers the question, say that the corpus does not contain the answer and "
+    "quote the line corpus_coverage() printed (it begins `[coverage:`). An "
+    "answer that does neither cannot be checked, and it will be recorded as such."
+)
+
 # Terminal placeholders — the harness must never return an empty string as an
 # answer, and these are the only places that decide what to say instead.
 NO_ANSWER_PRODUCED = "(No answer produced)"

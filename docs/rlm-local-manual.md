@@ -924,8 +924,7 @@ Each turn follows this exact sequence:
     `FINAL:` channel gets the unsearched rule as well, because a final line is
     still an answer about a corpus the run may never have opened.
 
-`_record_citations` runs at each of the three places an answer becomes **final**
-(the answer-dict submission, a courtesy `FINAL:` line, and the forced-finalization
+`_record_citations` runs at each of the three places an answer becomes **final**(the answer-dict submission, a courtesy `FINAL:` line, and the forced-finalization
 answer). In a corpus run it counts the answer (`RootLoop.corpus_answers`,
 `RootLoop.corpus_answers_uncited`) and writes one `corpus_citation` guardrail
 event carrying `answers_with_address=True|False`; refusals are recorded separately
@@ -971,6 +970,17 @@ call is made:
 "Based on everything you have learned so far, provide your best final
 answer now. Summarize your findings in plain text."
 ```
+
+A **corpus** run gets `FORCED_FINALIZATION_CORPUS_PROMPT` instead, which asks for
+the same thing plus the evidence: end with a `Citations:` line, or say the corpus
+does not contain the answer and quote `corpus_coverage()`'s line. The reason is
+measured rather than stylistic — two live runs on a question the corpus cannot
+answer spent their whole turn budget exploring, never submitted anything, and
+were answered from this prompt, both times uncited; the citation guard sees only
+submissions, so the terminal answer is the one place the requirement has to be
+restated (`docs/20260916-0902-corpus-terminal-answer-provenance.md`). It is asked
+for, never refused: refusing at the terminal point would turn a weak answer into
+no answer at all.
 
 The model's response to this prompt becomes the final answer. If the response
 contains a `FINAL:` line, that is extracted; otherwise the raw text is returned.

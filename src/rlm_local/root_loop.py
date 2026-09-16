@@ -20,6 +20,7 @@ from rlm_local.repl import REPLSandbox
 from rlm_local.subcall_manager import SubcallManager
 from rlm_local.templates import (
     FINALIZATION_FAILED,
+    FORCED_FINALIZATION_CORPUS_PROMPT,
     FORCED_FINALIZATION_PROMPT,
     NO_ANSWER_PRODUCED,
     NUDGE_CORPUS_UNCITED,
@@ -457,9 +458,20 @@ class RootLoop:
 
         # ── Forced finalization ────────────────────────────────────────────
         if final_answer is None:
-            messages.append({"role": "user", "content": FORCED_FINALIZATION_PROMPT})
+            # The terminal answer is the one guaranteed to be delivered, so a
+            # corpus run is asked for its evidence here. Two live runs on an
+            # unanswerable question spent the whole turn budget exploring, never
+            # submitted, and were answered from this prompt — uncited both times,
+            # because the citation guard only ever sees submissions. Refusing here
+            # would be worse than useless; asking is what this path allows.
+            forced_prompt = (
+                FORCED_FINALIZATION_CORPUS_PROMPT
+                if self._corpus_bridge is not None
+                else FORCED_FINALIZATION_PROMPT
+            )
+            messages.append({"role": "user", "content": forced_prompt})
             if self._logger:
-                self._logger.log_root_message("user", FORCED_FINALIZATION_PROMPT)
+                self._logger.log_root_message("user", forced_prompt)
 
             try:
                 final_text = self._backend.chat(

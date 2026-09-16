@@ -1822,6 +1822,20 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_window_publishes_the_coverage_snapshot",
         ],
     ),
+    (
+        "RO4 the terminal answer stops being asked for its evidence",
+        "src/rlm_local/root_loop.py",
+        "                FORCED_FINALIZATION_CORPUS_PROMPT\n"
+        "                if self._corpus_bridge is not None\n"
+        "                else FORCED_FINALIZATION_PROMPT",
+        "                FORCED_FINALIZATION_CORPUS_PROMPT\n"
+        "                if False\n"
+        "                else FORCED_FINALIZATION_PROMPT",
+        [
+            "tests/test_root_loop_integration.py::TestForcedFinalizationCarriesProvenance"
+            "::test_a_corpus_run_is_asked_for_its_evidence",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
