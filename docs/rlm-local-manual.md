@@ -924,6 +924,19 @@ Each turn follows this exact sequence:
     `FINAL:` channel gets the unsearched rule as well, because a final line is
     still an answer about a corpus the run may never have opened.
 
+    **A citation must be an address the harness served.** `REPLSandbox` records
+    every address a helper handed over (`corpus_addresses_served`): the hits a
+    search returned, and the address a *successful* read resolved — a failed call
+    serves nothing, or asking for an address would be enough to legitimise it.
+    `_unserved_citations` compares what the answer cites against that set, and any
+    address that is not a member refuses the answer *even when it also names
+    coverage*: the escape arm is for absence, not for a receipt that points at
+    nothing. The reason is measured — a four-turn run read nothing, printed
+    nothing, and still ended with a `Citations:` line naming an address nobody had
+    served it (`docs/20260916-1445-corpus-turn-budget-buys-speed-not-provenance.md`).
+    Each refusal is logged as `corpus_uncited` with `unserved=N`, so fabrication
+    rates are countable.
+
 13. **Last-turn nudge (RO4).** A corpus run that reaches its **final turn** having
     called at least one helper but never submitted is told so before that turn's
     model call: `NUDGE_CORPUS_LAST_TURN` names both arms — cite what you read, or

@@ -373,19 +373,40 @@ class TestAnswerFinalizationGuards:
 
 @pytest.fixture
 def corpus_bridge(tmp_path: Path):
-    """A real read-only bridge over a tiny corpus, for corpus runs."""
+    """A real read-only bridge over a tiny corpus, for corpus runs.
+
+    Classified and text-indexed as well as path-indexed, because a corpus run
+    that cannot actually *search* is not the thing these tests are about — and
+    under the served-citation rule (RO4, 2026-09-16) a run can only cite an
+    address a helper returned, which needs a text index to exist.
+    """
+    from rlm_kernel.classify import classify_entries
     from rlm_kernel.corpus import CorpusBridge, CorpusIndex
     from rlm_kernel.mounts import LocalTreeMount
 
     root = tmp_path / "corpus"
     (root / "notes").mkdir(parents=True)
-    (root / "notes" / "song.txt").write_text("Cuicani sang it first.\n",
+    # Exactly 21 bytes on purpose: the chunk address is therefore
+    # `notes/song.txt#L0-21`, which is the address the tests below cite — and
+    # under the served-citation rule a fixture whose served address and cited
+    # address differ would test the refusal instead of the acceptance.
+    (root / "notes" / "song.txt").write_text("Cuicani sang it first",
                                              encoding="utf-8")
     index_path = tmp_path / "derived" / "corpus.sqlite"
     index_path.parent.mkdir()
+    mount = LocalTreeMount(root)
     idx = CorpusIndex.open_for(root, index_path)
-    idx.build(LocalTreeMount(root))
-    b = CorpusBridge(mount=LocalTreeMount(root), index=idx)
+    idx.build(mount)
+    table = idx.classifications()
+    table.ensure()
+    classify_entries(mount, table)
+    text_index = idx.text()
+    text_index.ensure()
+    text_index.add_text(
+        raw=b"notes/song.txt", display="notes/song.txt", source_hash="h-song",
+        text=(root / "notes" / "song.txt").read_bytes(),
+    )
+    b = CorpusBridge(mount=mount, index=idx)
     yield b
     b.close()
 
@@ -450,9 +471,10 @@ class TestCorpusUnsearchedNudge:
         ])
         searched = "\n".join([
             "```repl",
-            "print(corpus_find('song'))",
-            "answer['content'] = 'the searched answer\\n"
-            "Citations: notes/song.txt#L0-21'",
+            "hits = corpus_search('Cuicani')",
+            "print(hits)",
+            "answer['content'] = ('the searched answer\\nCitations: '"
+            " + hits[0].split()[0])",
             "answer['ready'] = True",
             "```",
         ])
@@ -475,8 +497,11 @@ class TestCorpusUnsearchedNudge:
             "\n".join([
                 "```repl",
                 "print(corpus_coverage())",
-                "answer['content'] = ('answered after looking\\n"
-                "Citations: notes/song.txt#L0-21')",
+                # One helper call of any kind satisfies the unsearched guard, and
+                # `corpus_coverage` serves no address — so the answer takes the
+                # absence arm, which is exactly what that situation calls for.
+                "answer['content'] = ('answered after looking: the corpus does not "
+                "contain this.\\n[coverage: unknown]')",
                 "answer['ready'] = True",
                 "```",
             ]),
@@ -984,6 +1009,133 @@ class TestCorpusLastTurnNudge:
 
         assert not any(NUDGE_CORPUS_LAST_TURN.format(turn=3, max_turns=3) == m
                        for m in backend.user_messages())
+
+
+class TestCitationsMustBeServed:
+    """RO4: a citation the harness never handed over is refused (2026-09-16).
+
+    A 4-turn run printed no addresses at all — it read nothing — and still ended
+    with a `Citations:` line naming an address nobody had served it. A
+    well-formed fabricated citation is worse than no citation, because it looks
+    checkable, so the requirement is now evidence: the parent serves every corpus
+    helper call and remembers what it served, and a submitted citation must be a
+    member of that set.
+    """
+
+    #: Cites the address the search actually returned — the realistic path.
+    _CITE_WHAT_WAS_SERVED = "\n".join([
+        "```repl",
+        "hits = corpus_search('Cuicani')",
+        "print(hits)",
+        "answer['content'] = 'It is in the notes.\\nCitations: ' + hits[0].split()[0]",
+        "answer['ready'] = True",
+        "```",
+    ])
+
+    #: Cites a well-formed address that no helper ever returned.
+    _CITE_AN_INVENTION = "\n".join([
+        "```repl",
+        "print(corpus_search('Cuicani'))",
+        "answer['content'] = ('It is in the notes.\\n"
+        "Citations: notes/song.txt#L4000-4100')",
+        "answer['ready'] = True",
+        "```",
+    ])
+
+    def test_a_fabricated_citation_is_refused_then_a_served_one_wins(
+        self, tiny_cfg, corpus_bridge,
+    ) -> None:
+        from rlm_local.templates import NUDGE_CORPUS_UNCITED
+
+        backend = StubBackend(responses=[
+            self._CITE_AN_INVENTION,
+            self._CITE_WHAT_WAS_SERVED,
+        ])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            answer = loop.run("Who is Cuicani?", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert "#L4000-4100" not in answer, "the invention must not be the answer"
+        assert "Citations:" in answer
+        assert backend.count_appended(NUDGE_CORPUS_UNCITED) == 1
+        assert loop.corpus_answers == 1
+
+    def test_a_served_citation_is_accepted_first_time(
+        self, tiny_cfg, corpus_bridge,
+    ) -> None:
+        from rlm_local.templates import NUDGE_CORPUS_UNCITED
+
+        backend = StubBackend(responses=[self._CITE_WHAT_WAS_SERVED])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            answer = loop.run("Who is Cuicani?", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert "Citations:" in answer
+        assert backend.count_appended(NUDGE_CORPUS_UNCITED) == 0
+        assert loop.corpus_answers == 1
+        assert loop.corpus_answers_uncited == 0
+
+    def test_naming_coverage_does_not_excuse_an_invented_address(
+        self, tiny_cfg, corpus_bridge,
+    ) -> None:
+        """The escape arm is for absence, not for a fabricated citation."""
+        from rlm_local.templates import NUDGE_CORPUS_UNCITED
+
+        invented_with_coverage = "\n".join([
+            "```repl",
+            "print(corpus_search('Cuicani'))",
+            "answer['content'] = ('The corpus does not contain this.\\n"
+            "[coverage: 999 sources indexed (0.0% of the text files)]\\n"
+            "Citations: notes/song.txt#L4000-4100')",
+            "answer['ready'] = True",
+            "```",
+        ])
+        backend = StubBackend(responses=[
+            invented_with_coverage,
+            self._CITE_WHAT_WAS_SERVED,
+        ])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            answer = loop.run("Who is Cuicani?", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert "#L4000-4100" not in answer
+        assert backend.count_appended(NUDGE_CORPUS_UNCITED) == 1
+
+    def test_the_refusal_records_how_many_addresses_were_unserved(
+        self, tiny_cfg, corpus_bridge, tmp_path,
+    ) -> None:
+        from rlm_local.logger import TrajectoryLogger
+
+        import json
+
+        logger = TrajectoryLogger(tmp_path / "traj.jsonl")
+        backend = StubBackend(responses=[
+            self._CITE_AN_INVENTION,
+            self._CITE_WHAT_WAS_SERVED,
+        ])
+        loop = RootLoop(tiny_cfg, backend, logger=logger, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            loop.run("Who is Cuicani?", "stub context")
+        finally:
+            loop.shutdown()
+
+        guardrails = [json.loads(line) for line in
+                      logger.path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        refusals = [g for g in guardrails
+                    if g.get("event") == "guardrail"
+                    and g.get("guardrail") == "corpus_uncited"]
+        assert len(refusals) == 1
+        assert "unserved=1" in refusals[0]["detail"]
 
 
 class TestStderrSelfCorrectionWiring:

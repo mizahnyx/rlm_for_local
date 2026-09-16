@@ -73,6 +73,16 @@ ADDRESS_RE = re.compile(r"^(?P<source>.+?)#L(?P<start>\d+)-(?P<end>\d+)$")
 #: fabricated one.
 ADDRESS_IN_TEXT_RE = re.compile(r"#L\d+-\d+")
 
+#: A *whole* address as it appears inside prose or a printed hit: `path#L<a>-<b>`.
+#: `ADDRESS_IN_TEXT_RE` above finds the offset half, which is enough to notice that
+#: something looks like an address but not enough to compare two of them — and
+#: comparing is the point: the harness records what each helper served and requires
+#: a submitted citation to be a member of that set (RO4, 2026-09-16). Trailing
+#: punctuation is excluded by construction (`\d+` ends the match), and the path is
+#: the run of non-delimiter characters before the `#`, so a printed hit line yields
+#: exactly its address token.
+ADDRESS_TOKEN_RE = re.compile(r"[^\s`\"'()\[\]<>]+#L\d+-\d+")
+
 #: Where the published coverage snapshot lives in the index's `meta` table. Two
 #: keys rather than one so a reader can report the snapshot's age: the numbers are
 #: computed by whoever can afford the scan, and staleness is the only price.

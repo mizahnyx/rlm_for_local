@@ -35,8 +35,10 @@ from rlm_local.templates import (
 
 # The address shape, imported from the module that owns the citation grammar
 # rather than re-spelled here: a second copy of `#L\d+-\d+` is how the harness
-# would come to disagree with the corpus about what an address is.
-from rlm_kernel.textindex import ADDRESS_IN_TEXT_RE
+# would come to disagree with the corpus about what an address is. The *token*
+# form is the one that carries the path: the offsets alone cannot be compared
+# against what a helper served, and comparing is the whole point (RO4).
+from rlm_kernel.textindex import ADDRESS_TOKEN_RE
 
 #: The word a corpus answer must contain when it has no address to offer. It is
 #: how both sides mark "I looked and the corpus does not have this": the prompt
@@ -307,7 +309,8 @@ class RootLoop:
                 if (self._refuses_uncited(result.final_answer)
                         and corpus_uncited_nudges < cfg.max_consecutive_nudges):
                     corpus_uncited_nudges += 1
-                    self._log_uncited(display_turn, corpus_uncited_nudges, cfg)
+                    self._log_uncited(display_turn, corpus_uncited_nudges, cfg,
+                                      answer=result.final_answer)
                     messages.append({"role": "user", "content": NUDGE_CORPUS_UNCITED})
                     if self._logger:
                         self._logger.log_root_message("user", NUDGE_CORPUS_UNCITED)
@@ -405,7 +408,8 @@ class RootLoop:
                     if self._refuses_uncited(repl_result.final_answer):
                         corpus_uncited = True
                         corpus_uncited_nudges += 1
-                        self._log_uncited(display_turn, corpus_uncited_nudges, cfg, bi)
+                        self._log_uncited(display_turn, corpus_uncited_nudges, cfg,
+                                          answer=repl_result.final_answer, block=bi)
                         break
                     final_answer = repl_result.final_answer
                     self._record_citations(display_turn, final_answer)
@@ -540,32 +544,55 @@ class RootLoop:
             return NO_ANSWER_PRODUCED
         return final_answer
 
-    def _refuses_uncited(self, answer: str | None) -> bool:
-        """Whether a corpus answer must be sent back for citing nothing (RO4).
+    def _unserved_citations(self, answer: str | None) -> set[str]:
+        """Addresses the answer cites that no helper ever handed over (RO4).
 
-        True only for a corpus run, and only when the answer offers neither an
-        address nor a coverage statement. The second arm is the escape hatch and
-        it is the reason this cannot loop: "the corpus does not contain this, here
-        is the coverage" is a truthful answer, and on a partly-indexed corpus it
-        is the common one. A refusal that a truthful run can always satisfy is a
-        guard; one that cannot is a trap.
+        A citation is evidence only if the harness served it: the parent answers
+        every corpus helper call, so it knows the set. On 2026-09-16 a four-turn
+        run read nothing, printed nothing, and still ended with a `Citations:` line
+        naming an address nobody had served it — a fabricated citation, which a
+        pattern match accepted. A citation that points at nothing is a confident
+        wrong answer wearing a receipt, and this project ranks those below silence.
+        """
+        addresses = set(ADDRESS_TOKEN_RE.findall(answer or ""))
+        if not addresses:
+            return set()
+        served = set(getattr(self._repl, "corpus_addresses_served", set()) or set())
+        return addresses - served
+
+    def _refuses_uncited(self, answer: str | None) -> bool:
+        """Whether a corpus answer must be sent back (RO4).
+
+        Refused when it cites an address the harness never served — no escape arm
+        excuses a fabricated citation — and otherwise when it offers neither a
+        served address nor a coverage statement. That coverage arm is the real
+        escape hatch, and it is why this cannot loop: "the corpus does not contain
+        this, here is the coverage" is a truthful answer, and on a partly-indexed
+        corpus it is the common one. A refusal a truthful run can always satisfy is
+        a guard; one that cannot is a trap.
         """
         if self._corpus_bridge is None:
             return False
         text = answer or ""
-        return (ADDRESS_IN_TEXT_RE.search(text) is None
-                and COVERAGE_MARKER not in text.lower())
+        if self._unserved_citations(text):
+            return True
+        if ADDRESS_TOKEN_RE.search(text):
+            return False
+        return COVERAGE_MARKER not in text.lower()
 
-    def _log_uncited(self, turn: int, nudges: int, cfg: Config,
+    def _log_uncited(self, turn: int, nudges: int, cfg: Config, answer: str = "",
                      block: int | None = None) -> None:
         """Record one refusal, so the guard's own hit rate is measurable."""
         if not self._logger:
             return
         where = f"block={block + 1} " if block is not None else "FINAL: "
+        unserved = len(self._unserved_citations(answer))
+        reason = (f"{unserved} address(es) no helper served" if unserved
+                  else "no address and no coverage")
         self._logger.log_guardrail(
             turn, "corpus_uncited",
-            f"{where}answer cites no address and names no coverage "
-            f"(nudges={nudges}/{cfg.max_consecutive_nudges})",
+            f"{where}answer refused: {reason} (unserved={unserved} "
+            f"nudges={nudges}/{cfg.max_consecutive_nudges})",
         )
 
     def _record_citations(self, turn: int, answer: str | None) -> None:
@@ -586,7 +613,7 @@ class RootLoop:
         if self._corpus_bridge is None:
             return
         text = answer or ""
-        cited = bool(ADDRESS_IN_TEXT_RE.search(text))
+        cited = bool(ADDRESS_TOKEN_RE.search(text))
         self.corpus_answers += 1
         if not cited:
             self.corpus_answers_uncited += 1

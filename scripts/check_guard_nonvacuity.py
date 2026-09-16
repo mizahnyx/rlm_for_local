@@ -1710,7 +1710,7 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO4 the citation check stops looking at the answer",
         "src/rlm_local/root_loop.py",
-        "        cited = bool(ADDRESS_IN_TEXT_RE.search(text))",
+        "        cited = bool(ADDRESS_TOKEN_RE.search(text))",
         "        cited = True",
         [
             "tests/test_root_loop_integration.py::TestCorpusCitationTelemetry"
@@ -1733,10 +1733,11 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO4 an answer that cites nothing stops being refused",
         "src/rlm_local/root_loop.py",
-        "        text = answer or \"\"\n"
-        "        return (ADDRESS_IN_TEXT_RE.search(text) is None\n"
-        "                and COVERAGE_MARKER not in text.lower())",
-        "        text = answer or \"\"\n"
+        "        if ADDRESS_TOKEN_RE.search(text):\n"
+        "            return False\n"
+        "        return COVERAGE_MARKER not in text.lower()",
+        "        if ADDRESS_TOKEN_RE.search(text):\n"
+        "            return False\n"
         "        return False",
         [
             "tests/test_root_loop_integration.py::TestCorpusCitationGuard"
@@ -1746,10 +1747,8 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO4 the coverage escape hatch stops counting as an answer",
         "src/rlm_local/root_loop.py",
-        "        return (ADDRESS_IN_TEXT_RE.search(text) is None\n"
-        "                and COVERAGE_MARKER not in text.lower())",
-        "        return (ADDRESS_IN_TEXT_RE.search(text) is None\n"
-        "                )",
+        "        return COVERAGE_MARKER not in text.lower()",
+        "        return True",
         [
             "tests/test_root_loop_integration.py::TestCorpusCitationGuard"
             "::test_an_answer_that_names_coverage_is_accepted_without_a_nudge",
@@ -1846,6 +1845,32 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         [
             "tests/test_root_loop_integration.py::TestCorpusLastTurnNudge"
             "::test_a_corpus_run_is_told_its_last_turn_is_for_answering",
+        ],
+    ),
+    # ── RO4: a citation must be an address the harness served (2026-09-16) ──
+    (
+        "RO4 any address-shaped citation is accepted again",
+        "src/rlm_local/root_loop.py",
+        "        served = set(getattr(self._repl, \"corpus_addresses_served\", set()) or set())\n"
+        "        return addresses - served",
+        "        return set()",
+        [
+            "tests/test_root_loop_integration.py::TestCitationsMustBeServed"
+            "::test_a_fabricated_citation_is_refused_then_a_served_one_wins",
+            "tests/test_root_loop_integration.py::TestCitationsMustBeServed"
+            "::test_naming_coverage_does_not_excuse_an_invented_address",
+        ],
+    ),
+    (
+        "RO4 the sandbox stops remembering what it served",
+        "src/rlm_local/repl.py",
+        "        self.corpus_addresses_served.update(served)",
+        "        self.corpus_addresses_served.update(set())",
+        [
+            "tests/test_root_loop_integration.py::TestCitationsMustBeServed"
+            "::test_a_served_citation_is_accepted_first_time",
+            "tests/test_corpus_repl.py::TestTheSandboxRemembersWhichAddressesItServed"
+            "::test_a_search_serves_the_addresses_it_returns",
         ],
     ),
 ]

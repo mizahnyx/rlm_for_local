@@ -40,6 +40,10 @@ from pathlib import Path
 from typing import Any
 
 from rlm_local.context_store import Context, _InMemoryContext
+
+# The address shape, from the module that owns the citation grammar: what the
+# harness served and what the model cites must be compared in one vocabulary.
+from rlm_kernel.textindex import ADDRESS_TOKEN_RE
 from rlm_local.templates import (
     CELL_STDERR_TRUNCATED,
     CELL_STDOUT_TRUNCATED,
@@ -760,6 +764,12 @@ class REPLSandbox:
         #: reads it to tell "answered" from "never looked" — a fact the harness
         #: owns, rather than something it has to infer from the model's prose.
         self.corpus_calls = 0
+        #: Every address this sandbox has *served*: the hits a search returned and
+        #: the addresses a successful read resolved. The citation guard requires a
+        #: submitted citation to be a member of this set, because a pattern match is
+        #: not evidence — on 2026-09-16 a four-turn run ended with a `Citations:`
+        #: line naming an address nobody had ever given it.
+        self.corpus_addresses_served: set[str] = set()
         # R4 protocol state
         self._cell_seq = 0
         self._init_payload: dict | None = None
@@ -1052,6 +1062,12 @@ class REPLSandbox:
         # corpus at all", not "did its look succeed".
         self.corpus_calls += 1
         bridge = self._corpus_bridge
+        result = self._corpus_dispatch(msg_type, msg, bridge)
+        self._remember_served(msg_type, msg, result)
+        return result
+
+    def _corpus_dispatch(self, msg_type: str, msg: dict, bridge: Any) -> str:
+        """The verb table, separate so `_corpus_result` can inspect the answer."""
         try:
             if msg_type == "corpus_find":
                 return bridge.handle_find(
@@ -1083,6 +1099,26 @@ class REPLSandbox:
         except Exception as e:  # pragma: no cover - defensive
             return f"Error: corpus helper failed: {type(e).__name__}: {e}"
         return f"Error: unsupported corpus helper: {msg_type}"
+
+    def _remember_served(self, msg_type: str, msg: dict, result: Any) -> None:
+        """Record the addresses this call actually handed the model (RO4).
+
+        A citation is evidence only if the harness gave it: on 2026-09-16 a
+        four-turn run ended with a `Citations:` line for an address that had never
+        been served, and a pattern match accepted it. Two rules keep this set
+        honest — a failed call serves nothing (otherwise *asking* for an address
+        would be enough to legitimise it), and an address is added either because
+        the helper returned it (search hits) or because the read it named
+        succeeded (the passage itself does not repeat its own address).
+        """
+        text = ("\n".join(str(part) for part in result)
+                if isinstance(result, (list, tuple)) else str(result))
+        if text.startswith("Error:"):
+            return
+        served = set(ADDRESS_TOKEN_RE.findall(text))
+        if msg_type == "corpus_read":
+            served.update(ADDRESS_TOKEN_RE.findall(str(msg.get("rel") or "")))
+        self.corpus_addresses_served.update(served)
 
     def shutdown(self) -> None:
         """Terminate the REPL worker and clean up."""

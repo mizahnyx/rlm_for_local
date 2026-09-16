@@ -101,6 +101,16 @@ def bridge(corpus: Path, tmp_path: Path) -> CorpusBridge:
     index_path.parent.mkdir()
     idx = CorpusIndex.open_for(corpus, index_path)
     idx.build(LocalTreeMount(corpus))
+    # A text index too, because a corpus run that cannot search is not the thing
+    # these tests exercise — and the served-citation rule (RO4, 2026-09-16) needs
+    # a search to return something before an address can be cited at all.
+    text_index = idx.text()
+    text_index.ensure()
+    for rel in ("notes/budget.md", "notes/deep/memo.txt", "index.html"):
+        text_index.add_text(
+            raw=rel.encode("utf-8"), display=rel, source_hash=f"h-{rel}",
+            text=(corpus / rel).read_bytes(),
+        )
     b = CorpusBridge(mount=LocalTreeMount(corpus), index=idx)
     yield b
     b.close()
@@ -214,6 +224,52 @@ class TestParentDispatchesCorpusVerbs:
         repl, sock = self._sandbox_with(RecordingBridge())
         repl._handle_request("corpus_teleport", {})
         assert "unsupported corpus helper" in sock.frames[-1]["result"]
+
+
+class TestTheSandboxRemembersWhichAddressesItServed:
+    """The evidence a citation is checked against (RO4, 2026-09-16).
+
+    The parent serves every corpus helper call, so it knows exactly which
+    addresses a run was handed. That set is what makes a citation checkable: on
+    2026-09-16 a 4-turn run ended with a `Citations:` line for an address it had
+    never been served — a well-formed, entirely fabricated citation, which a
+    pattern match accepted. The harness ranks that below silence, so the set is
+    remembered here and required at submission.
+    """
+
+    def _sandbox(self, bridge) -> REPLSandbox:
+        repl = REPLSandbox()
+        repl._worker_sock = FakeWorkerSock()  # type: ignore[assignment]
+        repl._corpus_bridge = bridge
+        return repl
+
+    def test_a_search_serves_the_addresses_it_returns(self, bridge) -> None:
+        repl = self._sandbox(bridge)
+        # `budget.md` is what this fixture's corpus actually contains.
+        repl._handle_request("corpus_search", {"query": "sails"})
+        served = repl.corpus_addresses_served
+        assert served, "a search that returned hits served them"
+        assert all(re.fullmatch(r".+#L\d+-\d+", a) for a in served)
+
+    def test_a_successful_read_serves_the_address_it_was_asked_for(self, bridge) -> None:
+        repl = self._sandbox(bridge)
+        hits = bridge.handle_search("sails")
+        address = hits[0].split()[0]
+        repl._handle_request("corpus_read", {"rel": address})
+        assert address in repl.corpus_addresses_served
+
+    def test_a_failed_read_serves_nothing(self, bridge) -> None:
+        """Otherwise asking for an address would be enough to 'serve' it."""
+        repl = self._sandbox(bridge)
+        repl._handle_request("corpus_read", {"rel": "notes/absent.txt#L0-10"})
+        assert repl.corpus_addresses_served == set()
+
+    def test_path_helpers_serve_no_addresses(self, bridge) -> None:
+        repl = self._sandbox(bridge)
+        repl._handle_request("corpus_find", {"query": "budget"})
+        repl._handle_request("corpus_count", {})
+        repl._handle_request("corpus_coverage", {})
+        assert repl.corpus_addresses_served == set()
 
 
 class TestTheSandboxCountsCorpusCalls:
@@ -369,6 +425,10 @@ class TestCorpusHelpersInALiveCell:
         text_index.add_text(
             raw=b"notes/budget.md", display="notes/budget.md", source_hash="h",
             text=(corpus / "notes" / "budget.md").read_bytes(),
+            # The file on disk changed, so the index has to replace what it held:
+            # `add_text` is idempotent by default, which is right for a first pass
+            # and wrong for a file that has been edited (the dynamic-corpus gap).
+            replace=True,
         )
         repl = REPLSandbox(cell_timeout=30.0)
         repl._corpus_bridge = bridge
