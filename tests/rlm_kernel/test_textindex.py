@@ -16,6 +16,7 @@ The properties that matter, each with a test that would fail if it were weakened
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -352,3 +353,87 @@ class TestReset:
         index.reset()
         assert index.stats()["chunks"] == 0
         assert index.search("needle").hits == []
+
+
+class TestCoverageSnapshot:
+    """The search path must never count the chunk table (RO4, 2026-09-15).
+
+    Measured on the real index: `TextIndex.search` returns in 0.2 s, while
+    `COUNT(*) FROM text_chunks` takes 972 s and `COUNT(DISTINCT source)` and the
+    classification counts each run past 45 s. `corpus_search` and
+    `corpus_coverage` both call `coverage()`, so every corpus cell hit the REPL's
+    120 s cell limit, the worker was killed and restarted four times, and a live
+    run ended after two hours with `(No answer produced — forced finalization
+    failed)`.
+
+    The fix is a *published* snapshot: the process that may be slow (the miner, or
+    `rlm corpus counters --refresh`) computes it once, and a search reads it — or
+    says "unknown", which is the honest answer when nobody has published one,
+    because zero would be a lie.
+    """
+
+    def test_a_published_snapshot_round_trips(self, conn: sqlite3.Connection) -> None:
+        ti = TextIndex(conn)
+        ti.ensure()
+        ti.publish_coverage({
+            "sources_indexed": 7, "chunks": 9, "text_files_in_map": 100,
+            "text_coverage": 0.07, "documents_extracted": 1,
+            "documents_needing_ocr": 2,
+        })
+        got = ti.published_coverage()
+        assert got is not None
+        assert got["sources_indexed"] == 7
+        assert got["documents_needing_ocr"] == 2
+        assert got["published_at"] is not None, "a snapshot carries its age"
+
+    def test_nothing_published_is_none_not_zero(self, conn: sqlite3.Connection) -> None:
+        ti = TextIndex(conn)
+        ti.ensure()
+        assert ti.published_coverage() is None
+
+    def test_a_corrupt_snapshot_reads_as_none(self, conn: sqlite3.Connection) -> None:
+        """A reader must never raise on a snapshot it cannot parse."""
+        ti = TextIndex(conn)
+        ti.ensure()
+        ti.publish_coverage({"sources_indexed": 1})
+        conn.execute("UPDATE meta SET value = ? WHERE key = ?",
+                     ("{not json", "coverage_snapshot"))
+        conn.commit()
+        assert ti.published_coverage() is None
+
+    def test_the_snapshot_survives_a_reopen(self, tmp_path: Path) -> None:
+        """The point of storing it: the next process reads it without scanning."""
+        path = tmp_path / "index.sqlite"
+        first = sqlite3.connect(str(path))
+        first.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        first.commit()
+        ti = TextIndex(first)
+        ti.ensure()
+        ti.publish_coverage({"sources_indexed": 3, "chunks": 4})
+        first.close()
+
+        second = sqlite3.connect(str(path))
+        got = TextIndex(second).published_coverage()
+        second.close()
+        assert got is not None and got["sources_indexed"] == 3
+
+    def test_a_stale_snapshot_says_how_old_it_is(self) -> None:
+        from rlm_kernel.textindex import coverage_note
+
+        fresh = coverage_note({"sources_indexed": 5, "text_files_in_map": 100,
+                               "text_coverage": 0.05, "published_at": time.time()})
+        old = coverage_note({"sources_indexed": 5, "text_files_in_map": 100,
+                             "text_coverage": 0.05,
+                             "published_at": time.time() - 3600})
+        assert "5 sources indexed" in fresh
+        assert "ago" not in fresh, "a fresh snapshot needs no apology"
+        assert "60 min ago" in old, "an old one must say so"
+
+    def test_without_published_at_there_is_no_age_claim(self) -> None:
+        """Back-compat: coverage dicts that predate the snapshot have no timestamp."""
+        from rlm_kernel.textindex import coverage_note
+
+        note = coverage_note({"sources_indexed": 5, "text_files_in_map": 100,
+                              "text_coverage": 0.05})
+        assert "5 sources indexed" in note
+        assert "ago" not in note

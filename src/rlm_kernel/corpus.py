@@ -499,6 +499,16 @@ CORPUS_NOT_A_FILE = "Error: not a regular file in the corpus: {rel!r}"
 CORPUS_READ_ERROR = "Error: could not read {rel!r}: {error}"
 CORPUS_NO_MATCHES = "(no corpus paths matched)"
 CORPUS_TEXT_NO_MATCHES = "(no text matches in what is indexed)"
+#: Said when nothing has published a coverage snapshot. It must not be zero: "0
+#: sources indexed" is a confident wrong answer about how much of the corpus was
+#: searched, and this project ranks that below saying nothing. The scan that
+#: produces the real numbers takes ~16 minutes on the live index and the cell
+#: limit is 120 s, so a search cannot pay for it — see `TextIndex.published_coverage`.
+CORPUS_COVERAGE_UNKNOWN = (
+    "[coverage: unknown — no coverage snapshot has been published for this index, "
+    "so how much of the corpus is searchable cannot be stated. It is not zero. "
+    "An operator publishes one with `rlm corpus counters --refresh`.]"
+)
 CORPUS_VENDORED_HIDDEN = (
     "[{n:,} further matches are hidden by the vendored filter; search again with "
     "include_vendored=True if the answer may be in dependency or build output]"
@@ -710,9 +720,15 @@ class CorpusBridge:
             lines = [CORPUS_TEXT_NO_MATCHES]
             if result.hidden_vendored:
                 lines.append(CORPUS_VENDORED_HIDDEN.format(n=result.hidden_vendored))
-            note = coverage_note(text_index.coverage())
-            if note:
-                lines.append(note)
+            # The published snapshot, never a scan: counting the chunk table takes
+            # ~16 minutes on the real index, and this runs inside a 120 s cell.
+            snapshot = text_index.published_coverage()
+            if snapshot is None:
+                lines.append(CORPUS_COVERAGE_UNKNOWN)
+            else:
+                note = coverage_note(snapshot)
+                if note:
+                    lines.append(note)
             return ["\n".join(lines)]
 
         hits: list[str] = []
@@ -742,9 +758,12 @@ class CorpusBridge:
         if self.index is None:
             return CORPUS_NO_INDEX
         try:
-            coverage = self.index.text().coverage()
+            snapshot = self.index.text().published_coverage()
         except Exception as e:  # pragma: no cover - defensive
             return CORPUS_READ_ERROR.format(rel="text index", error=e)
+        if snapshot is None:
+            return CORPUS_COVERAGE_UNKNOWN
+        coverage = snapshot
         note = coverage_note(coverage)
         if note:
             return note

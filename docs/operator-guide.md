@@ -510,6 +510,35 @@ fixed — see below). Indexing all 2.88M text files is therefore ~24 hours of
 windows, and every hour of it is independently useful because the queue commits
 per item.
 
+### `rlm corpus counters` — how much is searchable, without counting it
+
+```bash
+rlm corpus counters --corpus-index ~/rlm-derived/corpus.sqlite            # read (instant)
+rlm corpus counters --corpus-index ~/rlm-derived/corpus.sqlite --refresh  # recompute (~16 min)
+```
+
+A search quotes its coverage, and **it must never count the index to get it**:
+`TextIndex.search` returns in 0.2 s while `COUNT(*) FROM text_chunks` takes **972 s**
+on the live index (25M chunks), and a REPL cell has 120 s. That asymmetry is what
+ended a two-hour live run with `(No answer produced — forced finalization failed)`
+— see `docs/20260915-2305-corpus-search-cannot-count-its-own-index.md`.
+
+So coverage is *published*: `mine run` writes a snapshot at the end of every window
+(the worker is already hours long; it can afford the ~16 minutes), and `counters
+--refresh` writes one on demand when the index is idle. Everything else **reads**.
+Two consequences you will see in output:
+
+- A search that finds nothing and has no snapshot says `[coverage: unknown …]`, not
+  "0 sources indexed". Unknown is honest; zero is a confident lie about how much of
+  the corpus was searched.
+- A snapshot older than a minute says so — `(snapshot 42 min ago)` — because
+  "5 sources indexed" from an hour ago is a different claim from the same words
+  measured now.
+
+If a search reports coverage as unknown, publish one. If the numbers look old after
+a long window, `--refresh` is the way to bring them forward; expect it to read the
+whole chunk table, and prefer running it when no mining window is active.
+
 ### `rlm corpus search` and the `corpus_search` helper
 
 ```bash

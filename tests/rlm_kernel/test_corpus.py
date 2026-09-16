@@ -1042,3 +1042,107 @@ class TestBridgeReadsThroughTheMount:
         bridge = CorpusBridge(mount=spy, index=None)
         bridge.handle_read("readme.md")
         assert spy.read_calls == ["readme.md"]
+
+
+class TestSearchCoverageIsPublishedNotCounted:
+    """A corpus search must not count the chunk table (RO4, 2026-09-15).
+
+    On the real index `search` takes 0.2 s and `COUNT(*) FROM text_chunks` takes
+    972 s, so a search that computes its own coverage cannot finish inside the
+    REPL's 120 s cell limit — which is exactly how a live run burned two hours and
+    produced no answer. These tests pin the interface: coverage is *read* from a
+    published snapshot, and when nothing has published one the search says
+    "unknown" rather than scanning or claiming zero.
+    """
+
+    @pytest.fixture
+    def searched_index(self, corpus: Path, index: CorpusIndex,
+                       mount: LocalTreeMount) -> CorpusBridge:
+        (corpus / "sub" / "story.txt").write_text(
+            "Cuicani sang at the festival.\n", encoding="utf-8")
+        index.build(mount)
+        text_index = index.text()
+        text_index.ensure()
+        text_index.add_text(
+            raw=b"sub/story.txt", display="sub/story.txt", source_hash="h1",
+            text=(corpus / "sub" / "story.txt").read_bytes(),
+        )
+        return CorpusBridge(mount=mount, index=index)
+
+    @staticmethod
+    def _counting_scans(statements: list[str]) -> list[str]:
+        """The scans a search must never run, whatever else it does.
+
+        `MATCH` is excluded on purpose: counting how many of *this query's* FTS
+        matches were hidden by the vendored filter is bounded by the match set and
+        is part of producing the answer, whereas `COUNT(*) FROM text_chunks` with
+        no match predicate is a full scan of 25M rows. The distinction is the
+        point of the guard, so it is written down rather than left to a regex that
+        happens to pass.
+        """
+        scans = []
+        for statement in statements:
+            if re.search(r"MATCH", statement, re.IGNORECASE):
+                continue
+            if re.search(r"COUNT\s*\(", statement, re.IGNORECASE) and re.search(
+                r"text_chunks|classification|mine_queue", statement, re.IGNORECASE
+            ):
+                scans.append(statement)
+        return scans
+
+    def test_a_miss_quotes_the_published_snapshot(
+        self, searched_index: CorpusBridge, index: CorpusIndex,
+    ) -> None:
+        text_index = index.text()
+        text_index.publish_coverage({
+            "sources_indexed": 5, "text_files_in_map": 100, "text_coverage": 0.05,
+            "documents_extracted": 1, "documents_needing_ocr": 0,
+            "chunks": 12,
+        })
+        hits = searched_index.handle_search("zzznotaword")
+        assert len(hits) == 1
+        assert "5 sources indexed" in hits[0]
+
+    def test_a_miss_without_a_snapshot_says_unknown_and_does_not_scan(
+        self, searched_index: CorpusBridge, index: CorpusIndex,
+    ) -> None:
+        conn = index._conn  # noqa: SLF001 - the bridge's own connection
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+        try:
+            hits = searched_index.handle_search("zzznotaword")
+        finally:
+            conn.set_trace_callback(None)
+
+        assert len(hits) == 1
+        assert "unknown" in hits[0].lower()
+        assert "0 sources" not in hits[0], "unknown is not zero"
+        assert self._counting_scans(statements) == [], (
+            "a search must never count text_chunks/classification/mine_queue"
+        )
+
+    def test_coverage_without_a_snapshot_says_unknown_and_does_not_scan(
+        self, searched_index: CorpusBridge, index: CorpusIndex,
+    ) -> None:
+        conn = index._conn  # noqa: SLF001
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+        try:
+            line = searched_index.handle_coverage()
+        finally:
+            conn.set_trace_callback(None)
+
+        assert "unknown" in line.lower()
+        assert self._counting_scans(statements) == []
+
+    def test_coverage_with_a_snapshot_quotes_it(
+        self, searched_index: CorpusBridge, index: CorpusIndex,
+    ) -> None:
+        index.text().publish_coverage({
+            "sources_indexed": 42, "text_files_in_map": 1000,
+            "text_coverage": 0.042, "documents_extracted": 3,
+            "documents_needing_ocr": 1, "chunks": 99,
+        })
+        line = searched_index.handle_coverage()
+        assert "42 sources indexed" in line
+        assert "1 awaiting OCR" in line

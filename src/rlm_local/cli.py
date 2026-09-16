@@ -269,6 +269,23 @@ def build_parser() -> argparse.ArgumentParser:
                            help="Print indexing coverage and exit")
     p_csearch.add_argument("--cache-root", type=Path, default=None)
 
+    p_ccounters = corpus_sub.add_parser(
+        "counters",
+        help="Show or refresh the published coverage snapshot a search quotes",
+        description=(
+            "How much of the corpus is searchable, as one line. Without "
+            "--refresh this only *reads* the last published snapshot and says how "
+            "old it is; a search quotes exactly this and never counts the chunk "
+            "table itself, because counting 25M chunks takes ~16 minutes and a "
+            "REPL cell has 120 seconds. --refresh is the deliberate, slow way to "
+            "compute a new one: run it when the index is idle, after a mining "
+            "window, or when a search reports coverage as unknown."
+        ),
+    )
+    _add_corpus_flags(p_ccounters, require_root=False, require_index=True)
+    p_ccounters.add_argument("--refresh", action="store_true",
+                             help="Recompute the snapshot now (reads the whole index)")
+
     # ── mine ─────────────────────────────────────────────────────────────
     p_mine = sub.add_parser(
         "mine",
@@ -912,13 +929,64 @@ def _cmd_corpus(args: argparse.Namespace) -> int:
     if sub == "search":
         return _cmd_corpus_search(args)
 
+    if sub == "counters":
+        return _cmd_corpus_counters(args)
+
     print(f"Error: unknown corpus subcommand {sub!r}", file=sys.stderr)
     return 2
 
 
+def _cmd_corpus_counters(args: argparse.Namespace) -> int:
+    """`rlm corpus counters` — show, or recompute, the published coverage snapshot.
+
+    The read is instant and the refresh is deliberately slow (~16 minutes on the
+    live index: 25M chunks). Splitting them is the whole point — a search inside a
+    120 s REPL cell can afford the first and never the second.
+    """
+    from rlm_kernel.corpus import CORPUS_COVERAGE_UNKNOWN, CorpusIndex
+    from rlm_kernel.textindex import coverage_note
+
+    if not args.corpus_index:
+        print("Error: --corpus-index is required (env RLM_CORPUS_INDEX).",
+              file=sys.stderr)
+        return 2
+    if not Path(args.corpus_index).exists():
+        print(f"Error: no index at {args.corpus_index}.", file=sys.stderr)
+        return 2
+
+    index = CorpusIndex(args.corpus_index)
+    try:
+        text_index = index.text()
+        if args.refresh:
+            print("Recomputing coverage (reads the whole index; can take minutes)…",
+                  flush=True)
+            # `ensure` first: coverage counts the chunk table, which does not exist
+            # until something has created it. On a fresh index that is an empty
+            # table and the honest answer is "0 sources indexed".
+            text_index.ensure()
+            text_index.publish_coverage(text_index.coverage())
+        snapshot = text_index.published_coverage()
+    finally:
+        index.close()
+
+    if snapshot is None:
+        print(CORPUS_COVERAGE_UNKNOWN)
+        return 0
+    for key, value in sorted(snapshot.items()):
+        if key == "published_at":
+            continue
+        if isinstance(value, float):
+            print(f"{key}: {value:.4f}")
+        else:
+            print(f"{key}: {value:,}" if isinstance(value, int) else f"{key}: {value}")
+    note = coverage_note(snapshot)
+    print(note if note else "[coverage: complete]")
+    return 0
+
+
 def _cmd_corpus_search(args: argparse.Namespace) -> int:
     """`rlm corpus search` — words inside the corpus, each with an address."""
-    from rlm_kernel.corpus import CorpusIndex
+    from rlm_kernel.corpus import CORPUS_COVERAGE_UNKNOWN, CorpusIndex
     from rlm_kernel.mounts import LocalTreeMount, ReadOnlyViolation
     from rlm_kernel.textindex import coverage_note, format_hits
 
@@ -933,10 +1001,20 @@ def _cmd_corpus_search(args: argparse.Namespace) -> int:
     index = CorpusIndex(args.corpus_index)
     try:
         text_index = index.text()
+        # `ensure` only creates the tables if this database lacks them (it is a
+        # no-op otherwise); it is not what made a search slow — the coverage scan
+        # was. The *published* snapshot below is the part that must never scan:
+        # on the live index that scan is ~16 minutes and a cell has 120 seconds.
+        # `rlm corpus counters --refresh` is the deliberate, slow way to produce one.
         text_index.ensure()
-        coverage = text_index.coverage()
+        coverage = text_index.published_coverage()
+        if coverage is None and not args.count_only and not args.coverage:
+            coverage = {}
 
         if args.coverage:
+            if coverage is None:
+                print(CORPUS_COVERAGE_UNKNOWN)
+                return 0
             for key, value in sorted(coverage.items()):
                 if isinstance(value, float):
                     print(f"{key}: {value:.4f}")
@@ -957,6 +1035,9 @@ def _cmd_corpus_search(args: argparse.Namespace) -> int:
             # anywhere, because it cannot carry a path or a fragment of content.
             print(f"matches: {len(result.hits)}")
             print(f"hidden_by_vendored_filter: {result.hidden_vendored}")
+            if coverage is None:
+                print(CORPUS_COVERAGE_UNKNOWN)
+                return 0
             print(f"sources_indexed: {coverage['sources_indexed']:,}")
             print(f"text_coverage: {coverage['text_coverage']:.4f}")
             print(f"chunks: {coverage['chunks']:,}")
@@ -974,7 +1055,7 @@ def _cmd_corpus_search(args: argparse.Namespace) -> int:
                 texts.append(text_index.read(hit, mount=mount, cache_root=cache_root))
             except ReadOnlyViolation as e:
                 texts.append(f"(cannot re-read: {e})")
-        result.coverage_note = coverage_note(coverage)
+        result.coverage_note = coverage_note(coverage) if coverage else CORPUS_COVERAGE_UNKNOWN
         print(format_hits(result, texts))
         return 0
     finally:

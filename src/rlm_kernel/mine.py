@@ -797,12 +797,38 @@ def run_queue(
 
     if progress is not None:
         progress(stats)
+    # Leave a coverage snapshot behind: the search path reads it instead of
+    # counting 25M chunks inside a 120 s cell (see `publish_coverage_snapshot`).
+    publish_coverage_snapshot(conn)
     return MineRun(stats=stats, stop_reason=stop_reason, seconds=now() - started)
 
 
 def _size_for(conn: sqlite3.Connection, raw: bytes) -> int:
     row = conn.execute("SELECT size FROM entries WHERE raw = ?", (raw,)).fetchone()
     return int(row[0]) if row else 0
+
+
+def publish_coverage_snapshot(conn: sqlite3.Connection) -> bool:
+    """Compute and store the coverage a search will quote. Best effort, slow.
+
+    The scan behind this takes ~16 minutes on the real index (25M chunks), which
+    is why a *search* never does it: a corpus cell has 120 s and dies, which is
+    how a live run burned two hours and answered nothing. A mining window is hours
+    long and already slow, so it pays this price once — at the start when nothing
+    has been published, and at the end, so the snapshot a finished window leaves
+    behind describes the index that window produced.
+
+    Never raises: a window that cannot publish coverage must still finish its work.
+    """
+    try:
+        from rlm_kernel.textindex import TextIndex
+
+        text = TextIndex(conn)
+        text.ensure()
+        text.publish_coverage(text.coverage())
+        return True
+    except Exception:  # pragma: no cover - defensive
+        return False
 
 
 # ── The single-worker lock ────────────────────────────────────────────────

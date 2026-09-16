@@ -1552,12 +1552,20 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO4 corpus_search stops reporting its coverage",
         "src/rlm_kernel/corpus.py",
-        "            note = coverage_note(text_index.coverage())\n"
-        "            if note:\n"
-        "                lines.append(note)",
-        "            note = coverage_note(text_index.coverage())\n"
-        "            if False:\n"
-        "                lines.append(note)",
+        "            snapshot = text_index.published_coverage()\n"
+        "            if snapshot is None:\n"
+        "                lines.append(CORPUS_COVERAGE_UNKNOWN)\n"
+        "            else:\n"
+        "                note = coverage_note(snapshot)\n"
+        "                if note:\n"
+        "                    lines.append(note)",
+        "            snapshot = text_index.published_coverage()\n"
+        "            if snapshot is None:\n"
+        "                pass\n"
+        "            else:\n"
+        "                note = coverage_note(snapshot)\n"
+        "                if False:\n"
+        "                    lines.append(note)",
         [
             "tests/rlm_kernel/test_corpus.py::TestBridgeContentSearch"
             "::test_a_missing_word_carries_the_coverage_in_its_only_element",
@@ -1773,6 +1781,45 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         [
             "tests/test_root_loop_integration.py::TestCorpusCitationGuard"
             "::test_a_courtesy_final_line_is_guarded_too",
+        ],
+    ),
+    # ── RO4: a search must not count the index it searches (2026-09-15) ───
+    (
+        "RO4 a search goes back to counting the chunk table for its coverage",
+        "src/rlm_kernel/corpus.py",
+        "            snapshot = text_index.published_coverage()",
+        "            snapshot = text_index.coverage()",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestSearchCoverageIsPublishedNotCounted"
+            "::test_a_miss_without_a_snapshot_says_unknown_and_does_not_scan",
+            "tests/rlm_kernel/test_corpus.py::TestSearchCoverageIsPublishedNotCounted"
+            "::test_a_miss_quotes_the_published_snapshot",
+        ],
+    ),
+    (
+        "RO4 the published snapshot stops being readable",
+        "src/rlm_kernel/textindex.py",
+        "        raw = self._get_meta(COVERAGE_SNAPSHOT_KEY)\n"
+        "        if raw is None:\n"
+        "            return None",
+        "        raw = None\n"
+        "        if raw is None:\n"
+        "            return None",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestCoverageSnapshot"
+            "::test_a_published_snapshot_round_trips",
+            "tests/rlm_kernel/test_corpus.py::TestSearchCoverageIsPublishedNotCounted"
+            "::test_a_miss_quotes_the_published_snapshot",
+        ],
+    ),
+    (
+        "RO4 a mining window stops publishing coverage",
+        "src/rlm_kernel/mine.py",
+        "    publish_coverage_snapshot(conn)\n",
+        "    pass\n",
+        [
+            "tests/rlm_kernel/test_mine.py::TestWindows"
+            "::test_a_window_publishes_the_coverage_snapshot",
         ],
     ),
 ]

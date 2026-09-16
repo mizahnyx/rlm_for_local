@@ -140,6 +140,9 @@ uv run python -m rlm_local.cli corpus classify --corpus-root /srv/corpus \
 uv run python -m rlm_local.cli corpus search "…" --corpus-index ~/rlm-derived/corpus.sqlite
 uv run python -m rlm_local.cli corpus search "…" --corpus-index ~/rlm-derived/corpus.sqlite \
     --count-only                                    # counts + coverage, no path, safe to paste
+uv run python -m rlm_local.cli corpus counters --corpus-index ~/rlm-derived/corpus.sqlite
+uv run python -m rlm_local.cli corpus counters --corpus-index ~/rlm-derived/corpus.sqlite \
+    --refresh                                       # recompute the snapshot (~16 min; idle index)
 uv run python -m rlm_local.cli mine plan --corpus-index ~/rlm-derived/corpus.sqlite
 uv run python -m rlm_local.cli mine status --corpus-index ~/rlm-derived/corpus.sqlite
 uv run python -m rlm_local.cli mine run --corpus-root /srv/corpus \
@@ -174,7 +177,18 @@ requirement alone produced 0 cited answers in 3 live runs of the 4B laptop model
 (`docs/20260915-0655-corpus-citation-compliance-measured.md`). Each accepted
 answer writes one `corpus_citation` guardrail event with
 `answers_with_address=True|False`, and each refusal a `corpus_uncited` event —
-read the counts with `grep -c` rather than reading the answers.
+read the counts with `grep -c` rather than reading the answers. **The escape hatch
+is still unverified**: the first attempt to test it (an unanswerable question)
+died before the model could submit, because the search counted the index it was
+searching (roadmap CL6). Re-run it now that the search path reads a published
+snapshot instead.
+
+**Never count a big table on a cell's path.** `corpus_search` and
+`corpus_coverage` quote a *published* coverage snapshot (`rlm corpus counters`,
+recomputed by `--refresh` or at the end of every mining window); a search that
+finds nothing and has no snapshot says **unknown**, never zero. The measurements
+that forced this are in `docs/20260915-2305-corpus-search-cannot-count-its-own-index.md`:
+`search` 0.2 s against `COUNT(*) FROM text_chunks` 972 s, and a 120 s cell limit.
 
 `-k "not slow and not load"` is **wrong**: `-k` matches a substring of the node
 id, so it also drops ~20 tests that merely mention "load" in their name

@@ -448,6 +448,51 @@ class TestCorpusSearchCommand:
         assert "no index at" in capsys.readouterr().err
 
 
+class TestCorpusCountersCommand:
+    """`rlm corpus counters` — the snapshot a search quotes, shown or recomputed.
+
+    Two verbs in one command on purpose: reading is instant, refreshing takes ~16
+    minutes on the live index. A search inside a 120 s REPL cell can afford the
+    first and never the second, so the interface has to make the difference
+    visible rather than hiding a scan behind a read.
+    """
+
+    def test_without_a_snapshot_it_says_unknown_not_zero(
+        self, corpus: Path, index_path: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        cli_main(["corpus", "index", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path)])
+        capsys.readouterr()
+        rc = cli_main(["corpus", "counters", "--corpus-index", str(index_path)])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "unknown" in out.lower()
+        assert "It is not zero" in out
+
+    def test_refresh_publishes_and_then_reads_back(
+        self, corpus: Path, index_path: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        cli_main(["corpus", "index", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path)])
+        capsys.readouterr()
+        assert cli_main(["corpus", "counters", "--corpus-index", str(index_path),
+                         "--refresh"]) == 0
+        refreshed = capsys.readouterr().out
+        assert "sources_indexed:" in refreshed
+
+        assert cli_main(["corpus", "counters",
+                         "--corpus-index", str(index_path)]) == 0
+        read_back = capsys.readouterr().out
+        assert "sources_indexed:" in read_back
+
+    def test_it_needs_an_index(self, tmp_path: Path,
+                               capsys: pytest.CaptureFixture) -> None:
+        rc = cli_main(["corpus", "counters",
+                       "--corpus-index", str(tmp_path / "absent.sqlite")])
+        assert rc == 2
+        assert "no index at" in capsys.readouterr().err
+
+
 class TestAskWithACorpus:
     def test_ask_with_only_a_corpus_uses_the_stub_context(
         self, corpus: Path, index_path: Path, monkeypatch: pytest.MonkeyPatch,

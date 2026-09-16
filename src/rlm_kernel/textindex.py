@@ -27,6 +27,7 @@ made the marker proof and the partial index honest).
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import time
@@ -71,6 +72,12 @@ ADDRESS_RE = re.compile(r"^(?P<source>.+?)#L(?P<start>\d+)-(?P<end>\d+)$")
 #: business, and answering that here would make an unindexed citation look like a
 #: fabricated one.
 ADDRESS_IN_TEXT_RE = re.compile(r"#L\d+-\d+")
+
+#: Where the published coverage snapshot lives in the index's `meta` table. Two
+#: keys rather than one so a reader can report the snapshot's age: the numbers are
+#: computed by whoever can afford the scan, and staleness is the only price.
+COVERAGE_SNAPSHOT_KEY = "coverage_snapshot"
+COVERAGE_PUBLISHED_AT_KEY = "coverage_published_at"
 
 
 def is_vendored(display_path: str) -> bool:
@@ -467,17 +474,97 @@ class TextIndex:
             return 0
         return int(row[0]) if row else 0
 
+    # ── The published coverage snapshot ───────────────────────────────────
+
+    def publish_coverage(self, coverage: dict[str, Any]) -> None:
+        """Store a *computed* coverage snapshot for the search path to quote.
+
+        Measured on the real index on 2026-09-15: `search` returns in 0.2 s while
+        `COUNT(*) FROM text_chunks` takes **972 s** and `COUNT(DISTINCT source)`
+        and the classification counts each run past 45 s. `corpus_search` and
+        `corpus_coverage` both called `coverage()`, so every corpus cell blew the
+        REPL's 120 s cell limit, the worker was killed and restarted four times,
+        and a live run ended after two hours with
+        `(No answer produced — forced finalization failed)`.
+
+        So the slow process computes and this path stores: the numbers are always
+        *computed*, never accumulated, which means a snapshot cannot drift away
+        from the index it describes — it can only be old, and
+        `published_coverage` reports its age so a reader can say so out loud.
+        """
+        self._set_meta(COVERAGE_SNAPSHOT_KEY,
+                       json.dumps(dict(coverage), sort_keys=True))
+        self._set_meta(COVERAGE_PUBLISHED_AT_KEY, repr(time.time()))
+
+    def published_coverage(self) -> dict[str, Any] | None:
+        """The last published snapshot, or None when nobody has published one.
+
+        None is what the search path must say "unknown" for: reporting zero
+        instead would be a confident wrong answer about how much of the corpus
+        was searched, which is the failure this project ranks below silence.
+        """
+        raw = self._get_meta(COVERAGE_SNAPSHOT_KEY)
+        if raw is None:
+            return None
+        try:
+            coverage = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(coverage, dict):
+            return None
+        published = self._get_meta(COVERAGE_PUBLISHED_AT_KEY)
+        try:
+            coverage["published_at"] = (float(published)
+                                        if published is not None else None)
+        except (TypeError, ValueError):
+            coverage["published_at"] = None
+        return coverage
+
+    def _get_meta(self, key: str) -> str | None:
+        """Read one meta value, or None — including when the table is missing."""
+        try:
+            row = self._conn.execute(
+                "SELECT value FROM meta WHERE key = ?", (key,)
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        return None if row is None else str(row[0])
+
+    def _set_meta(self, key: str, value: str) -> None:
+        """Write one meta value, creating the table if this database lacks it."""
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        self._conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        self._conn.commit()
+
 
 def coverage_note(coverage: dict[str, Any]) -> str:
-    """The sentence a search result must carry when it is incomplete."""
+    """The sentence a search result must carry when it is incomplete.
+
+    A published snapshot carries `published_at`, and an old one says how old it
+    is: "5 sources indexed" from twenty minutes ago is a different claim from the
+    same words measured a moment ago, and the difference is the whole reason the
+    snapshot exists.
+    """
     pct = 100 * float(coverage.get("text_coverage", 0.0))
     if pct >= 99.5:
         return ""
+    age_suffix = ""
+    published = coverage.get("published_at")
+    if isinstance(published, (int, float)):
+        age = max(0.0, time.time() - float(published))
+        if age >= 60:
+            age_suffix = f" (snapshot {int(age // 60)} min ago)"
     return (
         f"[coverage: {coverage.get('sources_indexed', 0):,} sources indexed "
         f"({pct:.1f}% of the {coverage.get('text_files_in_map', 0):,} text files; "
         f"{coverage.get('documents_extracted', 0):,} documents extracted, "
-        f"{coverage.get('documents_needing_ocr', 0):,} awaiting OCR)]"
+        f"{coverage.get('documents_needing_ocr', 0):,} awaiting OCR)]{age_suffix}"
     )
 
 

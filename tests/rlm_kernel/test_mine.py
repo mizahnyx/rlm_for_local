@@ -520,6 +520,24 @@ class TestWindows:
         ).fetchone()[0]
         assert note == "no_handler"
 
+    def test_a_window_publishes_the_coverage_snapshot(
+        self, store: MineStore, mount: LocalTreeMount, derived: Path,
+    ) -> None:
+        """The miner is the process allowed to be slow, so it publishes (RO4).
+
+        Counting the chunk table takes ~16 minutes on the real index; a search
+        cannot afford that, and this is where the number is paid for instead —
+        once per window, by the worker that is already hours long.
+        """
+        from rlm_kernel.textindex import TextIndex
+
+        store.enqueue([(b"bundle.zip", LIST_ARCHIVE, 30)])
+        run_queue(store=store, conn=store._conn, mount=mount,  # noqa: SLF001
+                  cache_root=derived, tasks=[LIST_ARCHIVE])
+        snapshot = TextIndex(store._conn).published_coverage()  # noqa: SLF001
+        assert snapshot is not None, "a finished window must publish coverage"
+        assert "sources_indexed" in snapshot
+
 
 class TestTheLock:
     """The lock holds by heartbeat, and it must never probe a process.
