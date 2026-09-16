@@ -233,6 +233,15 @@ over `tests/` is **1179 passed, 7 skipped, 12 deselected** in ~7 min.)
   `ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL lunacode …`.
   PowerShell re-adds CR to piped scripts; pipe remote scripts through
   `tr -d '\r' | bash -s`.
+- **Never put `tr -d "\r"` in a PowerShell-built ssh one-liner.** The quotes do not
+  survive the trip, `tr` receives the two characters `\r` as a *set* and, once bash
+  has eaten the backslash, deletes **every letter `r`** in the file. On
+  2026-09-16 it turned `cd /home/mizahnyx/Misc/rlm_for_local` into
+  `cd /home/mizahnyx/Misc/lm_fo_local` and the script died before doing anything,
+  which is at least a loud failure. The reliable transfer is base64 alone —
+  `echo <b64> | base64 -d > file` — with LF line endings in the source file;
+  verify with `grep -c` or `head` before running it. (The same shape as the other
+  traps here: a quoting convention that works until it silently does not.)
 - **Do not hand-pick a mix of `tests/` and `tests/rlm_kernel/` modules in one
   pytest invocation.** A combination like
   `pytest tests/rlm_kernel/test_index.py tests/test_cli.py tests/rlm_kernel/test_repl_bridge.py`
