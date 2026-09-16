@@ -94,6 +94,22 @@ NUDGE_CORPUS_UNCITED = (
     "this' is an acceptable answer, an uncited claim about it is not."
 )
 
+# Raised before the *last* turn of a corpus run that has looked but not answered.
+# The turn header already says `Turn 8/8.`, so what is missing is not information
+# about the budget but permission to stop: three live runs on a question the
+# corpus cannot answer each explored to the end (5/8, 8/8, 8/8 turns) and were
+# answered by forced finalization. Appended before the last call, so it costs no
+# extra turn — it changes what the final turn is for. Both arms are named, or a
+# model with nothing to cite is pushed into inventing one.
+NUDGE_CORPUS_LAST_TURN = (
+    "This is your last turn (turn {turn} of {max_turns}). Stop searching and "
+    "submit now. If what you read answers the question, submit it with the "
+    "addresses in a final `Citations:` line. If it does not, submit an answer "
+    "that says the corpus does not contain this and quote the coverage line from "
+    "corpus_coverage() — 'I did not find it' is a complete answer, and a run that "
+    "ends without submitting loses everything it had learned."
+)
+
 # ---------------------------------------------------------------------------
 # Sub-call budget / warning messages (§5.4)
 # ---------------------------------------------------------------------------

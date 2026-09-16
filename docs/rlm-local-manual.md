@@ -924,6 +924,19 @@ Each turn follows this exact sequence:
     `FINAL:` channel gets the unsearched rule as well, because a final line is
     still an answer about a corpus the run may never have opened.
 
+13. **Last-turn nudge (RO4).** A corpus run that reaches its **final turn** having
+    called at least one helper but never submitted is told so before that turn's
+    model call: `NUDGE_CORPUS_LAST_TURN` names both arms — cite what you read, or
+    say the corpus does not contain it and quote the coverage line — and states
+    that "I did not find it" is a complete answer. It costs no turn of its own
+    (it is appended *before* the call), and it fires on that condition only: a run
+    that has not looked at all is the unsearched guard's case, and two conflicting
+    nudges would be worse than one. The reason it exists is measured: three live
+    runs on a question the corpus cannot answer spent 5, 8 and 8 of their turns
+    exploring and were answered by forced finalization. The turn header already
+    carried `Turn N/M`, so what was missing was permission to stop, not
+    information about the budget.
+
 `_record_citations` runs at each of the three places an answer becomes **final**(the answer-dict submission, a courtesy `FINAL:` line, and the forced-finalization
 answer). In a corpus run it counts the answer (`RootLoop.corpus_answers`,
 `RootLoop.corpus_answers_uncited`) and writes one `corpus_citation` guardrail

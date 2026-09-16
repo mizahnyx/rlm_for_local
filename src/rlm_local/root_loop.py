@@ -23,6 +23,7 @@ from rlm_local.templates import (
     FORCED_FINALIZATION_CORPUS_PROMPT,
     FORCED_FINALIZATION_PROMPT,
     NO_ANSWER_PRODUCED,
+    NUDGE_CORPUS_LAST_TURN,
     NUDGE_CORPUS_UNCITED,
     NUDGE_CORPUS_UNSEARCHED,
     NUDGE_EMPTY_ANSWER,
@@ -229,6 +230,28 @@ class RootLoop:
             if self._logger:
                 self._logger.log_turn_start(display_turn, max_turns)
                 self._logger.log_root_message("user", turn_header)
+
+            # The last turn of a corpus run that has looked but not answered is
+            # for answering. The header already carries `Turn N/M`, so what is
+            # missing is permission rather than information: three live runs on a
+            # question the corpus cannot answer explored to the end (5/8, 8/8,
+            # 8/8 turns) and were answered by forced finalization instead.
+            # Appended before the final call, so it costs no turn of its own.
+            if (self._corpus_bridge is not None
+                    and self._repl is not None
+                    and self._repl.corpus_calls
+                    and turn == max_turns - 1):
+                last_turn_nudge = NUDGE_CORPUS_LAST_TURN.format(
+                    turn=display_turn, max_turns=max_turns,
+                )
+                messages.append({"role": "user", "content": last_turn_nudge})
+                if self._logger:
+                    self._logger.log_guardrail(
+                        display_turn, "corpus_last_turn",
+                        f"last turn reached with {self._repl.corpus_calls} "
+                        f"corpus helper call(s) and no submission",
+                    )
+                    self._logger.log_root_message("user", last_turn_nudge)
 
             # ── Get root model response ───────────────────────────────────
             root_text = self._backend.chat(

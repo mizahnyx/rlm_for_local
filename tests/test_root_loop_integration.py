@@ -882,6 +882,110 @@ class TestForcedFinalizationCarriesProvenance:
         assert FORCED_FINALIZATION_CORPUS_PROMPT not in backend.user_messages()
 
 
+class TestCorpusLastTurnNudge:
+    """RO4: the last turn is where "I did not find it" has to become sayable.
+
+    Three live runs on a question the corpus cannot answer each spent their whole
+    budget exploring and were answered by forced finalization — 5/8, 8/8, 8/8
+    turns. The turn header already says `Turn 8/8.`, so what was missing was not
+    information about the budget: it was permission to stop. The nudge is appended
+    *before* the last turn's model call, so it costs no extra turn — it changes
+    what the final turn is for.
+    """
+
+    def _stuck_until(self, responses: list[str]):
+        cfg = load_config("tiny", max_turns=3)
+        return cfg, StubBackend(responses=responses)
+
+    def test_a_corpus_run_is_told_its_last_turn_is_for_answering(
+        self, corpus_bridge,
+    ) -> None:
+        from rlm_local.templates import NUDGE_CORPUS_LAST_TURN
+
+        probing = "```repl\nprint(corpus_search('Cuicani'))\n```"
+        answering = ("```repl\nanswer['content'] = 'Not in the corpus.\\n"
+                     "Citations: notes/song.txt#L0-21'\nanswer['ready'] = True\n```")
+        cfg, backend = self._stuck_until([probing, probing, answering])
+        loop = RootLoop(cfg, backend, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            answer = loop.run("Who is Cuicani?", "stub context")
+        finally:
+            loop.shutdown()
+
+        expected = NUDGE_CORPUS_LAST_TURN.format(turn=3, max_turns=3)
+        assert expected in backend.user_messages()
+        # It arrives as the last instruction before the final turn's call, and
+        # exactly once — a nudge that repeats every turn is a nudge the model
+        # learns to ignore.
+        assert backend.trailing_user_messages()[-1] == expected
+        assert sum(1 for m in backend.user_messages() if m == expected) >= 1
+        assert "#L0-21" in answer
+        # Both arms are named, or the nudge would push a model with nothing to
+        # cite into inventing a citation.
+        assert "Citations:" in expected
+        assert "does not contain" in expected
+
+    def test_an_answer_before_the_last_turn_is_not_nudged(
+        self, corpus_bridge,
+    ) -> None:
+        from rlm_local.templates import NUDGE_CORPUS_LAST_TURN
+
+        cfg, backend = self._stuck_until([
+            "```repl\nprint(corpus_search('Cuicani'))\n"
+            "answer['content'] = 'early.\\nCitations: notes/song.txt#L0-21'\n"
+            "answer['ready'] = True\n```",
+        ])
+        loop = RootLoop(cfg, backend, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            answer = loop.run("Who is Cuicani?", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert "#L0-21" in answer
+        assert not any(NUDGE_CORPUS_LAST_TURN.format(turn=3, max_turns=3) == m
+                       for m in backend.user_messages())
+
+    def test_a_run_without_a_corpus_is_never_nudged(self) -> None:
+        from rlm_local.templates import NUDGE_CORPUS_LAST_TURN
+
+        cfg, backend = self._stuck_until([
+            "```repl\nprint('probing')\n```",
+            "```repl\nprint('probing again')\n```",
+            "```repl\nanswer['content'] = 'plain'\nanswer['ready'] = True\n```",
+        ])
+        loop = RootLoop(cfg, backend, kernel_bridge=None)
+        try:
+            answer = loop.run("Question", "Some context")
+        finally:
+            loop.shutdown()
+
+        assert answer == "plain"
+        assert not any("last turn" in m for m in backend.user_messages())
+
+    def test_a_corpus_run_that_never_looked_is_not_told_to_stop(
+        self, corpus_bridge,
+    ) -> None:
+        """The unsearched guard owns that case; two conflicting nudges is worse
+        than one."""
+        from rlm_local.templates import NUDGE_CORPUS_LAST_TURN
+
+        cfg, backend = self._stuck_until([
+            "```repl\nprint(len(context))\n```",
+            "```repl\nprint(len(context))\n```",
+        ] + ["FINAL: gave up"])
+        loop = RootLoop(cfg, backend, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            loop.run("Who is Cuicani?", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert not any(NUDGE_CORPUS_LAST_TURN.format(turn=3, max_turns=3) == m
+                       for m in backend.user_messages())
+
+
 class TestStderrSelfCorrectionWiring:
     """R5 — §5.6 stage 4 must actually run: a traceback must engage the
     consecutive-error budget and hand the model a correction nudge."""

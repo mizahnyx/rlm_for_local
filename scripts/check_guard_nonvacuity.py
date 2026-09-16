@@ -1836,6 +1836,18 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_corpus_run_is_asked_for_its_evidence",
         ],
     ),
+    (
+        "RO4 the last turn stops being the turn for answering",
+        "src/rlm_local/root_loop.py",
+        "                    and self._repl.corpus_calls\n"
+        "                    and turn == max_turns - 1):",
+        "                    and self._repl.corpus_calls\n"
+        "                    and False):",
+        [
+            "tests/test_root_loop_integration.py::TestCorpusLastTurnNudge"
+            "::test_a_corpus_run_is_told_its_last_turn_is_for_answering",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
