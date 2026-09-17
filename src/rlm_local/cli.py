@@ -819,10 +819,15 @@ def _corpus_bridge_for(args: argparse.Namespace):
     # than from a file.
     cache_root = _mine_paths(args)[0] if index else None
     try:
-        return CorpusBridge.open_for(root, index, cache_root=cache_root)
+        bridge = CorpusBridge.open_for(root, index, cache_root=cache_root)
     except ReadOnlyViolation as e:
         print(f"Error: {e}", file=sys.stderr)
         return None
+    # The run's question, so a hit's match-quality label measures the passage
+    # against what was asked rather than against the AND search that found it
+    # (RO4, 2026-09-16). `ask` and `chat` both carry it as `query`.
+    bridge.question = getattr(args, "query", None)
+    return bridge
 
 
 def _cmd_corpus(args: argparse.Namespace) -> int:

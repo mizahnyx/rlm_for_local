@@ -553,6 +553,112 @@ class TextIndex:
         self._conn.commit()
 
 
+# ── How well a hit answered the question (RO4, 2026-09-16) ────────────────
+#
+# Against a *complete* index an unanswerable question is search-**hard**, not
+# search-empty: a model asked about the Zxqvarn Protocol searches *orbital*,
+# *tether* and *ratified*, gets real hits — passages containing the words that do
+# not answer the question — and nothing in the result said how weak those matches
+# were. Five weak hits looked exactly like five strong ones, so it kept searching
+# (8 of 8 turns, twice) and at a shorter budget invented a citation to look
+# finished. The signal is deliberately textual and checkable — "covers 1 of 5
+# query terms" — rather than a raw BM25 float a small model cannot calibrate.
+
+#: Words that carry no retrieval signal in a question. Deliberately short, and
+#: ES + EN because the corpus is both: a stopword list is a policy, and the number
+#: it feeds is *reported* (`terms_matched/terms_total`) rather than hidden, so a
+#: wrong entry surfaces as a coverage claim a reader can check against the query.
+QUERY_STOPWORDS = frozenset({
+    # English
+    "a", "an", "and", "are", "as", "at", "be", "by", "did", "do", "does", "for",
+    "from", "had", "has", "have", "how", "in", "is", "it", "its", "of", "on",
+    "or", "that", "the", "their", "there", "these", "they", "this", "to", "was",
+    "were", "what", "when", "where", "which", "who", "whom", "why", "will",
+    "with", "you", "your",
+    # Spanish
+    "cual", "cuando", "de", "del", "donde", "el", "ella", "ellas", "ellos", "en",
+    "es", "esta", "este", "esto", "fue", "hay", "la", "las", "lo", "los", "mas",
+    "no", "para", "por", "que", "quien", "se", "sin", "su", "sus", "un", "una",
+    "uno", "y", "ya",
+})
+
+#: The bands. First approximations, stated here so they can be argued with: a hit
+#: covering at least 60% of the question's content terms (and at least two of them)
+#: is `strong`, at least two terms `partial`, one term `weak`, none `none` — and a
+#: question with no content terms at all is `unknown`, because "weak" would be a
+#: confident wrong answer about the result the model is holding.
+MATCH_STRONG_RATIO = 0.6
+
+
+def content_terms(query: str) -> list[str]:
+    """The question's retrieval-bearing words: lower-cased, deduplicated, ordered.
+
+    No stemming and no morphology: `protocols` matches `protocol` (word start),
+    `ratification` does not match `ratified`. The count is therefore a *lower
+    bound*, which is the safe direction — it can understate a match but never claim
+    one that is not there.
+    """
+    words = re.findall(r"[\w\u00c0-\u024f]+", (query or "").lower())
+    seen: list[str] = []
+    for word in words:
+        if len(word) < 3 or word in QUERY_STOPWORDS or word in seen:
+            continue
+        seen.append(word)
+    return seen
+
+
+def term_coverage(text: str, terms: list[str] | tuple[str, ...]) -> tuple[int, int]:
+    """`(terms of the question present in this text, terms asked for)`."""
+    terms = list(terms)
+    if not terms:
+        return (0, 0)
+    lowered = (text or "").lower()
+    covered = sum(1 for term in terms if re.search(rf"\b{re.escape(term)}", lowered))
+    return (covered, len(terms))
+
+
+def match_quality(covered: int, total: int) -> str:
+    """One of `strong`, `partial`, `weak`, `none`, `unknown`.
+
+    Covering *every* content word of the question is strong whatever the count —
+    a one-word question answered by the one word is the strongest match there is —
+    and covering at least 60% of a longer question is strong too. Below that, two
+    or more words is `partial` and a single coincidental word is `weak`.
+    """
+    if total <= 0:
+        return "unknown"
+    if covered <= 0:
+        return "none"
+    if covered >= total or covered >= max(2, MATCH_STRONG_RATIO * total):
+        return "strong"
+    if covered >= 2:
+        return "partial"
+    return "weak"
+
+
+def match_note(covered: int, total: int) -> str:
+    """The line a search carries about how well its best hit matched.
+
+    It states the numbers as well as the band, because the band is this project's
+    judgement and the numbers are the evidence for it.
+    """
+    quality = match_quality(covered, total)
+    if quality == "unknown":
+        return ("[match quality: unknown — the question has no content words to "
+                "match on, so how well these hits answer it cannot be judged]")
+    if quality == "none":
+        return (f"[match quality: none — no hit contains any of the {total} content "
+                "words of the question: treat this as an answer of \"the corpus "
+                "does not contain it\"]")
+    if quality == "weak":
+        return (f"[match quality: weak — the best hit covers {covered} of {total} "
+                "content words of the question, which is a coincidence of wording "
+                "rather than an answer: say the corpus does not contain it unless "
+                "the passage itself answers the question]")
+    return (f"[match quality: {quality} — the best hit covers {covered} of {total} "
+            "content words of the question]")
+
+
 def coverage_note(coverage: dict[str, Any]) -> str:
     """The sentence a search result must carry when it is incomplete.
 
@@ -579,14 +685,24 @@ def coverage_note(coverage: dict[str, Any]) -> str:
 
 
 def format_hits(result: SearchResult, texts: list[str], *, width: int = 200) -> str:
-    """The operator's view of a search: address, labels, and a snippet."""
+    """The operator's view of a search: address, labels, and a snippet.
+
+    Carries the same match-quality signal the model sees, so an operator reading a
+    search sees what the model was told about it rather than having to infer it.
+    """
     lines: list[str] = []
+    terms = content_terms(getattr(result, "query", "") or "")
+    best_covered = 0
     for hit, text in zip(result.hits, texts):
         labels = [hit.origin]
         if hit.derived:
             labels.append(f"derived:{hit.engine or 'unknown'}")
         if hit.vendored:
             labels.append("vendored")
+        covered, total = term_coverage(text, terms)
+        best_covered = max(best_covered, covered)
+        if total:
+            labels.append(f"covers {covered}/{total} question words")
         snippet = re.sub(r"\s+", " ", text).strip()[:width]
         lines.append(f"{hit.address}  [{', '.join(labels)}]")
         lines.append(f"    {snippet}")
@@ -597,7 +713,10 @@ def format_hits(result: SearchResult, texts: list[str], *, width: int = 200) -> 
         )
     if result.coverage_note:
         lines.append(result.coverage_note)
-    if not result.hits:
+    if result.hits:
+        lines.append(match_note(best_covered, len(terms)))
+    else:
+        lines.append(match_note(0, len(terms)))
         lines.append("(no matches)")
     return "\n".join(lines)
 

@@ -355,6 +355,108 @@ class TestReset:
         assert index.search("needle").hits == []
 
 
+class TestMatchQuality:
+    """How well a hit answered the *question* (RO4, 2026-09-16).
+
+    The reason this exists: against a complete index, an unanswerable question is
+    search-**hard**, not search-empty. A model asked about the Zxqvarn Protocol
+    searches *orbital*, *tether*, *ratified* and gets real hits — passages
+    containing the words that do not answer the question — because nothing in the
+    result said how weak those matches were. Five weak hits looked exactly like
+    five strong ones, so it kept searching (8/8 turns, twice) and, at a shorter
+    budget, invented a citation to look finished. The signal is deliberately
+    textual and checkable — "covers 1 of 5 query terms" — rather than a raw BM25
+    float a small model cannot calibrate.
+    """
+
+    def test_stopwords_and_short_tokens_are_dropped(self) -> None:
+        from rlm_kernel.textindex import content_terms
+
+        terms = content_terms("Who ratified the Zxqvarn Protocol for orbital tether maintenance?")
+        assert terms == ["ratified", "zxqvarn", "protocol", "orbital", "tether",
+                         "maintenance"]
+
+    def test_terms_are_deduplicated_and_ordered(self) -> None:
+        from rlm_kernel.textindex import content_terms
+
+        assert content_terms("tether tether orbital") == ["tether", "orbital"]
+
+    def test_a_query_of_only_stopwords_has_no_content_terms(self) -> None:
+        from rlm_kernel.textindex import content_terms
+
+        assert content_terms("who is it that they are") == []
+
+    def test_coverage_counts_terms_present_in_the_text(self) -> None:
+        from rlm_kernel.textindex import term_coverage
+
+        covered, total = term_coverage(
+            "The tether was ratified in 1999.",
+            ["ratified", "zxqvarn", "tether"],
+        )
+        assert (covered, total) == (2, 3)
+
+    def test_coverage_is_case_insensitive(self) -> None:
+        from rlm_kernel.textindex import term_coverage
+
+        assert term_coverage("ORBITAL TETHER", ["orbital", "tether"]) == (2, 2)
+
+    def test_coverage_matches_word_starts_but_not_word_insides(self) -> None:
+        """`protocols` counts for `protocol`; `ratification` does not count for
+        `ratified`. The number is a lower bound and is documented as one — the
+        alternative is a stemmer, which is a policy this code does not need."""
+        from rlm_kernel.textindex import term_coverage
+
+        assert term_coverage("two protocols", ["protocol"]) == (1, 1)
+        assert term_coverage("the ratification", ["ratified"]) == (0, 1)
+
+    @pytest.mark.parametrize("covered,total,expected", [
+        (1, 1, "strong"),
+        (2, 2, "strong"),
+        (6, 6, "strong"),
+        (4, 6, "strong"),
+        (3, 6, "partial"),
+        (2, 6, "partial"),
+        (1, 6, "weak"),
+        (0, 6, "none"),
+        (0, 0, "unknown"),
+    ])
+    def test_quality_bands(self, covered: int, total: int, expected: str) -> None:
+        from rlm_kernel.textindex import match_quality
+
+        assert match_quality(covered, total) == expected
+
+    def test_a_one_word_question_answered_by_that_word_is_strong(self) -> None:
+        """The band must not punish a short question: covering *every* content word
+        is the strongest match there is, whatever the count."""
+        from rlm_kernel.textindex import match_quality
+
+        assert match_quality(1, 1) == "strong"
+        assert match_quality(1, 6) == "weak"
+
+    def test_the_note_states_the_numbers_not_a_verdict_alone(self) -> None:
+        from rlm_kernel.textindex import match_note
+
+        weak = match_note(1, 5)
+        assert "weak" in weak
+        assert "1 of 5" in weak
+        # The actionable half: a weak best hit is the moment to say the corpus does
+        # not contain the answer, not to cite the coincidence.
+        assert "does not contain it" in weak.lower()
+
+        strong = match_note(5, 5)
+        assert "strong" in strong
+        assert "5 of 5" in strong
+
+    def test_an_unknown_match_is_not_reported_as_weak(self) -> None:
+        """A query with no content terms is unjudgeable, and saying "weak" would
+        be a confident wrong answer about the result the model is holding."""
+        from rlm_kernel.textindex import match_note
+
+        note = match_note(0, 0)
+        assert "unknown" in note
+        assert "weak" not in note
+
+
 class TestCoverageSnapshot:
     """The search path must never count the chunk table (RO4, 2026-09-15).
 

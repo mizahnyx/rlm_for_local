@@ -896,6 +896,60 @@ class TestBridgeContentSearch:
         assert "no text matches" in hits[0]
         assert "coverage:" in hits[0]
 
+    def test_every_hit_carries_how_much_of_the_question_it_covers(
+        self, searched: CorpusBridge,
+    ) -> None:
+        """The signal that makes "these are not an answer" sayable (RO4).
+
+        Measured against the run's *question*, because the FTS expression is an AND:
+        every hit contains every search word, so a query-relative number would read
+        `strong` by construction. Here the question has six content words and the
+        passage holds one of them — which is the live shape of the failure.
+        """
+        searched.question = ("Who ratified the Zxqvarn Protocol at the festival?")
+        hits = searched.handle_search("festival")
+        assert hits, "the fixture has a festival passage"
+        # Four content words in the question, one of them in the passage.
+        assert "covers 1/4" in hits[0]
+        assert "(weak)" in hits[0], hits[0]
+
+    def test_a_hit_sharing_no_question_word_is_none_not_weak(
+        self, searched: CorpusBridge,
+    ) -> None:
+        """The strongest form of "not an answer": the passage has none of the
+        question's content words, and the label says so rather than shrugging."""
+        searched.question = "Who ratified the Zxqvarn Protocol?"
+        hits = searched.handle_search("festival")
+        assert "covers 0/3" in hits[0]
+        assert "(none)" in hits[0], hits[0]
+
+    def test_without_a_question_no_coverage_is_claimed(
+        self, searched: CorpusBridge,
+    ) -> None:
+        """No question means nothing to compare against, and the honest label is
+        none rather than a number that is true only because of the AND."""
+        assert searched.question is None
+        hits = searched.handle_search("Godot")
+        assert hits and "question's words" not in hits[0]
+
+    def test_a_miss_states_the_match_quality_as_none_not_just_no_matches(
+        self, searched: CorpusBridge,
+    ) -> None:
+        searched.question = "Who ratified the Zxqvarn Protocol?"
+        hits = searched.handle_search("zxqvarn orbital")
+        assert len(hits) == 1
+        assert "no text matches" in hits[0]
+        assert "match quality" in hits[0]
+
+    def test_the_hits_list_is_not_padded_with_a_footer(
+        self, searched: CorpusBridge,
+    ) -> None:
+        """`len(hits)` is the contract; a footer would corrupt it — which is the
+        exact failure the first live run had (it indexed into a formatted string)."""
+        hits = searched.handle_search("Godot")
+        assert len(hits) == 1, "one hit, one element"
+        assert hits[0].startswith("sub/deep.docx#L")
+
     def test_derived_text_is_labelled_with_its_engine(
         self, searched: CorpusBridge,
     ) -> None:

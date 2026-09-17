@@ -151,9 +151,17 @@ CORPUS_SECTION_LINES = (
     " the address it came from, in a final line of your answer:"
     " `Citations: <path>#L<start>-<end>; <path>#L<start>-<end>`. An address is the"
     " one form that can be checked — quote the ones you read, not the ones you"
-    " searched for. If the corpus does not contain the answer, say that instead"
-    " and give corpus_coverage(), because an answer with no address and no"
-    " coverage note is a guess wearing the corpus's name.",
+    " searched for; an address no helper gave you is refused. If the corpus does"
+    " not contain the answer, say that instead and give corpus_coverage(), because"
+    " an answer with no address and no coverage note is a guess wearing the"
+    " corpus's name.",
+    "- **Read the match quality before you trust a hit.** Every hit is labelled"
+    " `covers <n>/<m> question words (strong|partial|weak)`, counting the"
+    " question's content words present in that passage. `weak` means the words"
+    " matched by coincidence and the passage does not answer the question: say the"
+    " corpus does not contain the answer instead of citing it. `strong` means the"
+    " passage carries the question's words together, which is what an answer looks"
+    " like. Searching more does not turn a weak match into an answer.",
     "- corpus_coverage() — one line saying how much of the corpus is indexed. Call"
     " it before concluding that something is absent.",
     "- corpus_find(query, limit=20, kind=None, under=\"\") — search paths by name."

@@ -1873,6 +1873,33 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_search_serves_the_addresses_it_returns",
         ],
     ),
+    # ── RO4: match quality, measured against the question (2026-09-16) ────
+    (
+        "RO4 the match label measures the search instead of the question",
+        "src/rlm_kernel/corpus.py",
+        "        terms = content_terms(self.question or \"\")",
+        "        terms = content_terms(query)",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestBridgeContentSearch"
+            "::test_every_hit_carries_how_much_of_the_question_it_covers",
+            "tests/rlm_kernel/test_corpus.py::TestBridgeContentSearch"
+            "::test_without_a_question_no_coverage_is_claimed",
+        ],
+    ),
+    (
+        "RO4 every match is called strong",
+        "src/rlm_kernel/textindex.py",
+        "    if covered >= total or covered >= max(2, MATCH_STRONG_RATIO * total):\n"
+        "        return \"strong\"",
+        "    if True:\n"
+        "        return \"strong\"",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestMatchQuality"
+            "::test_quality_bands[1-6-weak]",
+            "tests/rlm_kernel/test_corpus.py::TestBridgeContentSearch"
+            "::test_a_hit_sharing_no_question_word_is_none_not_weak",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

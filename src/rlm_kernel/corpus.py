@@ -44,7 +44,14 @@ from rlm_kernel.mounts import (
     ReadOnlyViolation,
     assert_derived_outside_corpus,
 )
-from rlm_kernel.textindex import ADDRESS_RE, coverage_note
+from rlm_kernel.textindex import (
+    ADDRESS_RE,
+    content_terms,
+    coverage_note,
+    match_note,
+    match_quality,
+    term_coverage,
+)
 
 #: Hard bounds. A tool result is read into a small model's context window, so the
 #: caps are part of the interface, not caller politeness: `FIND_LIMIT_MAX` keeps a
@@ -543,6 +550,17 @@ class CorpusBridge:
     """Where derived text lives, for citations that point into the cache rather
     than into a file. Without it, derived chunks report that they cannot be
     re-read rather than pretending to have text."""
+    question: str | None = None
+    """The run's question, when the caller knows it (RO4, 2026-09-16).
+
+    The match-quality label compares a hit against *this*, not against the search
+    the model happened to run, because the FTS expression is an AND: every hit
+    necessarily contains every search word, so a label measured against the query
+    would read `strong` by construction and tell the model nothing. Measured
+    against the question, a passage holding one of six content words is honestly
+    `weak` — which is the sentence that lets a model answer "the corpus does not
+    contain this" instead of citing a coincidence. Without a question the label is
+    omitted rather than faked."""
 
     @classmethod
     def open_for(
@@ -716,8 +734,16 @@ class CorpusBridge:
 
         result = text_index.search(query, k=k, include_vendored=include_vendored,
                                    derived_only=derived_only)
+        # Every result carries how well its best hit answered the *question*, because
+        # against a complete index the failure mode is not "no matches" — it is real
+        # hits that do not answer it. Measured against the run's question, never
+        # against the search expression: the expression is an AND, so a query-relative
+        # number would be `strong` for every hit by construction.
+        terms = content_terms(self.question or "")
         if not result.hits:
             lines = [CORPUS_TEXT_NO_MATCHES]
+            if terms:
+                lines.append(match_note(0, len(terms)))
             if result.hidden_vendored:
                 lines.append(CORPUS_VENDORED_HIDDEN.format(n=result.hidden_vendored))
             # The published snapshot, never a scan: counting the chunk table takes
@@ -732,20 +758,31 @@ class CorpusBridge:
             return ["\n".join(lines)]
 
         hits: list[str] = []
+        best_covered = 0
         for hit in result.hits:
             try:
                 text = text_index.read(hit, mount=self.mount, cache_root=self.cache_root)
             except ReadOnlyViolation as e:
                 text = CORPUS_NOT_REREADABLE.format(error=e)
+            covered, total = term_coverage(text, terms)
+            best_covered = max(best_covered, covered)
             labels = [hit.origin]
             if hit.derived:
                 labels.append(f"derived:{hit.engine or 'unknown'}")
             if hit.vendored:
                 labels.append("vendored")
+            if total:
+                labels.append(f"covers {covered}/{total} of the question's words "
+                              f"({match_quality(covered, total)})")
             snippet = " ".join(text.split())[:300]
             hits.append(f"{hit.address}  [{', '.join(labels)}]\n    {snippet}")
         if result.hidden_vendored:
             hits.append(CORPUS_VENDORED_HIDDEN.format(n=result.hidden_vendored))
+        # The match quality rides on every hit rather than in a footer: this list is
+        # the contract (`len(hits)`, `hits[0]`, iteration), and a footer would corrupt
+        # exactly the thing the first live run was broken by. A set-level sentence is
+        # available through `corpus_coverage()`, and the per-hit bands say the same
+        # thing without lying about the length.
         return hits
 
     def handle_coverage(self) -> str:

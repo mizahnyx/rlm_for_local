@@ -149,6 +149,18 @@ class TestWorkerDefinesTheCorpusVerbs:
         section = corpus_helpers_section("/srv/corpus", has_index=True)
         assert "Never walk the corpus" in section
 
+    def test_the_section_explains_the_match_quality_label(self) -> None:
+        """The label is only useful if the prompt says what to do with it (RO4).
+
+        A weak match is the moment to answer "the corpus does not contain this",
+        and that sentence has to be in the prompt or the label is decoration.
+        """
+        section = corpus_helpers_section("/srv/corpus", has_index=True)
+        assert "match quality" in section
+        assert "question words" in section
+        assert "weak" in section and "strong" in section
+        assert "does not contain the answer" in section
+
     def test_the_section_requires_the_answer_to_cite_its_evidence(self) -> None:
         """RO4, owner call 2026-09-14: the answer must carry the addresses it used.
 
