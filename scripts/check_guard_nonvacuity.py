@@ -1966,11 +1966,13 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO4 the sandbox stops remembering the band a hit was served with",
         "src/rlm_local/repl.py",
-        "            for address, band in _served_bands(result).items():\n"
+        "            bands = _served_bands(result)\n"
+        "            for address, band in bands.items():\n"
         "                current = self.corpus_address_bands.get(address)\n"
         "                if current is None or BAND_ORDER.index(band) < BAND_ORDER.index(current):\n"
         "                    self.corpus_address_bands[address] = band",
-        "            for address, band in _served_bands(result).items():\n"
+        "            bands = _served_bands(result)\n"
+        "            for address, band in bands.items():\n"
         "                pass",
         [
             "tests/test_corpus_repl.py::TestTheSandboxRemembersWhichBandAServedHitHad"
@@ -2011,6 +2013,104 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         [
             "tests/test_root_loop_integration.py::TestAnAnswerMustRestOnAnAnsweringMatch"
             "::test_the_refusal_records_the_band_it_refused_on",
+        ],
+    ),
+    # ── RO10: the trace viewer, and the records it audits (2026-09-17) ─────
+    (
+        "RO10 the run stops recording which addresses a helper served",
+        "src/rlm_local/root_loop.py",
+        "        self._repl._corpus_serve_logger = self._log_corpus_served",
+        "        self._repl._corpus_serve_logger = None",
+        [
+            "tests/test_root_loop_integration.py::TestARunRecordsWhatEachHelperServed"
+            "::test_a_search_leaves_the_addresses_and_their_bands",
+        ],
+    ),
+    (
+        "RO10 a failed helper call is recorded as a success that served an address",
+        "src/rlm_local/repl.py",
+        "            self._report_served(msg_type, msg, [], chars=len(text), ok=False)",
+        "            self._report_served(msg_type, msg, [str(msg.get(\"rel\") or \"\")],\n"
+        "                                chars=len(text), ok=True)",
+        [
+            "tests/test_corpus_repl.py::TestTheSandboxReportsWhatItServed"
+            "::test_a_failed_call_is_reported_as_a_failure_that_served_nothing",
+        ],
+    ),
+    (
+        "RO10 the band stops travelling with the address",
+        "src/rlm_local/repl.py",
+        "        payload = [{\"address\": address, \"band\": bands.get(address)}\n"
+        "                   for address in addresses]",
+        "        payload = [{\"address\": address, \"band\": None}\n"
+        "                   for address in addresses]",
+        [
+            "tests/test_corpus_repl.py::TestTheSandboxReportsWhatItServed"
+            "::test_a_search_reports_every_address_with_its_band",
+            "tests/test_root_loop_integration.py::TestATraceOfARealRunIsAuditable"
+            "::test_the_page_carries_the_band_and_the_passage_behind_it",
+        ],
+    ),
+    (
+        "RO10 the rendered page stops embedding the passage",
+        "src/rlm_local/traceview.py",
+        "        run_passages = (passages or {}).get(str(path)) or (passages or {}).get(run.path.name) or {}",
+        "        run_passages = {}",
+        [
+            "tests/test_cli_trace.py::TestTraceRenderWithACorpus"
+            "::test_the_page_embeds_the_passage",
+        ],
+    ),
+    (
+        "RO10 a trace directory inside the corpus is accepted",
+        "src/rlm_local/traceview.py",
+        "    if corpus_root is not None:\n"
+        "        assert_derived_outside_corpus(corpus_root, out_dir)",
+        "    if False:\n"
+        "        assert_derived_outside_corpus(corpus_root, out_dir)",
+        [
+            "tests/test_traceview.py"
+            "::test_a_trace_directory_inside_the_corpus_is_refused",
+            "tests/test_cli_trace.py::TestTraceRender"
+            "::test_a_write_target_inside_the_corpus_is_refused",
+        ],
+    ),
+    (
+        "RO10 the summary starts carrying the question",
+        "src/rlm_local/traceview.py",
+        "        f\"{run.path.name}: turns={run.turns_used if run.turns_used is not None else '?'}\"",
+        "        f\"{run.path.name} question={run.query}:\"\n"
+        "        f\" turns={run.turns_used if run.turns_used is not None else '?'}\"",
+        [
+            "tests/test_traceview.py"
+            "::test_the_summary_carries_no_question_no_address_and_no_quote",
+            "tests/test_cli_trace.py::TestTraceRender"
+            "::test_the_terminal_gets_aggregates_and_never_corpus_text",
+        ],
+    ),
+    (
+        "RO10 an unserved citation is audited as if it had answered",
+        "src/rlm_local/traceview.py",
+        "            if address not in served:\n"
+        "                audit.cited_unserved.append(address)",
+        "            if False:\n"
+        "                audit.cited_unserved.append(address)",
+        [
+            "tests/test_traceview.py"
+            "::test_a_run_without_served_events_says_the_audit_is_partial",
+        ],
+    ),
+    (
+        "RO10 a torn trajectory line crashes the viewer",
+        "src/rlm_local/traceview.py",
+        "        except json.JSONDecodeError:\n"
+        "            torn += 1\n"
+        "            continue",
+        "        except json.JSONDecodeError:\n"
+        "            raise",
+        [
+            "tests/test_traceview.py"
+            "::test_a_truncated_last_line_is_reported_rather_than_fatal",
         ],
     ),
 ]

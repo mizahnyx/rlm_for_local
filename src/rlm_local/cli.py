@@ -286,6 +286,42 @@ def build_parser() -> argparse.ArgumentParser:
     p_ccounters.add_argument("--refresh", action="store_true",
                              help="Recompute the snapshot now (reads the whole index)")
 
+    # ── trace ────────────────────────────────────────────────────────────
+    p_trace = sub.add_parser(
+        "trace",
+        help="Read a run's trajectory back as Markdown, for a human",
+        description=(
+            "Turn a trajectory JSONL into readable Markdown: one page per run "
+            "(question, turn-by-turn transcript, citation audit, and the passage "
+            "behind every cited or served address) plus an index over a directory "
+            "of runs. **The pages contain corpus text**, so they are written where "
+            "the corpus is — 0600 in a 0700 directory, refused inside the corpus "
+            "root — and this command prints only counts and the output path. "
+            "`trace summary` prints those counts and writes nothing, which is the "
+            "form that may travel (AGENTS.md 1.9)."
+        ),
+    )
+    trace_sub = p_trace.add_subparsers(dest="trace_command")
+
+    p_trender = trace_sub.add_parser(
+        "render", help="Write an index and one Markdown page per trajectory")
+    p_trender.add_argument("path", nargs="?", default="logs/trajectories",
+                           help="A trajectory JSONL, or a directory of them "
+                                "(default: logs/trajectories)")
+    p_trender.add_argument("--out-dir", type=Path, required=True,
+                           help="Where the pages go — outside the corpus root")
+    p_trender.add_argument("--summary", action="store_true",
+                           help="Also print one counts line per run (no paths, no text)")
+    _add_corpus_flags(p_trender, require_root=False, require_index=False)
+    p_trender.add_argument("--no-passages", action="store_true",
+                           help="Addresses and bands only: do not embed passage text")
+    p_trender.add_argument("--max-passage", type=int, default=None,
+                           help="Characters of each passage to embed")
+
+    p_tsummary = trace_sub.add_parser(
+        "summary", help="Print one counts line per trajectory and write nothing")
+    p_tsummary.add_argument("path", nargs="?", default="logs/trajectories")
+
     # ── mine ─────────────────────────────────────────────────────────────
     p_mine = sub.add_parser(
         "mine",
@@ -390,6 +426,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_optimize(args)
     elif args.command == "corpus":
         return _cmd_corpus(args)
+    elif args.command == "trace":
+        return _cmd_trace(args)
     elif args.command == "mine":
         return _cmd_mine(args)
     else:
@@ -828,6 +866,75 @@ def _corpus_bridge_for(args: argparse.Namespace):
     # (RO4, 2026-09-16). `ask` and `chat` both carry it as `query`.
     bridge.question = getattr(args, "query", None)
     return bridge
+
+
+# ── trace ─────────────────────────────────────────────────────────────────
+
+def _cmd_trace(args: argparse.Namespace) -> int:
+    """`rlm trace render|summary` — read a trajectory back as a human can (RO10).
+
+    The rendered pages contain corpus text, so this command is deliberately terse:
+    it prints the output directory and counts, never a page, a question or an
+    address. `summary` writes nothing at all and is the form that may leave the
+    machine (AGENTS.md §1.9).
+    """
+    from rlm_local.traceview import (
+        DEFAULT_PASSAGE_CHARS,
+        collect_passages,
+        collect_trajectories,
+        read_trajectory,
+        render_summary,
+        render_traces,
+    )
+
+    subcommand = getattr(args, "trace_command", None)
+    if subcommand not in ("render", "summary"):
+        print("Usage: rlm trace render|summary <path> [--out-dir DIR]")
+        return 2
+
+    paths = collect_trajectories(args.path)
+    if not paths or any(not Path(path).exists() for path in paths):
+        print(f"Error: no trajectories found at {args.path}", file=sys.stderr)
+        return 2
+
+    if subcommand == "summary":
+        for path in paths:
+            print(render_summary(read_trajectory(path)))
+        return 0
+
+    passages: dict[str, dict[str, str]] = {}
+    if not args.no_passages:
+        bridge = _corpus_bridge_for(args)
+        if bridge is not None:
+            try:
+                for path in paths:
+                    run = read_trajectory(path)
+                    passages[str(path)] = collect_passages(run, bridge)
+            finally:
+                bridge.close()
+        else:
+            print("Note: no corpus configured, so pages carry addresses without "
+                  "their passages (`--corpus-root`/`--corpus-index` add them).",
+                  file=sys.stderr)
+
+    try:
+        written = render_traces(
+            paths, args.out_dir,
+            corpus_root=getattr(args, "corpus_root", None),
+            passages=passages,
+            max_passage=args.max_passage or DEFAULT_PASSAGE_CHARS,
+        )
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+
+    pages = [p for p in written if p.name != "index.md"]
+    print(f"Wrote {len(pages)} page(s) and an index to {args.out_dir}")
+    print(f"  open {args.out_dir / 'index.md'}")
+    if args.summary:
+        for path in paths:
+            print(render_summary(read_trajectory(path)))
+    return 0
 
 
 def _cmd_corpus(args: argparse.Namespace) -> int:

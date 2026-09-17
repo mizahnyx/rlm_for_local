@@ -216,6 +216,9 @@ class RootLoop:
         # What each search *served*, so the trajectory records what the model was
         # shown rather than the harness inferring it from the code (RO4).
         self._repl._corpus_quality_logger = self._log_search_quality
+        # Which addresses each helper handed over, with the band it came with, so a
+        # rendered trace can audit a citation against what was served (RO10).
+        self._repl._corpus_serve_logger = self._log_corpus_served
         self._repl.start(ctx_handle, self._subcall_mgr, definitions=definitions)
 
         # ── Main loop ─────────────────────────────────────────────────────
@@ -696,6 +699,22 @@ class RootLoop:
             turn, "corpus_uncited",
             f"{where}answer refused: {why} (unserved={unserved} "
             f"nudges={nudges}/{cfg.max_consecutive_nudges})",
+        )
+
+    def _log_corpus_served(self, verb: str, query: str,
+                           addresses: list[dict[str, Any]], chars: int,
+                           ok: bool) -> None:
+        """Record one corpus helper result as data a trace can be audited against.
+
+        `corpus_search_quality` records how many of each band a search served; this
+        records *which* addresses, so the question the owner's review is built on —
+        "was this citation served, and did the passage behind it answer the
+        question?" — is answerable from the trajectory alone (RO10, 2026-09-17).
+        """
+        if not self._logger:
+            return
+        self._logger.log_corpus_served(
+            getattr(self, "_current_turn", 0), verb, query, addresses, chars, ok,
         )
 
     def _log_search_quality(self, distribution: dict[str, int],

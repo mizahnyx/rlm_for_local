@@ -1461,7 +1461,17 @@ Each line is a JSON object with an `event` field and a `timestamp`. Event types:
 | `repl_result` | `turn`, `stdout`, `stderr`, `final_answer`, `warnings`, `answer_state` | After each REPL cell executes |
 | `subcall` | `turn`, `index`, `prompt`, `response`, `schema`, `cached` | After each sub-LLM call |
 | `guardrail` | `turn`, `guardrail`, `detail` | Parser nudges, rescue actions, warnings |
+| `corpus_served` | `turn`, `verb`, `query`, `addresses`, `chars`, `ok` | After each `corpus_*` helper call in a corpus run |
 | `end` | `elapsed_s`, `final_answer`, `turns_used`, `subcalls_used`, `forced` | `completion()` ends |
+
+`corpus_served` is the structured form of what a helper handed over (RO10): each
+entry in `addresses` is `{"address": …, "band": …}`, where the band is the search's
+own label for that hit (`strong`/`partial`/`weak`/`none`) or `null` for a helper
+that judged nothing (`corpus_read`). A failed call is recorded with `ok=false` and
+no addresses — asking for an address is not being served it. The sibling
+`corpus_search_quality` guardrail records the *distribution*
+(`served weak=3 chars=1234`); this records *which* addresses, which is what makes a
+citation auditable after the fact rather than merely countable.
 
 `answer_state` is the scaffold `answer` as it stood when the cell ended — `is_dict`,
 `keys`, `ready`, `content_set`, `content_len`, or `{"is_dict": false, "type": …}`
@@ -1524,6 +1534,31 @@ root_messages = [
     if e["event"] == "root_message"
 ]
 ```
+
+### 12.5 Reading a trajectory back: `rlm_local.traceview` (RO10)
+
+Hand-parsing a JSONL is fine for a count and hopeless for an assessment. `traceview`
+renders a trajectory as Markdown — one page per run plus an index — with the
+question, the outcome, the counts, a **citation audit** (cited-and-answering,
+cited-but-non-answering, cited-but-never-served, served-and-never-cited) and the
+passage behind every cited or served address, resolved read-only through the
+corpus mount:
+
+```python
+from rlm_local.traceview import collect_passages, read_trajectory, render_run_markdown
+
+run = read_trajectory("logs/traj.jsonl")
+page = render_run_markdown(run, collect_passages(run, corpus_bridge))
+```
+
+The CLI wrapper is `rlm trace render <path> --out-dir DIR [--corpus-root … --corpus-index …]`
+and `rlm trace summary <path>`. Two properties are enforced rather than intended:
+the rendered directory is refused inside the corpus root and written 0600 in a 0700
+directory (the pages contain corpus text), and `render_summary` carries no
+question, address or quote, so it is the form that may leave the machine
+(`AGENTS.md` §1.9). An audit says it is **partial** when the trajectory cannot
+support it — no `corpus_served` events, or a torn final line — instead of
+reporting an unverifiable "nothing was fabricated".
 
 ---
 

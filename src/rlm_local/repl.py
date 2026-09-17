@@ -820,6 +820,12 @@ class REPLSandbox:
         #: sandbox serves, so the run's trajectory records what the model was shown.
         #: Injected by the root loop like the other bridges.
         self._corpus_quality_logger: Any = None
+        #: Called as `report(verb, query, addresses, chars, ok)` after every corpus
+        #: helper call, where `addresses` is `[{"address": …, "band": …}]`. The
+        #: distribution the quality logger reports says how many of each band were
+        #: served; this says *which* addresses, which is what a citation audit and a
+        #: rendered trace need (RO10). Injected by the root loop.
+        self._corpus_serve_logger: Any = None
         # R4 protocol state
         self._cell_seq = 0
         self._init_payload: dict | None = None
@@ -1164,17 +1170,48 @@ class REPLSandbox:
         text = ("\n".join(str(part) for part in result)
                 if isinstance(result, (list, tuple)) else str(result))
         if text.startswith("Error:"):
+            # A failed call served nothing, and that is worth recording as a
+            # failure rather than as an empty success: "asking for an address" must
+            # not read as "being served one" in the trace either.
+            self._report_served(msg_type, msg, [], chars=len(text), ok=False)
             return
         served = set(ADDRESS_TOKEN_RE.findall(text))
         if msg_type == "corpus_read":
             served.update(ADDRESS_TOKEN_RE.findall(str(msg.get("rel") or "")))
         self.corpus_addresses_served.update(served)
+        bands: dict[str, str] = {}
         if msg_type == "corpus_search":
-            for address, band in _served_bands(result).items():
+            bands = _served_bands(result)
+            for address, band in bands.items():
                 current = self.corpus_address_bands.get(address)
                 if current is None or BAND_ORDER.index(band) < BAND_ORDER.index(current):
                     self.corpus_address_bands[address] = band
             self._report_search_quality(text)
+        self._report_served(msg_type, msg, sorted(served), bands=bands,
+                            chars=len(text), ok=True)
+
+    def _report_served(self, msg_type: str, msg: dict, addresses: list[str],
+                       bands: dict[str, str] | None = None, chars: int = 0,
+                       ok: bool = True) -> None:
+        """Tell the parent which addresses a helper call handed over, and their bands.
+
+        Same reason as `_report_search_quality`: the hit list and its labels live
+        inside tool results the model may never print, so after the run the
+        trajectory would contain no record of what the model was shown — and "was
+        this citation served, and did the passage behind it answer the question?"
+        would be unanswerable rather than merely unanswered (RO10, 2026-09-17).
+        """
+        report = self._corpus_serve_logger
+        if report is None:
+            return
+        bands = bands or {}
+        payload = [{"address": address, "band": bands.get(address)}
+                   for address in addresses]
+        query = str(msg.get("query") or msg.get("rel") or "")
+        try:
+            report(msg_type, query, payload, chars, ok)
+        except Exception:  # pragma: no cover - telemetry must never break a cell
+            pass
 
     def _report_search_quality(self, text: str) -> None:
         """Tell the parent what a search *served*, so the log can say what the model

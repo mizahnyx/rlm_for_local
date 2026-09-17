@@ -1358,6 +1358,100 @@ class TestAnAnswerMustRestOnAnAnsweringMatch:
         assert answer.strip() != ""
 
 
+class TestARunRecordsWhatEachHelperServed:
+    """The served result is structured data in the trajectory, not just counts.
+
+    The owner's review of a run asks two questions a distribution cannot answer:
+    *was this citation served?* and *did the passage behind it answer the
+    question?* The parent serves every helper call, so the parent writes the
+    addresses and their bands into the trajectory — which is what makes a rendered
+    trace auditable rather than decorative (RO10, 2026-09-17).
+    """
+
+    def test_a_search_leaves_the_addresses_and_their_bands(
+        self, tiny_cfg, corpus_bridge, tmp_path,
+    ) -> None:
+        import json
+
+        from rlm_local.logger import TrajectoryLogger
+
+        logger = TrajectoryLogger(tmp_path / "traj.jsonl")
+        backend = StubBackend(responses=[
+            "```repl\nprint(corpus_search('Cuicani'))\n```",
+            "```repl\nanswer['content'] = ('in the notes\\n"
+            "Citations: notes/song.txt#L0-21')\nanswer['ready'] = True\n```",
+        ])
+        loop = RootLoop(tiny_cfg, backend, logger=logger, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            loop.run("Who is Cuicani?", "stub context")
+        finally:
+            loop.shutdown()
+
+        events = [json.loads(line) for line in
+                  logger.path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        served = [e for e in events if e.get("event") == "corpus_served"]
+        searches = [e for e in served if e["verb"] == "corpus_search"]
+        assert searches, "a search must leave a structured record of what it served"
+        assert searches[0]["query"] == "Cuicani"
+        assert searches[0]["ok"] is True
+        assert [a["address"] for a in searches[0]["addresses"]] == ["notes/song.txt#L0-21"]
+        assert searches[0]["addresses"][0]["band"] == "strong"
+        assert searches[0]["turn"] >= 1
+
+
+class TestATraceOfARealRunIsAuditable:
+    """The viewer, run end-to-end over a trajectory the harness actually wrote.
+
+    A synthetic fixture proves the renderer; this proves the *pair* — that a run
+    records enough for the page to answer "was this citation served, and did it
+    answer the question?" without inference.
+    """
+
+    def test_the_page_carries_the_band_and_the_passage_behind_it(
+        self, tiny_cfg, corpus_bridge, tmp_path,
+    ) -> None:
+        from rlm_local.logger import TrajectoryLogger
+        from rlm_local.traceview import (
+            collect_passages,
+            read_trajectory,
+            render_run_markdown,
+            render_summary,
+        )
+
+        logger = TrajectoryLogger(tmp_path / "traj.jsonl")
+        backend = StubBackend(responses=[
+            "```repl\nprint(corpus_search('Cuicani'))\n```",
+            "```repl\nanswer['content'] = ('It is in the notes.\\n"
+            "Citations: notes/song.txt#L0-21')\nanswer['ready'] = True\n```",
+        ])
+        loop = RootLoop(tiny_cfg, backend, logger=logger, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            answer = loop.run("Who is Cuicani?", "stub context")
+        finally:
+            loop.shutdown()
+        assert "notes/song.txt#L0-21" in answer
+
+        run = read_trajectory(logger.path)
+        audit = run.audit()
+        assert audit.complete, audit.notes
+        assert audit.cited_answering == ["notes/song.txt#L0-21"]
+        assert audit.cited_unserved == []
+
+        page = render_run_markdown(run, collect_passages(run, corpus_bridge))
+        assert "**strong**" in page
+        assert "Cuicani sang it first" in page
+        assert "corpus_search" in page
+
+        # The summary is the form that may travel: counts, no question, no address.
+        summary = render_summary(run)
+        assert "audit=complete" in summary
+        assert "answers=1" in summary
+        assert "notes/song.txt" not in summary
+        assert "Cuicani" not in summary
+
+
 class TestSearchQualityIsLogged:
     """What a search served is a fact in the trajectory, not an inference (RO4).
 

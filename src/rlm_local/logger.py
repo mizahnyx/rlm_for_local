@@ -165,6 +165,33 @@ class TrajectoryLogger:
             "detail": detail,
         })
 
+    def log_corpus_served(self, turn: int, verb: str, query: str,
+                          addresses: list[dict[str, Any]], chars: int,
+                          ok: bool = True) -> None:
+        """Record one corpus helper call's *result* as structured data (RO10).
+
+        `log_guardrail(..., "corpus_search_quality", ...)` records a distribution;
+        this records which addresses were handed over and the band each came with,
+        which is what a citation audit needs — "was this citation served, and did
+        the passage behind it answer the question?" The parent answers every helper
+        call, so the parent is the only place that knows, and the hit list itself
+        lives inside a tool result the model may never print.
+
+        A record does not carry corpus *text*: an address, a verb, a query and a
+        band. A failed call is recorded with `ok=False` and no addresses — asking
+        for an address is not being served it.
+        """
+        self._write({
+            "event": "corpus_served",
+            "timestamp": time.time(),
+            "turn": turn,
+            "verb": verb,
+            "query": query,
+            "addresses": addresses,
+            "chars": chars,
+            "ok": ok,
+        })
+
     def log_end(self, final_answer: str, turns_used: int, subcalls_used: int,
                 forced: bool = False) -> None:
         self._write({

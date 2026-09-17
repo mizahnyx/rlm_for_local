@@ -703,6 +703,49 @@ bounds the cost of a bad answer; a clean corpus costs a full walk, which is the
 price of saying "nothing changed" honestly. The report never contains a path (see
 `AGENTS.md` §1.9).
 
+### Reading a run back: `rlm trace`
+
+A trajectory JSONL is written for machines. `rlm trace` turns it into Markdown a
+human can *assess* — the question the review answers is not "did the guard fire"
+but *"was what it read relevant, and where did the process fall short"*:
+
+```bash
+# One page per run, plus index.md, in a directory outside the corpus
+rlm trace render ~/rlm-derived/live-ask-band1.jsonl --out-dir ~/rlm-derived/traces \
+    --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite
+
+# A whole directory of runs at once (index lists them all)
+rlm trace render ~/rlm-derived --out-dir ~/rlm-derived/traces \
+    --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite
+
+# Counts only, writes nothing — the form that may travel
+rlm trace summary ~/rlm-derived/live-ask-band1.jsonl
+```
+
+Each page carries the question, the model, the outcome (voluntary submission or
+forced finalization, and at which turn), the counts, a **citation audit**, the
+turn-by-turn transcript, and **the passage behind every cited or served address**,
+resolved read-only through the mount. Four audit buckets, because they mean four
+different things:
+
+| bucket | what it means |
+|---|---|
+| cited, and the passage answers the question | the search said `strong`/`partial` and the answer used it |
+| cited, but the passage does not answer it | the search had already labelled it `weak`/`none` — the failure the absence-band rule refuses |
+| cited, but no helper served it | a citation pointing at nothing (fabrication) |
+| served, and never cited | evidence handed over and unused: where a run leaves relevance on the table |
+
+**The pages contain corpus text** — that is what makes relevance judgeable — so
+they are corpus-derived data: `--out-dir` is refused inside the corpus root
+(AGENTS.md §1.8, layer 3), and files are written 0600 inside a 0700 directory.
+Only the output path and counts are printed; `trace summary` prints no question, no
+address and no quote, and is the form safe to paste anywhere (`AGENTS.md` §1.9).
+
+An audit is honest about its own limits. A run recorded before the served-address
+instrumentation (`corpus_served` events, 2026-09-17) has no served set, so the page
+says the audit is **partial** rather than reporting uncited addresses as
+fabrications; a trajectory whose last line was torn by a kill says so too.
+
 ---
 
 ## 4. Web UI Reference

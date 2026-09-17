@@ -361,6 +361,72 @@ class TestTheSandboxRemembersWhichBandAServedHitHad:
         assert repl.corpus_address_bands == {}
 
 
+class TestTheSandboxReportsWhatItServed:
+    """The parent logs the *result* of every helper call, not only a distribution.
+
+    `corpus_search_quality` says how many of each band a search served; a citation
+    audit needs to know *which* addresses and with which band, and the parent is
+    the only party that can know: the hit list lives inside a tool result the model
+    may never print, which is exactly the state the first match-quality
+    measurement found itself in (RO10, 2026-09-17).
+    """
+
+    def _sandbox_with(self, bridge, calls: list) -> REPLSandbox:
+        repl = REPLSandbox()
+        repl._worker_sock = FakeWorkerSock()  # type: ignore[assignment]
+        repl._corpus_bridge = bridge
+
+        def report(verb, query, addresses, chars, ok):
+            calls.append({"verb": verb, "query": query, "addresses": addresses,
+                          "chars": chars, "ok": ok})
+
+        repl._corpus_serve_logger = report
+        return repl
+
+    def test_a_search_reports_every_address_with_its_band(self, bridge) -> None:
+        bridge.question = "Which sails?"
+        calls: list = []
+        repl = self._sandbox_with(bridge, calls)
+        repl._handle_request("corpus_search", {"query": "sails"})
+
+        assert len(calls) == 1
+        call = calls[0]
+        assert call["verb"] == "corpus_search"
+        assert call["query"] == "sails"
+        assert call["ok"] is True
+        assert call["chars"] > 0
+        assert [a["band"] for a in call["addresses"]] == ["strong"]
+        assert all(a["address"].startswith("notes/budget.md#L") for a in call["addresses"])
+
+    def test_a_read_reports_the_address_it_resolved_with_no_band(self, bridge) -> None:
+        """A read hands over a passage without judging whether it answers."""
+        calls: list = []
+        repl = self._sandbox_with(bridge, calls)
+        address = bridge.handle_search("sails")[0].split()[0]
+        repl._handle_request("corpus_read", {"rel": address})
+
+        assert calls[0]["verb"] == "corpus_read"
+        assert [a["address"] for a in calls[0]["addresses"]] == [address]
+        assert calls[0]["addresses"][0]["band"] is None
+
+    def test_a_failed_call_is_reported_as_a_failure_that_served_nothing(self, bridge) -> None:
+        calls: list = []
+        repl = self._sandbox_with(bridge, calls)
+        repl._handle_request("corpus_read", {"rel": "notes/absent.txt#L0-10"})
+
+        assert calls[0]["ok"] is False
+        assert calls[0]["addresses"] == []
+
+    def test_a_call_that_serves_no_address_is_still_recorded(self, bridge) -> None:
+        """`corpus_coverage` hands over no address, and that is a fact worth having."""
+        calls: list = []
+        repl = self._sandbox_with(bridge, calls)
+        repl._handle_request("corpus_coverage", {})
+
+        assert [c["verb"] for c in calls] == ["corpus_coverage"]
+        assert calls[0]["addresses"] == []
+
+
 class TestTheSandboxCountsCorpusCalls:
     """`corpus_calls` is the evidence the root loop nudges on.
 

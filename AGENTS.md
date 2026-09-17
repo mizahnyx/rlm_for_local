@@ -151,6 +151,11 @@ uv run python -m rlm_local.cli mine pause     # stop after the item in flight
 uv run python -m rlm_local.cli ask "…" --corpus-root /srv/corpus \
     --corpus-index ~/rlm-derived/corpus.sqlite     # corpus_find/read/search/… in a cell
 
+# Read a run back as Markdown, where the corpus is (see the paragraph below)
+uv run python -m rlm_local.cli trace render ~/rlm-derived --out-dir ~/rlm-derived/traces \
+    --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite
+uv run python -m rlm_local.cli trace summary ~/rlm-derived/live-ask-band1.jsonl
+
 # The read-only proof. A marker scan CANNOT clear this corpus: it contains
 # future-dated files, so "newer than the marker" is true forever. Compare two
 # digests instead — one from the index, one from a fresh walk.
@@ -194,6 +199,17 @@ nothing (the `AGENTS.md` §1.8 corollary again). Such refusals are their own eve
 `corpus_weak_citation`, so they are never counted as `corpus_uncited`. Measured
 2026-09-17: **implemented and unit-proved, never yet observed against a live
 model** — `docs/20260917-0410-corpus-a-citation-must-answer-the-question.md`.
+
+**Read a run back as Markdown, and keep it where the corpus is.** `rlm trace
+render` turns a trajectory into one page per run — question, outcome, citation
+audit, turn-by-turn transcript, and the passage behind every cited or served
+address — plus an `index.md`; `rlm trace summary` prints counts and writes
+nothing. The pages contain corpus text, so `--out-dir` is refused inside the
+corpus root and the files are written 0600 in a 0700 directory, and the command
+prints only the output path and counts. Each page says when its audit is
+**partial** (a run recorded before the `corpus_served` instrumentation, or a
+trajectory torn by a kill) rather than presenting an unverifiable "no fabrication"
+as a finding — `docs/20260917-0915-corpus-traces-a-human-can-audit.md`.
 
 **Never count a big table on a cell's path.** `corpus_search` and
 `corpus_coverage` quote a *published* coverage snapshot (`rlm corpus counters`,
