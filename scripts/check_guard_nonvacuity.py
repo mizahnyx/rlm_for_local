@@ -2146,6 +2146,18 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_the_lookup_filters_on_the_indexed_column",
         ],
     ),
+    (
+        "RO11 the viewer reads a container member anyway",
+        "src/rlm_local/traceview.py",
+        "        if resolvable is None:\n"
+        "            passages[address] = (",
+        "        if False:\n"
+        "            passages[address] = (",
+        [
+            "tests/test_traceview.py"
+            "::test_a_container_member_is_marked_rather_than_read",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

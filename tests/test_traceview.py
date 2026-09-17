@@ -367,6 +367,38 @@ def test_collecting_trajectories_from_a_directory(tmp_path: Path) -> None:
     assert [p.name for p in collect_trajectories(tmp_path / "a.jsonl")] == ["a.jsonl"]
 
 
+def test_a_container_member_is_marked_rather_than_read(tmp_path: Path) -> None:
+    """Rendering must not be able to hang on an address with no indexed lookup.
+
+    A container member (`arch.zip!member.txt`) names no file on disk, so the exact
+    path bytes cannot be resolved and the text index falls back to a filter on an
+    unindexed column — over 150 s for one address on the complete index
+    (2026-09-17). The page says so instead of attempting it.
+    """
+    from rlm_local.traceview import collect_passages, read_trajectory
+
+    class RawlessIndex:
+        def raw_for(self, rel: str) -> bytes | None:
+            return None
+
+    class NeverReadBridge:
+        index = RawlessIndex()
+
+        def handle_read(self, address: str, max_bytes: int = 0) -> str:
+            raise AssertionError("a container member must not be read")
+
+    run = read_trajectory(_write_trajectory(tmp_path / "member.jsonl", [
+        {"event": "start", "timestamp": T0, "query": "q", "context_len": 0,
+         "config": {}},
+        {"event": "end", "timestamp": T0 + 1, "elapsed_s": 1.0,
+         "final_answer": "See arch.zip!member.txt#L0-20", "turns_used": 1,
+         "subcalls_used": 0, "forced": True},
+    ]))
+    passages = collect_passages(run, NeverReadBridge())
+    assert "not embedded" in passages["arch.zip!member.txt#L0-20"]
+    assert "RO11" in passages["arch.zip!member.txt#L0-20"]
+
+
 def test_an_environment_override_does_not_change_the_summary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

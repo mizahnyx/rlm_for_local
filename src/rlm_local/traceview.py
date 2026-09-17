@@ -675,6 +675,15 @@ def collect_passages(run: RunTrace, bridge: Any,
     Read-only by construction: the bridge has no write verb, and a failure to
     resolve is recorded *as text on the page* rather than raised, because a page
     that says "this address could not be re-read" is still a usable page.
+
+    **A container member is not read.** `arch.zip!member.txt` names no file on
+    disk, so the exact path bytes cannot be resolved and the text index falls back
+    to a filter on an unindexed column — measured at *over 150 s for one address*
+    on the complete index (2026-09-17), the same scan RO11 fixed for file-backed
+    addresses. Rendering must not be able to hang for hours on one address, so
+    those are marked on the page instead, with the reason. The alternative —
+    reading them and hoping — is a viewer that stops working the moment someone
+    cites a passage inside an archive.
     """
     wanted = list(run.cited_addresses())
     for address in run.served_addresses():
@@ -682,6 +691,19 @@ def collect_passages(run: RunTrace, bridge: Any,
             wanted.append(address)
     passages: dict[str, str] = {}
     for address in wanted:
+        display = address.rsplit("#L", 1)[0]
+        resolvable = None
+        try:
+            resolvable = bridge.index.raw_for(display) if bridge.index else None
+        except Exception:  # pragma: no cover - defensive
+            resolvable = None
+        if resolvable is None:
+            passages[address] = (
+                "(passage not embedded: this address names no file on disk — a "
+                "container member or a derivation — so its lookup has no index and "
+                "reading it would scan the chunk table; see roadmap RO11)"
+            )
+            continue
         try:
             passages[address] = str(bridge.handle_read(address, max_bytes=max_bytes))
         except Exception as e:  # pragma: no cover - defensive

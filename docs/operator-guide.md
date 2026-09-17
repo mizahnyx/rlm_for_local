@@ -599,7 +599,12 @@ cell the same capability is `corpus_search(query, k=8)`, alongside
 
 Every hit is an address — `path#L<byte_start>-<byte_end>` — that can be re-read
 **verbatim**: `corpus_read(hit)` or `corpus_read(<address>)` returns exactly that
-passage, which is what makes it a citation rather than a lead. Text that came from
+passage, which is what makes it a citation rather than a lead. That read is a single
+indexed lookup: on the complete index a search takes ~43 s, and reading one address
+takes seconds, where it used to scan all 29M chunk rows and never return inside the
+120 s cell limit (`docs/20260917-1040-corpus-a-read-that-scanned-every-chunk.md`).
+The exception is an address inside an archive (`container!member`), which names no
+file on disk and still falls back to the slow filter (roadmap RO11). Text that came from
 an extraction is labelled (`derived:pdftotext`), vendored matches are counted and
 can be included with `include_vendored=True`, and `corpus_coverage()` reports how
 much of the corpus is indexed at all. Its output on 2026-09-14 — a live number,
