@@ -510,7 +510,50 @@ fixed — see below). Indexing all 2.88M text files is therefore ~24 hours of
 windows, and every hour of it is independently useful because the queue commits
 per item.
 
-### `rlm corpus counters` — how much is searchable, without counting it
+### A second, dynamic corpus (a scraped library, a notebook)
+
+The harness takes **one corpus per run** (`--corpus-root` + `--corpus-index`), and
+a second corpus is just a second pair — no code change, but addresses are not
+namespaced, so a citation from one corpus and from the other are the same shape.
+Run them as separate invocations until that changes (the design is recorded in the
+roadmap's `OD7` neighbourhood).
+
+A corpus that **grows** — a bookmark library that gains documents every time the
+scraper runs — is handled by re-running the pipeline, whose steps are resumable and
+idempotent:
+
+```bash
+# after each scrape: re-walk (cheap for a small tree), classify what is new,
+# queue what is missing, then index the new text in one window
+rlm corpus index    --corpus-root /srv/library --corpus-index ~/rlm-derived/library.sqlite
+rlm corpus classify --corpus-root /srv/library --corpus-index ~/rlm-derived/library.sqlite
+rlm mine plan       --corpus-index ~/rlm-derived/library.sqlite
+rlm mine run        --corpus-root /srv/library --corpus-index ~/rlm-derived/library.sqlite \
+                    --tasks index_text --for 30m
+rlm corpus counters --corpus-index ~/rlm-derived/library.sqlite --refresh
+```
+
+What that gives you, and what it does not:
+
+- **New documents are picked up.** `plan` queues only what the map does not already
+  hold, and `index_text` indexes only sources it has never indexed.
+- **Appended content inside an existing document is picked up** as long as its bytes
+  changed *and* it is re-indexed with `replace=True` — which the mining worker does
+  for derived text, and which a re-scrape that rewrites a file will get on the next
+  `mine run` only if the file is re-queued. **A modified file whose queue entry
+  already says `done` keeps its old text**: `task_index_text` skips a source it
+  already holds. That is the known dynamic-corpus gap; for an append-only library
+  that adds *files*, it does not bite.
+- **Deleted documents linger** in the index: nothing yet drops rows for paths that
+  no longer exist, so a search can return an address that no longer reads. `rlm
+  corpus read` on it says so rather than pretending.
+- **Derived state must stay outside the corpus** (`assert_derived_outside_corpus`
+  fails hard): never put the index inside a directory that syncs to a cloud drive.
+
+For a journal or notebook — where *content* is edited rather than only appended —
+the refresh path needs the replace-on-change and deletion-GC work described in the
+roadmap before it can be called supported.
+
 
 ```bash
 rlm corpus counters --corpus-index ~/rlm-derived/corpus.sqlite            # read (instant)
