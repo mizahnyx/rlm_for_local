@@ -1900,6 +1900,18 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_hit_sharing_no_question_word_is_none_not_weak",
         ],
     ),
+    (
+        "RO4 a served search stops reporting what it served",
+        "src/rlm_local/repl.py",
+        "        if msg_type == \"corpus_search\":\n"
+        "            self._report_search_quality(text)",
+        "        if False:\n"
+        "            self._report_search_quality(text)",
+        [
+            "tests/test_root_loop_integration.py::TestSearchQualityIsLogged"
+            "::test_a_search_records_what_it_served",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

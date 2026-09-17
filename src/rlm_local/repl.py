@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import struct
 import subprocess
@@ -770,6 +771,10 @@ class REPLSandbox:
         #: not evidence — on 2026-09-16 a four-turn run ended with a `Citations:`
         #: line naming an address nobody had ever given it.
         self.corpus_addresses_served: set[str] = set()
+        #: Called as `report(distribution, served_chars)` after every search this
+        #: sandbox serves, so the run's trajectory records what the model was shown.
+        #: Injected by the root loop like the other bridges.
+        self._corpus_quality_logger: Any = None
         # R4 protocol state
         self._cell_seq = 0
         self._init_payload: dict | None = None
@@ -1119,6 +1124,28 @@ class REPLSandbox:
         if msg_type == "corpus_read":
             served.update(ADDRESS_TOKEN_RE.findall(str(msg.get("rel") or "")))
         self.corpus_addresses_served.update(served)
+        if msg_type == "corpus_search":
+            self._report_search_quality(text)
+
+    def _report_search_quality(self, text: str) -> None:
+        """Tell the parent what a search *served*, so the log can say what the model
+        saw (RO4, 2026-09-16).
+
+        The first measurement of the relevance signal could not answer "did the
+        model see a weak match?": the labels live inside tool results and the model
+        printed none of them, so the transcript did not contain them — and inferring
+        it from the code would be exactly the unverified claim this project forbids.
+        The parent serves every helper call, so the parent reports the distribution.
+        """
+        report = self._corpus_quality_logger
+        if report is None:
+            return
+        counts = {label: len(re.findall(rf"\({label}\)", text))
+                  for label in ("strong", "partial", "weak", "none")}
+        try:
+            report({label: n for label, n in counts.items() if n}, len(text))
+        except Exception:  # pragma: no cover - telemetry must never break a cell
+            pass
 
     def shutdown(self) -> None:
         """Terminate the REPL worker and clean up."""

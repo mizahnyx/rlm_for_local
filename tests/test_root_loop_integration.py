@@ -1138,6 +1138,47 @@ class TestCitationsMustBeServed:
         assert "unserved=1" in refusals[0]["detail"]
 
 
+class TestSearchQualityIsLogged:
+    """What a search served is a fact in the trajectory, not an inference (RO4).
+
+    The relevance signal's first measurement could not say whether the model ever
+    saw a `weak` match: the labels live inside tool results, the model printed none
+    of them, and the transcript therefore did not contain them. The parent serves
+    every helper call, so the parent reports the distribution — and these tests
+    keep that report from silently disappearing.
+    """
+
+    def test_a_search_records_what_it_served(
+        self, tiny_cfg, corpus_bridge, tmp_path,
+    ) -> None:
+        import json
+
+        from rlm_local.logger import TrajectoryLogger
+
+        logger = TrajectoryLogger(tmp_path / "traj.jsonl")
+        backend = StubBackend(responses=[
+            "```repl\nprint(corpus_search('Cuicani'))\n```",
+            "```repl\nanswer['content'] = ('not in the corpus\\n"
+            "[coverage: unknown]')\nanswer['ready'] = True\n```",
+        ])
+        loop = RootLoop(tiny_cfg, backend, logger=logger, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            loop.run("Who is Cuicani?", "stub context")
+        finally:
+            loop.shutdown()
+
+        events = [json.loads(line) for line in
+                  logger.path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        quality = [e for e in events if e.get("event") == "guardrail"
+                   and e.get("guardrail") == "corpus_search_quality"]
+        assert quality, "a served search must leave a record of what it served"
+        # The fixture's one hit covers the whole one-word question, so `strong` is
+        # the honest label and it is what the event must carry.
+        assert "strong=1" in quality[0]["detail"]
+        assert "chars=" in quality[0]["detail"]
+
+
 class TestStderrSelfCorrectionWiring:
     """R5 — §5.6 stage 4 must actually run: a traceback must engage the
     consecutive-error budget and hand the model a correction nudge."""

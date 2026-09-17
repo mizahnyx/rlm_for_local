@@ -935,7 +935,13 @@ Each turn follows this exact sequence:
     nothing, and still ended with a `Citations:` line naming an address nobody had
     served it (`docs/20260916-1445-corpus-turn-budget-buys-speed-not-provenance.md`).
     Each refusal is logged as `corpus_uncited` with `unserved=N`, so fabrication
-    rates are countable.
+    rates are countable. Every **served search** also writes a
+    `corpus_search_quality` event (`served weak=3 partial=1 chars=1234`): the labels
+    live inside tool results, so a run that prints none of them would otherwise
+    leave no record of what it was shown, and "did the model see a weak match?"
+    would be an inference from the code rather than a fact in the trajectory.
+    The run's question is set on the bridge by `RootLoop.run` — not only by the CLI
+    — so the label is measured against what was asked at every entry point.
 
 13. **Last-turn nudge (RO4).** A corpus run that reaches its **final turn** having
     called at least one helper but never submitted is told so before that turn's

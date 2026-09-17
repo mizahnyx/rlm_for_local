@@ -183,6 +183,11 @@ class RootLoop:
         if self._corpus_bridge is not None:
             from rlm_local.prompts import build_system_prompt, corpus_helpers_section
 
+            # The run's question, so a hit's match-quality label measures the
+            # passage against what was asked rather than against the AND search that
+            # found it. Set here rather than only in the CLI, because every entry
+            # point (CLI, web console, `completion()`, tests) comes through here.
+            self._corpus_bridge.question = query
             if _system_prompt is None:
                 _system_prompt = build_system_prompt(prompt_vars)
             mount = getattr(self._corpus_bridge, "mount", None)
@@ -199,6 +204,9 @@ class RootLoop:
         # ── Start REPL with context and helpers ───────────────────────────
         self._repl._kernel_bridge = self._kernel_bridge
         self._repl._corpus_bridge = self._corpus_bridge
+        # What each search *served*, so the trajectory records what the model was
+        # shown rather than the harness inferring it from the code (RO4).
+        self._repl._corpus_quality_logger = self._log_search_quality
         self._repl.start(ctx_handle, self._subcall_mgr, definitions=definitions)
 
         # ── Main loop ─────────────────────────────────────────────────────
@@ -219,6 +227,9 @@ class RootLoop:
 
         for turn in range(max_turns):
             display_turn = turn + 1
+            # The quality callback fires while a cell runs, so it needs to know
+            # which turn that is without being passed one.
+            self._current_turn = display_turn
 
             # Turn header
             turn_header = TURN_HEADER.format(
@@ -593,6 +604,24 @@ class RootLoop:
             turn, "corpus_uncited",
             f"{where}answer refused: {reason} (unserved={unserved} "
             f"nudges={nudges}/{cfg.max_consecutive_nudges})",
+        )
+
+    def _log_search_quality(self, distribution: dict[str, int],
+                            served_chars: int) -> None:
+        """Record what a search served, so "did the model see a weak match?" is a
+        fact in the trajectory and not an inference from the code (RO4).
+
+        The labels live inside tool results; a run that prints none of them leaves
+        no trace of what it was shown, which is exactly the state the first
+        measurement of the relevance signal found itself in.
+        """
+        if not self._logger:
+            return
+        labels = " ".join(f"{name}={count}" for name, count in
+                          sorted(distribution.items())) or "no_quality_labels"
+        self._logger.log_guardrail(
+            getattr(self, "_current_turn", 0), "corpus_search_quality",
+            f"served {labels} chars={served_chars}",
         )
 
     def _record_citations(self, turn: int, answer: str | None) -> None:
