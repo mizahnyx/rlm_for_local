@@ -1686,6 +1686,7 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         "src/rlm_local/root_loop.py",
         "                        self._logger.log_root_message(\"user\",\n"
         "                                                      NUDGE_CORPUS_UNSEARCHED)\n"
+        "                    turn += 1\n"
         "                    continue\n"
         "                break",
         "                        self._logger.log_root_message(\"user\",\n"
@@ -2156,6 +2157,72 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         [
             "tests/test_traceview.py"
             "::test_a_container_member_is_marked_rather_than_read",
+        ],
+    ),
+    # ── A cell that does not compile costs nothing (2026-09-17) ────────────
+    (
+        "a cell that does not compile is charged a turn again",
+        "src/rlm_local/root_loop.py",
+        "                if repl_result.syntax_error:\n"
+        "                    if syntax_retries >= cfg.max_syntax_retries:",
+        "                if False:\n"
+        "                    if syntax_retries >= cfg.max_syntax_retries:",
+        [
+            "tests/test_root_loop_integration.py"
+            "::TestInvalidPythonIsRetriedWithoutPenalty::test_a_syntax_error_costs_no_turn",
+        ],
+    ),
+    (
+        "a syntax error is charged to the error budget again",
+        "src/rlm_local/repl.py",
+        "                _syntax_error = True",
+        "                _syntax_error = False",
+        [
+            "tests/test_root_loop_integration.py"
+            "::TestInvalidPythonIsRetriedWithoutPenalty"
+            "::test_the_syntax_retry_does_not_touch_the_error_budget",
+        ],
+    ),
+    (
+        "the syntax retry budget stops being honoured",
+        "src/rlm_local/root_loop.py",
+        "                    if syntax_retries >= cfg.max_syntax_retries:",
+        "                    if False:",
+        [
+            "tests/test_root_loop_integration.py"
+            "::TestInvalidPythonIsRetriedWithoutPenalty"
+            "::test_a_model_that_never_writes_valid_python_still_terminates",
+        ],
+    ),
+    # ── A cell budget is a harness limit, and says so (2026-09-17) ─────────
+    (
+        "a cell timeout goes back to looking like a code error",
+        "src/rlm_local/root_loop.py",
+        "                if repl_result.timed_out:",
+        "                if False:",
+        [
+            "tests/test_root_loop_integration.py::TestTheCellBudgetIsVisibleAndConfigurable"
+            "::test_a_cell_that_dies_on_its_budget_is_recorded_with_its_budget_and_verb",
+        ],
+    ),
+    (
+        "the timeout stops naming the helper that was running",
+        "src/rlm_local/root_loop.py",
+        "            f\"last_helper={self._last_corpus_helper or 'none'} \"",
+        "            f\"last_helper=none \"",
+        [
+            "tests/test_root_loop_integration.py::TestTheCellBudgetIsVisibleAndConfigurable"
+            "::test_a_cell_that_dies_on_its_budget_is_recorded_with_its_budget_and_verb",
+        ],
+    ),
+    (
+        "the cell budget stops being configurable",
+        "src/rlm_local/cli.py",
+        "        overrides[\"cell_timeout\"] = float(args.cell_timeout)",
+        "        pass",
+        [
+            "tests/test_root_loop_integration.py::TestTheCellBudgetIsVisibleAndConfigurable"
+            "::test_the_budget_is_a_cli_flag",
         ],
     ),
 ]

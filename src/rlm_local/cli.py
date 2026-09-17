@@ -55,6 +55,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_ask.add_argument("--profile", default="laptop",
                        choices=["tiny", "laptop", "workstation"])
     p_ask.add_argument("--max-turns", type=int, default=None)
+    p_ask.add_argument(
+        "--cell-timeout", type=float,
+        default=os.environ.get("RLM_CELL_TIMEOUT"),
+        help="Seconds one REPL cell may run (default: the profile's value — 60 s on "
+             "tiny/laptop, 120 s on workstation; env RLM_CELL_TIMEOUT). Raise it when "
+             "a legitimate corpus call exceeds the budget on a loaded host: a cell "
+             "stopped by the harness is not a model failure, and the trajectory "
+             "records it as a `cell_timeout` event naming the budget and the helper.",
+    )
     p_ask.add_argument("--log-path", type=Path, default=None,
                        help="Write trajectory JSONL to this path")
     _add_model_server_flags(p_ask)
@@ -520,6 +529,22 @@ def _assemble_context(args: argparse.Namespace) -> str | None:
     return "\n\n---\n\n".join(parts)
 
 
+def ask_overrides(args: argparse.Namespace) -> dict[str, Any]:
+    """The per-run overrides `rlm ask` applies on top of the profile.
+
+    Split out so the flags that change *how a run is allowed to spend its budget*
+    are testable without a model server: `--max-turns` and `--cell-timeout` are the
+    two knobs an operator reaches for under load, and a knob that silently fails to
+    reach the run is worse than no knob (2026-09-17).
+    """
+    overrides: dict[str, Any] = _model_server_overrides(args)
+    if getattr(args, "max_turns", None) is not None:
+        overrides["max_turns"] = args.max_turns
+    if getattr(args, "cell_timeout", None) is not None:
+        overrides["cell_timeout"] = float(args.cell_timeout)
+    return overrides
+
+
 def _cmd_ask(args: argparse.Namespace) -> int:
     import rlm_local
 
@@ -536,9 +561,7 @@ def _cmd_ask(args: argparse.Namespace) -> int:
 
         context = CORPUS_CONTEXT_STUB
 
-    overrides: dict[str, Any] = _model_server_overrides(args)
-    if args.max_turns is not None:
-        overrides["max_turns"] = args.max_turns
+    overrides: dict[str, Any] = ask_overrides(args)
 
     corpus_bridge = _corpus_bridge_for(args)
     try:

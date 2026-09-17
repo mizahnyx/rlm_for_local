@@ -1452,6 +1452,195 @@ class TestATraceOfARealRunIsAuditable:
         assert "Cuicani" not in summary
 
 
+class TestInvalidPythonIsRetriedWithoutPenalty:
+    """A cell that does not compile is a formatting failure, not a reasoning one.
+
+    The owner's finding (2026-09-17): *"Sometimes the model fails to produce valid
+    Python, those steps must be repeated without penalty until valid Python is
+    generated."* Before this, a `SyntaxError` cost a turn **and** counted against
+    the consecutive-error budget, so a small model's single worst habit could end a
+    run that had done nothing wrong: the cell never ran, so nothing was attempted
+    and nothing was learned.
+    """
+
+    _BROKEN = "```repl\nthis is not python at all\n```"
+    _GOOD = "```repl\nanswer['content'] = 'fixed'\nanswer['ready'] = True\n```"
+
+    @staticmethod
+    def _events(logger) -> list[dict]:
+        import json
+
+        return [json.loads(line) for line in
+                logger.path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    @classmethod
+    def _retries(cls, logger) -> list[dict]:
+        """The `syntax_retry` events — the trajectory is the record, not the
+        backend's message list (which only ever holds the last call's messages,
+        and whose nudge equality check would test the template's placeholders)."""
+        return [e for e in cls._events(logger) if e.get("guardrail") == "syntax_retry"]
+
+    def test_a_syntax_error_costs_no_turn(self, tmp_path: Path) -> None:
+        from rlm_local.config import load_config
+        from rlm_local.logger import TrajectoryLogger
+
+        cfg = load_config("tiny", max_turns=3)
+        logger = TrajectoryLogger(tmp_path / "traj.jsonl")
+        backend = StubBackend(responses=[self._BROKEN, self._GOOD])
+        loop = RootLoop(cfg, backend, logger=logger, kernel_bridge=None)
+        try:
+            answer = loop.run("Question", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert answer == "fixed"
+        assert len(self._retries(logger)) == 1
+        # The retry happened *inside* turn 1: three turns were available, and the
+        # broken cell spent none of them.
+        end = [e for e in self._events(logger) if e.get("event") == "end"]
+        assert end and end[0]["turns_used"] == 1, end
+        # And the model was actually told why, in its own message stream.
+        told = [e for e in self._events(logger)
+                if e.get("event") == "root_message" and e.get("role") == "user"
+                and "is not valid Python" in str(e.get("content"))]
+        assert told, "the model must be told the cell did not run"
+
+    def test_the_syntax_retry_does_not_touch_the_error_budget(
+        self, tmp_path: Path,
+    ) -> None:
+        """Otherwise three broken cells force finalization on a healthy run."""
+        from rlm_local.config import load_config
+        from rlm_local.logger import TrajectoryLogger
+
+        logger = TrajectoryLogger(tmp_path / "traj.jsonl")
+        cfg = load_config("tiny", max_turns=4)
+        backend = StubBackend(responses=[self._BROKEN] * 3 + [self._GOOD])
+        loop = RootLoop(cfg, backend, logger=logger, kernel_bridge=None)
+        try:
+            answer = loop.run("Question", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert answer == "fixed"
+        assert len(self._retries(logger)) == 3
+        # A runtime error would have counted, and the third one would have tripped
+        # the error budget and forced finalization.
+        assert [e for e in self._events(logger)
+                if e.get("guardrail") == "stderr" and "consecutive_errors=1" in
+                str(e.get("detail"))] == []
+
+    def test_a_model_that_never_writes_valid_python_still_terminates(
+        self, tmp_path: Path,
+    ) -> None:
+        from rlm_local.config import load_config
+        from rlm_local.logger import TrajectoryLogger
+
+        logger = TrajectoryLogger(tmp_path / "traj.jsonl")
+        cfg = load_config("tiny", max_turns=3, max_syntax_retries=2)
+        backend = StubBackend(responses=[self._BROKEN] * 40 + ["FINAL: gave up"])
+        loop = RootLoop(cfg, backend, logger=logger, kernel_bridge=None)
+        try:
+            answer = loop.run("Question", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert len(self._retries(logger)) == 2, "exactly the retry budget, no more"
+        gave_up = [e for e in self._events(logger)
+                   if e.get("guardrail") == "syntax_giveup"]
+        assert gave_up, "giving up must be recorded, not silent"
+        assert answer.strip() != ""
+
+    def test_a_runtime_error_still_counts(self, tmp_path: Path) -> None:
+        """Only *not compiling* is free; a cell that ran and raised is not."""
+        from rlm_local.config import load_config
+        from rlm_local.logger import TrajectoryLogger
+
+        logger = TrajectoryLogger(tmp_path / "traj.jsonl")
+        cfg = load_config("tiny", max_turns=3)
+        backend = StubBackend(responses=[
+            "```repl\nraise ValueError('the cell ran and failed')\n```",
+            self._GOOD,
+        ])
+        loop = RootLoop(cfg, backend, logger=logger, kernel_bridge=None)
+        try:
+            answer = loop.run("Question", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert answer == "fixed"
+        assert self._retries(logger) == []
+        counted = [e for e in self._events(logger) if e.get("guardrail") == "stderr"]
+        assert counted and "consecutive_errors=1" in counted[0]["detail"]
+
+
+class TestTheCellBudgetIsVisibleAndConfigurable:
+    """The owner's finding: 60 s is too little on a loaded host, and a run that
+    died on its budget must say so rather than looking like a bad answer.
+
+    `cell_timeout` was profile-only (60 s on `tiny`/`laptop`, 120 s on
+    `workstation`), with no flag and no way to see that a *timeout* — not the model
+    — produced a failure. A `cell_timeout` guardrail event now names the budget and
+    the last corpus helper the cell had called, which is what turns "it failed" into
+    "`corpus_count` needed more than 60 s on this host".
+    """
+
+    def test_a_cell_that_dies_on_its_budget_is_recorded_with_its_budget_and_verb(
+        self, tmp_path: Path, corpus_bridge,
+    ) -> None:
+        import json
+
+        from rlm_local.config import load_config
+        from rlm_local.logger import TrajectoryLogger
+
+        cfg = load_config("tiny", max_turns=2, cell_timeout=0.5)
+        logger = TrajectoryLogger(tmp_path / "traj.jsonl")
+        backend = StubBackend(responses=[
+            "```repl\ncorpus_coverage()\nimport time; time.sleep(5)\n```",
+            "```repl\nanswer['content'] = 'done'\nanswer['ready'] = True\n```",
+        ])
+        loop = RootLoop(cfg, backend, logger=logger, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            loop.run("Question", "stub context")
+        finally:
+            loop.shutdown()
+
+        events = [json.loads(line) for line in
+                  logger.path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        timeouts = [e for e in events if e.get("guardrail") == "cell_timeout"]
+        assert timeouts, "a cell that died on its budget must be recorded as such"
+        assert "budget=0.5s" in timeouts[0]["detail"]
+        # The verb names *what the cell was doing* when it ran out, which is the
+        # whole diagnosis: a budget that is too low for one helper is a different
+        # problem from a model that asks for the wrong thing.
+        assert "last_helper=corpus_coverage" in timeouts[0]["detail"]
+        # `>= 1` rather than `== 1`: the late result of an abandoned cell can
+        # surface as a second timeout when the sandbox reads it, so the counter
+        # bounds the *failures*, not the number of distinct cells. The event's
+        # `block=` is what identifies a cell.
+        assert loop.cell_timeouts >= 1
+
+    def test_the_budget_is_a_cli_flag(self, tmp_path: Path) -> None:
+        from rlm_local.cli import build_parser, ask_overrides
+
+        context = tmp_path / "ctx.md"
+        context.write_text("ctx", encoding="utf-8")
+        args = build_parser().parse_args(
+            ["ask", "q", "--context-file", str(context), "--cell-timeout", "240"])
+        assert ask_overrides(args)["cell_timeout"] == 240.0
+
+    def test_the_budget_can_come_from_the_environment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from rlm_local.cli import build_parser, ask_overrides
+
+        monkeypatch.setenv("RLM_CELL_TIMEOUT", "90")
+        context = tmp_path / "ctx.md"
+        context.write_text("ctx", encoding="utf-8")
+        args = build_parser().parse_args(["ask", "q", "--context-file", str(context)])
+        assert ask_overrides(args)["cell_timeout"] == 90.0
+
+
 class TestSearchQualityIsLogged:
     """What a search served is a fact in the trajectory, not an inference (RO4).
 

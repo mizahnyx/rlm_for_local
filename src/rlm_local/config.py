@@ -45,6 +45,11 @@ class Profile:
     # Error budgets
     max_consecutive_errors: int = 3
     max_consecutive_nudges: int = 2
+    #: How many times a cell that did not *compile* is asked for again before the
+    #: run moves on. A syntax error costs neither a turn nor the error budget
+    #: (2026-09-17) — the cell never ran, so nothing was attempted — and this bound
+    #: is what stops a model that cannot write Python at all from spinning.
+    max_syntax_retries: int = 5
 
     # Anti-shortcut (fraction of total context; 0 = disabled)
     shortcut_warn_fraction: float = 0.60

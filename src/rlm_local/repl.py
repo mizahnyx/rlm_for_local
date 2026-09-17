@@ -79,6 +79,21 @@ class REPLResult:
     next cell starts from a namespace it can work in.
     """
 
+    syntax_error: bool = False
+    """The cell did not compile, so none of it ran (2026-09-17).
+
+    A *formatting* failure rather than a reasoning one: the harness charges it
+    neither a turn nor the error budget, and asks for the cell again.
+    """
+
+    timed_out: bool = False
+    """The cell was stopped by the harness because it exceeded `cell_timeout`.
+
+    A harness limit, not a model verdict — and until 2026-09-17 it was invisible in
+    the trajectory except as stderr prose, so "the model gave a bad answer" and
+    "60 s was too little for `corpus_count` on a loaded host" looked the same.
+    """
+
 
 # ── Wire protocol ─────────────────────────────────────────────────────────
 
@@ -629,11 +644,20 @@ def main():
             old_out, old_err = sys.stdout, sys.stderr
             ns = globals()
             previous_builtins = ns.get('__builtins__')
+            _syntax_error = False
             try:
                 sys.stdout = cap_buf
                 sys.stderr = err_buf
                 ns['__builtins__'] = _MODEL_BUILTINS
                 exec(code, ns)
+            except SyntaxError as e:
+                # Not valid Python: none of the cell ran. Reported as its own kind
+                # of failure, because the parent must not charge it a turn or the
+                # error budget (2026-09-17) — nothing was attempted, so nothing was
+                # learned, and a small model's syntax slips are not reasoning.
+                _syntax_error = True
+                err_buf.write(_MSG['cell_syntax_error'].format(
+                    error="".join(traceback.format_exception_only(type(e), e)).strip()))
             except Exception:
                 traceback.print_exc(file=err_buf)
             finally:
@@ -673,6 +697,7 @@ def main():
                 "final_answer": final_answer,
                 "answer_state": answer_state,
                 "scaffold_repaired": scaffold_repaired,
+                "syntax_error": _syntax_error,
             })
 
         elif cmd == "init":
@@ -1007,6 +1032,7 @@ class REPLSandbox:
             stdout=stdout, stderr=stderr, final_answer=final_answer,
             answer_state=answer_state if isinstance(answer_state, dict) else None,
             scaffold_repaired=repaired if isinstance(repaired, list) else [],
+            syntax_error=bool(msg.get("syntax_error")),
         )
 
     def _on_timeout(self, cell_id: int) -> REPLResult:
@@ -1020,10 +1046,12 @@ class REPLSandbox:
             try:
                 self._restart_in_place()
             except Exception as e:  # pragma: no cover - environment failure
-                return REPLResult(stderr=f"{message}\n{REPL_WORKER_RESTARTED}\n{e}")
-            return REPLResult(stderr=f"{message}\n{REPL_WORKER_RESTARTED}")
+                return REPLResult(stderr=f"{message}\n{REPL_WORKER_RESTARTED}\n{e}",
+                                  timed_out=True)
+            return REPLResult(stderr=f"{message}\n{REPL_WORKER_RESTARTED}",
+                              timed_out=True)
 
-        return REPLResult(stderr=message)
+        return REPLResult(stderr=message, timed_out=True)
 
     def _answer_stale_request(self, msg: dict) -> None:
         """Unblock a worker that is asking about a cell we already abandoned."""

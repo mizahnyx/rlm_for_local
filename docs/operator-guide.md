@@ -755,6 +755,42 @@ cannot support (which is what the first summary pass over the 17 recorded runs d
 A trajectory whose last line was torn by a kill says so too. `trace summary` carries
 `cited_unknown=` and `audit=complete|partial` for exactly this reason.
 
+### Was it the budget? (a diagnosis, not a guess)
+
+A cell has a time budget (`cell_timeout`: 60 s on `tiny`/`laptop`, 120 s on
+`workstation`). When a cell dies on it, that is a **harness limit, not a verdict on
+the model** — and the two used to look identical in a trajectory, because the only
+trace was stderr prose that the harness then reported like a code error. Now:
+
+```bash
+rlm ask "…" --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite \
+    --cell-timeout 240            # or: export RLM_CELL_TIMEOUT=240
+```
+
+```bash
+# Did anything die on its budget, and what was it doing?
+grep '"guardrail": "cell_timeout"' "$LOG"
+#   … "detail": "block=1 budget=60s last_helper=corpus_count corpus_calls=4 …"
+```
+
+The reading:
+
+| what you see | what it means |
+|---|---|
+| several `cell_timeout` events, **`last_helper=` the same verb every time** | that verb needs more than the budget on this host. Raise `--cell-timeout` for the run — and if it keeps happening, the helper is a defect to fix (RO11 was exactly this: one passage read scanned 29M rows for >150 s) |
+| `cell_timeout` scattered across verbs, or `last_helper=none` | the model is asking for too much at once (or spinning). The nudge it receives says so; the fix is a prompt/behaviour problem, not a budget |
+| no `cell_timeout` events, but a bad answer | the budget had nothing to do with it. This is the distinction the counts exist to make |
+
+**A run whose cells died on the budget is not evidence about the answer.** Raise the
+budget and re-run before judging the model — and note the host state, because the
+same budget that is generous on an idle machine fails on a loaded one.
+
+The other failure that is not the model's: **a cell that does not compile**. It costs
+neither a turn nor the error budget (`syntax_retry` / `syntax_giveup` events, bounded
+by `max_syntax_retries`), so a run with several of those events is a model with a
+syntax habit, not a model that reasoned badly — and `turns_used` in the `end` event
+is the number that stays honest about it.
+
 ---
 
 ## 4. Web UI Reference

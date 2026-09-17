@@ -112,6 +112,34 @@ NUDGE_CORPUS_WEAK_EVIDENCE = (
     "coincidence of wording, not evidence, and citing it does not make it one."
 )
 
+# Raised when a cell did not *compile*. The owner's finding (2026-09-17): small
+# models fail to produce valid Python often enough that charging a turn for it ends
+# runs that had done nothing wrong — the cell never ran, so nothing was attempted
+# and nothing was learned. A syntax error therefore costs neither a turn nor the
+# error budget, and the retry is bounded by `max_syntax_retries` so a model that
+# cannot write Python at all still terminates.
+NUDGE_SYNTAX_ERROR = (
+    "That cell did not run: it is not valid Python, so the harness could not execute "
+    "any part of it. This did not count against your turn budget. Send the cell again "
+    "as valid Python — the same intent, corrected syntax. Common causes: a missing "
+    "colon at the end of a `for`/`if`/`def` line, unbalanced quotes or brackets, and "
+    "a paste that lost a line. The interpreter said:\n{error}"
+)
+
+# Raised when a cell exhausted its time budget. It names the budget and the helper,
+# so an operator can tell a *harness* limit from a model failure — the distinction
+# the owner asked for on 2026-09-17, after `corpus_count` died on a 60 s budget on a
+# loaded host. `{helper}` is the last corpus helper the cell asked for, or `none`
+# when it asked for nothing, which is what makes "raise the budget" and "fix the
+# helper" different conclusions.
+NUDGE_CELL_TIMEOUT = (
+    "That cell was stopped after {timeout}s: it had not finished. The budget is a "
+    "harness limit, not a judgement of your code — a large or loaded corpus can "
+    "exceed it. Ask for less in one cell: bound the work (`limit=`, `k=`, `under=`), "
+    "split it across cells, or use a cheaper helper. If the same call keeps timing "
+    "out, say what you were asking for ({helper}) instead of retrying it."
+)
+
 # Raised before the *last* turn of a corpus run that has looked but not answered.
 # The turn header already says `Turn 8/8.`, so what is missing is not information
 # about the budget but permission to stop: three live runs on a question the
@@ -214,6 +242,14 @@ WORKER_INVALID_REGEX = "Error: invalid regex: {error}"
 WORKER_NO_HARNESS_RESPONSE = "Error: no response from harness"
 WORKER_SEARCH_NO_RESULTS = "(no results)"
 WORKER_PROPOSE_FAILED = "Error: propose failed"
+# Emitted by the worker when a cell does not compile. It is a *worker* message
+# because that is where the interpreter error is caught, and the parent keys off
+# the `syntax_error` flag the worker sets alongside it rather than parsing this
+# text (a message the parent string-matches is a message that breaks when reworded).
+WORKER_CELL_SYNTAX_ERROR = (
+    "SyntaxError: this cell is not valid Python, so none of it ran. The "
+    "interpreter said: {error}"
+)
 
 # Corpus helpers (RO4). These are the worker-side defaults, used when the harness
 # answers with nothing at all — the real answers are formatted by
@@ -246,6 +282,7 @@ WORKER_MESSAGES: dict[str, str] = {
     "no_harness_response": WORKER_NO_HARNESS_RESPONSE,
     "search_no_results": WORKER_SEARCH_NO_RESULTS,
     "propose_failed": WORKER_PROPOSE_FAILED,
+    "cell_syntax_error": WORKER_CELL_SYNTAX_ERROR,
     "corpus_no_matches": WORKER_CORPUS_NO_MATCHES,
     "corpus_no_entries": WORKER_CORPUS_NO_ENTRIES,
     "corpus_not_found": WORKER_CORPUS_NOT_FOUND,

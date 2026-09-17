@@ -26,6 +26,8 @@ from rlm_local.templates import (
     NUDGE_CORPUS_LAST_TURN,
     NUDGE_CORPUS_UNCITED,
     NUDGE_CORPUS_WEAK_EVIDENCE,
+    NUDGE_CELL_TIMEOUT,
+    NUDGE_SYNTAX_ERROR,
     NUDGE_CORPUS_UNSEARCHED,
     NUDGE_EMPTY_ANSWER,
     REPL_BLOCK_LABEL,
@@ -93,6 +95,11 @@ class RootLoop:
         self._repl: REPLSandbox | None = None
         self._subcall_mgr: SubcallManager | None = None
         self._context_store: ContextStore | None = None
+        #: Cells the harness stopped on their time budget, and the last corpus
+        #: helper that was running — the two facts that separate "the budget was too
+        #: low" from "the model asked for something impossible" (2026-09-17).
+        self.cell_timeouts = 0
+        self._last_corpus_helper: str | None = None
 
     def run(self, query: str, context: str | list[str]) -> str:
         """Execute a completion.
@@ -237,8 +244,15 @@ class RootLoop:
         # budget for uncited answers, shared by every channel they arrive on.
         corpus_uncited_nudges = 0
 
-        for turn in range(max_turns):
+        # An explicit counter rather than `for turn in range(max_turns)`: a turn
+        # that produced a cell which did not *compile* is repeated instead of
+        # charged, so the counter must be able to stand still (2026-09-17). Every
+        # other path through the body advances it exactly once.
+        turn = 0
+        syntax_retries = 0
+        while turn < max_turns:
             display_turn = turn + 1
+            syntax_nudge = ""
             # The quality callback fires while a cell runs, so it needs to know
             # which turn that is without being passed one.
             self._current_turn = display_turn
@@ -331,6 +345,7 @@ class RootLoop:
                 messages.append({"role": "user", "content": result.nudge})
                 if self._logger:
                     self._logger.log_root_message("user", result.nudge)
+                turn += 1
                 continue
 
             # Handle courtesy FINAL:
@@ -354,6 +369,7 @@ class RootLoop:
                     messages.append({"role": "user", "content": NUDGE_CORPUS_UNSEARCHED})
                     if self._logger:
                         self._logger.log_root_message("user", NUDGE_CORPUS_UNSEARCHED)
+                    turn += 1
                     continue
                 refusal = self._refusal_reason(result.final_answer)
                 if refusal and corpus_uncited_nudges < cfg.max_consecutive_nudges:
@@ -365,6 +381,7 @@ class RootLoop:
                     messages.append({"role": "user", "content": nudge})
                     if self._logger:
                         self._logger.log_root_message("user", nudge)
+                    turn += 1
                     continue
                 final_answer = result.final_answer
                 self._record_citations(display_turn, final_answer)
@@ -400,6 +417,55 @@ class RootLoop:
                         repl_result.answer_state,
                         repl_result.scaffold_repaired,
                     )
+
+                # ── A cell that did not compile costs nothing (2026-09-17) ──
+                # The owner's finding: small models fail to write valid Python often
+                # enough that charging them a turn for it ends runs that had done
+                # nothing wrong. The cell never ran — nothing was attempted, nothing
+                # was learned — so this is a *formatting* failure: no turn, no error
+                # budget, just the cell again, bounded by `max_syntax_retries`.
+                if repl_result.syntax_error:
+                    if syntax_retries >= cfg.max_syntax_retries:
+                        # The retry budget is spent: the cell is simply not run, and
+                        # the turn is spent like any other failure. Recorded as its
+                        # own event, because "asked again and it broke again" and
+                        # "gave up asking" are different facts about the model.
+                        if self._logger:
+                            self._logger.log_guardrail(
+                                display_turn, "syntax_giveup",
+                                f"block={bi + 1} the cell did not compile and "
+                                f"{syntax_retries}/{cfg.max_syntax_retries} retries "
+                                f"were already spent",
+                            )
+                        break
+                    syntax_retries += 1
+                    if self._logger:
+                        self._logger.log_guardrail(
+                            display_turn, "syntax_retry",
+                            f"block={bi + 1} the cell did not compile "
+                            f"(retries={syntax_retries}/{cfg.max_syntax_retries}) "
+                            f"turns_used={turn}",
+                        )
+                    syntax_nudge = NUDGE_SYNTAX_ERROR.format(
+                        error=(repl_result.stderr or "").strip()[:400],
+                    )
+                    break
+
+                if repl_result.timed_out:
+                    self._log_cell_timeout(display_turn, bi + 1)
+                    # Tell the model *what happened*: a budget, not a mistake in
+                    # its code. The generic traceback nudge would read as if the
+                    # cell had raised, which is the confusion the owner's finding
+                    # named — a harness limit was being reported as a model failure.
+                    timeout_nudge = NUDGE_CELL_TIMEOUT.format(
+                        timeout=f"{cfg.cell_timeout:g}",
+                        helper=self._last_corpus_helper or "none",
+                    )
+                    messages.append({"role": "user", "content": timeout_nudge})
+                    if self._logger:
+                        self._logger.log_root_message("user", timeout_nudge)
+                    turn += 1
+                    continue
 
                 # ── §5.6 stage 4: stderr self-correction (R5) ─────────────
                 if repl_result.stderr and repl_result.stderr.strip():
@@ -488,6 +554,16 @@ class RootLoop:
             if final_answer is not None:
                 break
 
+            # A cell that did not compile: ask for it again *in the same turn*. The
+            # retry counter never advances the turn counter, which is what "without
+            # penalty" means — and it is bounded, so a model that cannot write
+            # Python still terminates (2026-09-17).
+            if syntax_nudge:
+                messages.append({"role": "user", "content": syntax_nudge})
+                if self._logger:
+                    self._logger.log_root_message("user", syntax_nudge)
+                continue
+
             # R6: tell the model its submission was empty instead of silently
             # spinning. Counted against max_consecutive_nudges.
             if empty_submission:
@@ -495,6 +571,7 @@ class RootLoop:
                     messages.append({"role": "user", "content": NUDGE_EMPTY_ANSWER})
                     if self._logger:
                         self._logger.log_root_message("user", NUDGE_EMPTY_ANSWER)
+                    turn += 1
                     continue
                 # Nudge budget exhausted — fall through to forced finalization.
                 break
@@ -510,6 +587,7 @@ class RootLoop:
                     if self._logger:
                         self._logger.log_root_message("user",
                                                       NUDGE_CORPUS_UNSEARCHED)
+                    turn += 1
                     continue
                 break
 
@@ -526,6 +604,7 @@ class RootLoop:
                     messages.append({"role": "user", "content": nudge})
                     if self._logger:
                         self._logger.log_root_message("user", nudge)
+                    turn += 1
                     continue
                 break
 
@@ -538,6 +617,9 @@ class RootLoop:
             # ── Error budget exceeded? ────────────────────────────────────
             if self._parser.consecutive_errors > cfg.max_consecutive_errors:
                 break
+
+            # A turn that reached its end any other way is spent.
+            turn += 1
 
         # ── Forced finalization ────────────────────────────────────────────
         if final_answer is None:
@@ -701,6 +783,27 @@ class RootLoop:
             f"nudges={nudges}/{cfg.max_consecutive_nudges})",
         )
 
+    def _log_cell_timeout(self, turn: int, block: int) -> None:
+        """Record a cell that died on its time budget, and what it was doing.
+
+        The owner's finding (2026-09-17): a 60 s budget can be too little for a
+        legitimate corpus call on a loaded host, and nothing in the trajectory said
+        which of the two had happened. This event names the budget and the last
+        corpus helper the cell asked for, which is the whole diagnosis — a budget
+        too low for `corpus_count` is a different problem from a model that asks for
+        the wrong thing, and only one of them is fixed by raising the budget.
+        """
+        self.cell_timeouts += 1
+        if not self._logger:
+            return
+        self._logger.log_guardrail(
+            turn, "cell_timeout",
+            f"block={block} budget={self._config.cell_timeout:g}s "
+            f"last_helper={self._last_corpus_helper or 'none'} "
+            f"corpus_calls={getattr(self._repl, 'corpus_calls', 0)} "
+            f"cell_timeouts={self.cell_timeouts}",
+        )
+
     def _log_corpus_served(self, verb: str, query: str,
                            addresses: list[dict[str, Any]], chars: int,
                            ok: bool) -> None:
@@ -711,6 +814,10 @@ class RootLoop:
         "was this citation served, and did the passage behind it answer the
         question?" — is answerable from the trajectory alone (RO10, 2026-09-17).
         """
+        # Recorded even without a logger: the timeout diagnosis reads it, and a
+        # diagnostic that only works when logging is on is a diagnostic that is
+        # missing when someone asks why a run died.
+        self._last_corpus_helper = verb
         if not self._logger:
             return
         self._logger.log_corpus_served(
