@@ -733,6 +733,7 @@ different things:
 | cited, and the passage answers the question | the search said `strong`/`partial` and the answer used it |
 | cited, but the passage does not answer it | the search had already labelled it `weak`/`none` — the failure the absence-band rule refuses |
 | cited, but no helper served it | a citation pointing at nothing (fabrication) |
+| cited, but whether a helper served it is **unknown** | the run predates the `corpus_served` instrumentation: `unknown`, not a finding of fabrication |
 | served, and never cited | evidence handed over and unused: where a run leaves relevance on the table |
 
 **The pages contain corpus text** — that is what makes relevance judgeable — so
@@ -742,9 +743,12 @@ Only the output path and counts are printed; `trace summary` prints no question,
 address and no quote, and is the form safe to paste anywhere (`AGENTS.md` §1.9).
 
 An audit is honest about its own limits. A run recorded before the served-address
-instrumentation (`corpus_served` events, 2026-09-17) has no served set, so the page
-says the audit is **partial** rather than reporting uncited addresses as
-fabrications; a trajectory whose last line was torn by a kill says so too.
+instrumentation (`corpus_served` events, 2026-09-17) has no served set, so its
+citations land in **`cited_unknown`** — an empty served set is *unknown*, not empty,
+and filing those under `cited_unserved` would report a fabrication the trajectory
+cannot support (which is what the first summary pass over the 17 recorded runs did).
+A trajectory whose last line was torn by a kill says so too. `trace summary` carries
+`cited_unknown=` and `audit=complete|partial` for exactly this reason.
 
 ---
 

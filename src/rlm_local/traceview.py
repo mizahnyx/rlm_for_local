@@ -107,18 +107,32 @@ class CitationAudit:
     labelled as not answering it; a citation nobody served (fabrication); and
     evidence that was handed over and never used — which is the bucket that shows
     a run *leaving relevance on the table*, and the one no counter exposed before.
+
+    A fifth list, `cited_unknown`, exists because the other four cannot always be
+    filled honestly: a run recorded before the served-address instrumentation has no
+    served set at all, and an empty set is *unknown*, not empty. Filing those
+    citations under `cited_unserved` would report a fabrication the trajectory
+    cannot support — which is exactly what the first summary pass over the 17
+    recorded runs did, and why this bucket exists.
     """
 
     cited_answering: list[str] = field(default_factory=list)
     cited_non_answering: list[str] = field(default_factory=list)
     cited_unserved: list[str] = field(default_factory=list)
+    cited_unknown: list[str] = field(default_factory=list)
     served_not_cited: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
     @property
     def complete(self) -> bool:
-        """Whether the audit could see the whole run, or is saying so instead."""
-        return not any("cannot be checked" in n for n in self.notes)
+        """Whether the audit could see the whole run, or is saying so instead.
+
+        Any note at all means the audit is limited: an empty served set, a
+        citation with no band, a torn trajectory. A boolean that has to be
+        recomputed from the wording of a note is a boolean that will disagree with
+        it, which this project has already paid for once.
+        """
+        return not self.notes
 
 
 @dataclass
@@ -208,7 +222,22 @@ class RunTrace:
         bands = self.band_by_address()
         audit = CitationAudit()
         served = self.served_addresses()
-        for address in self.cited_addresses():
+        cited = self.cited_addresses()
+
+        if not self.served:
+            # An empty served set is *unknown*, not empty. Filing these citations
+            # as unserved would report a fabrication the trajectory cannot support.
+            audit.cited_unknown = list(cited)
+            detail = (f"{len(cited)} cited address(es) " if cited else "nothing ")
+            audit.notes.append(
+                f"no served-address events in this trajectory, so {detail}could "
+                "be checked against what a helper served: this run predates the "
+                "corpus_served instrumentation, and its audit is partial rather "
+                "than clean"
+            )
+            return audit
+
+        for address in cited:
             if address not in served:
                 audit.cited_unserved.append(address)
             elif bands.get(address) in ANSWERING_BANDS:
@@ -217,15 +246,9 @@ class RunTrace:
                 # A served address with no band is not evidence of a weak match;
                 # it is evidence of *no judgement*, which is a different claim.
                 audit.cited_non_answering.append(address)
-        audit.served_not_cited = [a for a in served if a not in self.cited_addresses()]
+        audit.served_not_cited = [a for a in served if a not in cited]
 
-        if not self.served:
-            audit.notes.append(
-                "no served-address events in this trajectory, so whether each "
-                "citation was served cannot be checked; treat this audit as "
-                "partial rather than clean"
-            )
-        elif any(bands.get(a) is None for a in self.cited_addresses() if a in served):
+        if any(bands.get(a) is None for a in cited if a in served):
             audit.notes.append(
                 "some cited addresses were served without a band (a corpus_read, "
                 "or a question with no content words), so those citations are "
@@ -449,6 +472,10 @@ def render_run_markdown(
         ("Cited, but no helper ever served it",
          audit.cited_unserved,
          "a citation pointing at nothing — a fabrication, and refused outright"),
+        ("Cited, but whether a helper served it is unknown",
+         audit.cited_unknown,
+         "this run predates the served-address instrumentation, so its citations "
+         "cannot be checked either way: `unknown` is not a finding of fabrication"),
         ("Served, and never cited",
          audit.served_not_cited,
          "evidence the run was handed and did not use: the clearest signal of a run "
@@ -585,6 +612,7 @@ def render_summary(run: RunTrace) -> str:
         f" cited_answering={len(audit.cited_answering)}"
         f" cited_non_answering={len(audit.cited_non_answering)}"
         f" cited_unserved={len(audit.cited_unserved)}"
+        f" cited_unknown={len(audit.cited_unknown)}"
         f" served_not_cited={len(audit.served_not_cited)}"
         f" refusals_uncited={run.guardrail_count('corpus_uncited')}"
         f" refusals_weak={run.guardrail_count('corpus_weak_citation')}"

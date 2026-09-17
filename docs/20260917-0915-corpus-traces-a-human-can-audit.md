@@ -88,7 +88,18 @@ address is resolved through the read-only mount and printed with its passage.
 | cited, and the passage answers the question | the strongest evidence class |
 | cited, but the passage does not answer it | what the absence-band rule refuses |
 | cited, but no helper served it | fabrication |
+| cited, but whether a helper served it is unknown | the run predates the instrumentation — `unknown`, not fabrication |
 | served, and never cited | relevance left on the table |
+
+**The fifth bucket exists because running the tool on real data caught the
+first four misreading it.** The first summary pass over the 17 recorded
+trajectories printed `cited_unserved=1` for several runs — a fabrication claim about
+runs that simply have no `corpus_served` events. An empty served set is *unknown*,
+not empty, so those citations now land in `cited_unknown` with a note, and
+`audit=partial` on the same line. Nothing in the unit tests would have caught it:
+the tests asked whether the buckets were filled correctly and never asked what an
+absent set means. It took the owner's own question — *"which citations are
+relevant"* — pointed at real runs to surface it.
 
 Two properties are enforced, not intended (and each has a mutation proving it):
 `--out-dir` inside the corpus root is refused (`assert_derived_outside_corpus`,
@@ -107,10 +118,12 @@ that cannot see the truth must say "unknown".
 
 | Check | Result |
 |---|---|
-| New tests | **29** (14 `test_traceview.py`, 9 `test_cli_trace.py`, 4 sandbox, 2 root-loop incl. an end-to-end page) |
-| New mutation entries | 8, all red as required |
-| Fast suite | **1294 passed, 8 skipped, 12 deselected, 0 failed** (9:31, quiet host) |
+| New tests | **30** (15 `test_traceview.py` — one POSIX-only, skipped on Windows — 9 `test_cli_trace.py`, 4 sandbox, 2 root-loop including an end-to-end page) |
+| New mutation entries | **9**, all red as required; the whole table re-run |
+| Mutation table | **164 guards, 0 problems** |
+| Fast suite | **1295 passed, 8 skipped, 12 deselected, 0 failed** (7:42, quiet host, router idle) |
 | Doc lint | 38 documents clean; self-test 6/6 |
+| The 17 recorded runs, summarised | all `audit=partial`, `searches=0`, `bands=none` — every one of them predates the `corpus_served` instrumentation, which is the first thing RO10's own output said |
 
 ## 6. What is not verified
 

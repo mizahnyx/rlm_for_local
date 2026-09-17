@@ -2097,6 +2097,16 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         "                audit.cited_unserved.append(address)",
         [
             "tests/test_traceview.py"
+            "::test_a_citation_no_helper_served_is_a_fabrication_when_serves_were_recorded",
+        ],
+    ),
+    (
+        "RO10 an unverifiable citation is reported as a fabrication",
+        "src/rlm_local/traceview.py",
+        "        if not self.served:",
+        "        if False:",
+        [
+            "tests/test_traceview.py"
             "::test_a_run_without_served_events_says_the_audit_is_partial",
         ],
     ),

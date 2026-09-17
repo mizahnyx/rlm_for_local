@@ -235,12 +235,13 @@ def test_a_weak_citation_is_audited_as_non_answering(tmp_path: Path) -> None:
 def test_a_run_without_served_events_says_the_audit_is_partial(
     tmp_path: Path,
 ) -> None:
-    """Runs recorded before the instrumentation still open, and say what is missing.
+    """An empty served set is *unknown*, not empty — and never reads as fabrication.
 
-    The first live runs carry `corpus_search_quality` (a distribution) but not the
-    addresses the parent served, so an answer's citations cannot be checked
-    against them. Reporting that as a clean audit would be a confident wrong
-    answer about the run, which this project ranks below saying nothing.
+    Runs recorded before the served-address instrumentation carry
+    `corpus_search_quality` (a distribution) but not the addresses the parent
+    served, so an answer's citations cannot be checked against them. The first
+    summary pass over the 17 recorded runs reported these as `cited_unserved=1`,
+    i.e. as fabrications the trajectory cannot support; this bucket is the fix.
     """
     from rlm_local.traceview import read_trajectory
 
@@ -255,14 +256,35 @@ def test_a_run_without_served_events_says_the_audit_is_partial(
          "subcalls_used": 0, "forced": True},
     ]
     run = read_trajectory(_write_trajectory(tmp_path / "old.jsonl", events))
-    # The note belongs to the *audit*: "there were no served-address events" is a
-    # limit of what the audit could see, not a defect of the run itself.
     audit = run.audit()
-    assert any("no served-address" in n for n in audit.notes)
     assert audit.complete is False
+    assert audit.cited_unknown == ["notes/song.txt#L0-21"]
+    assert audit.cited_unserved == [], "unknown is not a finding of fabrication"
     assert audit.cited_answering == []
-    assert audit.cited_unserved == ["notes/song.txt#L0-21"]
-    assert any("cannot be checked" in n for n in audit.notes)
+    assert any("no served-address" in n for n in audit.notes)
+
+
+def test_a_citation_no_helper_served_is_a_fabrication_when_serves_were_recorded(
+    tmp_path: Path,
+) -> None:
+    """With served events present, an address outside the set is a real finding."""
+    from rlm_local.traceview import read_trajectory
+
+    events = [
+        {"event": "start", "timestamp": T0, "query": "q", "context_len": 0,
+         "config": {}},
+        {"event": "turn_start", "timestamp": T0, "turn": 1, "max_turns": 1},
+        _served(1, "cuicani", ("notes/song.txt#L0-21", "strong")),
+        {"event": "end", "timestamp": T0 + 2, "elapsed_s": 2.0,
+         "final_answer": "See notes/kettle.txt#L4000-4100", "turns_used": 1,
+         "subcalls_used": 0, "forced": True},
+    ]
+    run = read_trajectory(_write_trajectory(tmp_path / "fab.jsonl", events))
+    audit = run.audit()
+    assert audit.complete is True
+    assert audit.cited_unserved == ["notes/kettle.txt#L4000-4100"]
+    assert audit.cited_unknown == []
+    assert audit.served_not_cited == ["notes/song.txt#L0-21"]
 
 
 def test_the_summary_carries_no_question_no_address_and_no_quote(
