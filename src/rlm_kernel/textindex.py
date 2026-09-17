@@ -387,25 +387,42 @@ class TextIndex:
                 data = handle.read(hit.byte_end - hit.byte_start)
         return data.decode("utf-8", "replace")
 
-    def find_chunk(self, address: str) -> Hit | None:
+    def find_chunk(self, address: str, *, raw_source: bytes | None = None) -> Hit | None:
         """The chunk an address names, or None if it is not indexed.
 
         This is what turns a printed hit into something a caller can *use*: the
         address already says which store holds the text (a file or a derivation
         cache), so nothing downstream has to guess or re-parse.
+
+        `raw_source` is the exact path bytes when the caller can supply them — the
+        path index resolves display → bytes in one indexed lookup, and this lookup
+        then filters on `source`, which **is** indexed. Without it the filter falls
+        back to `display`, which is **not**, and one address costs a scan of every
+        chunk in the index. Measured on the complete index (2026-09-17): a read by
+        address did not return in 150 s, against 43 s for an entire search, and the
+        REPL cell limit is 120 s — so `corpus_read` could not open what
+        `corpus_search` found, which is how a citation is supposed to be checked.
         """
         match = ADDRESS_RE.match((address or "").strip())
         if match is None:
             return None
-        source = match.group("source")
+        display = match.group("source")
         start = int(match.group("start"))
         end = int(match.group("end"))
-        row = self._conn.execute(
-            "SELECT id, source, display, source_hash, origin, byte_start, byte_end,"
-            " derived, engine, vendored, cache_task, cache_key FROM text_chunks"
-            " WHERE display = ? AND byte_start = ? AND byte_end = ? LIMIT 1",
-            (source, start, end),
-        ).fetchone()
+        columns = ("id, source, display, source_hash, origin, byte_start, byte_end,"
+                   " derived, engine, vendored, cache_task, cache_key")
+        if raw_source is None:
+            row = self._conn.execute(
+                f"SELECT {columns} FROM text_chunks"
+                " WHERE display = ? AND byte_start = ? AND byte_end = ? LIMIT 1",
+                (display, start, end),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                f"SELECT {columns} FROM text_chunks"
+                " WHERE source = ? AND byte_start = ? AND byte_end = ? LIMIT 1",
+                (raw_source, start, end),
+            ).fetchone()
         if row is None:
             return None
         return Hit(
@@ -419,11 +436,16 @@ class TextIndex:
         self,
         address: str,
         *,
+        raw_source: bytes | None = None,
         mount: LocalTreeMount | None = None,
         cache_root: Path | None = None,
     ) -> str | None:
-        """Read an address, or None when it names nothing indexed."""
-        hit = self.find_chunk(address)
+        """Read an address, or None when it names nothing indexed.
+
+        `raw_source` is passed straight through to `find_chunk`: it is what keeps a
+        single-passage read from scanning the whole chunk table.
+        """
+        hit = self.find_chunk(address, raw_source=raw_source)
         if hit is None:
             return None
         return self.read(hit, mount=mount, cache_root=cache_root)

@@ -621,8 +621,21 @@ class CorpusBridge:
             return None
         if text_index is None:
             return None
+        # The exact path bytes, when the path index has them: the text index's
+        # address lookup is indexed on `source` and *not* on `display`, and one
+        # address read against the complete index did not return in 150 s because
+        # of it (2026-09-17). A display that is not a path in the index — a
+        # container member such as `arch.zip!member` — has no bytes, and the
+        # lookup falls back to the slow-but-correct display filter.
+        raw_source = None
+        if self.index is not None:
+            try:
+                raw_source = self.index.raw_for(match.group("source"))
+            except Exception:  # pragma: no cover - defensive
+                raw_source = None
         try:
-            text = text_index.read_address(address, mount=self.mount,
+            text = text_index.read_address(address, raw_source=raw_source,
+                                           mount=self.mount,
                                            cache_root=self.cache_root)
         except ReadOnlyViolation as e:
             return CORPUS_NOT_REREADABLE.format(error=e)

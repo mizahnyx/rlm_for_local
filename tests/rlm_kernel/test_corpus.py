@@ -1200,3 +1200,81 @@ class TestSearchCoverageIsPublishedNotCounted:
         line = searched_index.handle_coverage()
         assert "42 sources indexed" in line
         assert "1 awaiting OCR" in line
+
+
+class TestReadingOneAddressDoesNotScanEveryChunk:
+    """One passage must not cost the whole chunk table (2026-09-17).
+
+    Measured on the complete index: `corpus_search` took **43 s** for one query,
+    while `corpus_read(<address>)` **did not return in 150 s** — `find_chunk`
+    filtered on `text_chunks.display`, which has no index, so reading one passage
+    scanned 29 015 791 rows. The indexed column is `source` (the exact path bytes),
+    and the path index resolves display → bytes in one lookup (`entries_path`).
+
+    This is not cosmetic. `corpus_read` is how a citation is checked and how a
+    model turns a hit into evidence it can quote; at full scale it exceeded the
+    120 s REPL cell limit, so a run could search but not open what it found. Same
+    family as CL6: a per-item operation paying a whole-table price.
+    """
+
+    @pytest.fixture
+    def read_bridge(self, corpus: Path, index: CorpusIndex,
+                    mount: LocalTreeMount) -> CorpusBridge:
+        (corpus / "sub" / "story.txt").write_text(
+            "Cuicani sang at the festival.\n", encoding="utf-8")
+        index.build(mount)
+        text_index = index.text()
+        text_index.ensure()
+        text_index.add_text(
+            raw=b"sub/story.txt", display="sub/story.txt", source_hash="h1",
+            text=(corpus / "sub" / "story.txt").read_bytes(),
+        )
+        return CorpusBridge(mount=mount, index=index)
+
+    def test_the_lookup_filters_on_the_indexed_column(
+        self, read_bridge: CorpusBridge,
+    ) -> None:
+        # The address comes from a search, not from arithmetic on the file's size:
+        # a chunk's stored range is the index's business, and a hard-coded guess
+        # tests the guess rather than the read.
+        address = read_bridge.handle_search("Cuicani", k=1)[0].split()[0]
+        conn = read_bridge.index._conn  # noqa: SLF001 - the bridge's own connection
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+        try:
+            text = read_bridge.handle_read(address)
+        finally:
+            conn.set_trace_callback(None)
+
+        lookups = [s for s in statements
+                   if "text_chunks" in s and s.lstrip().upper().startswith("SELECT")]
+        assert lookups, "an address read must look its chunk up"
+        # The trace callback renders bound parameters inline, so the assertion is on
+        # the WHERE clause rather than on the placeholder text.
+        assert all("WHERE source" in s for s in lookups), (
+            "an address read must filter on the indexed column (`source`), never "
+            "on `display`, which has no index and costs a full scan"
+        )
+        assert not any("WHERE display" in s for s in lookups)
+        assert text and "Cuicani" in text
+
+    def test_a_display_that_is_not_a_path_in_the_index_still_resolves(
+        self, read_bridge: CorpusBridge,
+    ) -> None:
+        """A container member has no `entries` row, so the fallback must still find it.
+
+        `arch.zip!member.txt` is a real address shape for text extracted out of an
+        archive, and it names no file on disk. There are no exact bytes to resolve,
+        so the lookup falls back to the display filter — slow, bounded to the
+        derivations that need it, and *correct*, which is the part that matters
+        here. (Reading such a chunk goes on through the derivation cache, which
+        needs a cache entry this fixture does not create; the lookup is the claim.)
+        """
+        read_bridge.index.text().add_text(
+            raw=b"arch.zip", display="arch.zip!member.txt", source_hash="h2",
+            text=b"derived body text here",
+        )
+        address = read_bridge.handle_search("derived", k=1)[0].split()[0]
+        assert address.startswith("arch.zip!member.txt#L"), address
+        hit = read_bridge.index.text().find_chunk(address)
+        assert hit is not None, "the display fallback must still resolve the chunk"

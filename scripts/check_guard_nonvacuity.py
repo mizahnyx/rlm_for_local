@@ -2123,6 +2123,29 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_truncated_last_line_is_reported_rather_than_fatal",
         ],
     ),
+    # ── RO11: one passage must not scan the chunk table (2026-09-17) ───────
+    (
+        "RO11 an address read goes back to scanning on display",
+        "src/rlm_kernel/textindex.py",
+        "        if raw_source is None:\n"
+        "            row = self._conn.execute(",
+        "        if True:\n"
+        "            row = self._conn.execute(",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestReadingOneAddressDoesNotScanEveryChunk"
+            "::test_the_lookup_filters_on_the_indexed_column",
+        ],
+    ),
+    (
+        "RO11 the bridge stops resolving display to exact bytes",
+        "src/rlm_kernel/corpus.py",
+        "                raw_source = self.index.raw_for(match.group(\"source\"))",
+        "                raw_source = None",
+        [
+            "tests/rlm_kernel/test_corpus.py::TestReadingOneAddressDoesNotScanEveryChunk"
+            "::test_the_lookup_filters_on_the_indexed_column",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
