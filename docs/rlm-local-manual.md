@@ -916,7 +916,7 @@ Each turn follows this exact sequence:
 12. **Uncited answer refused (RO4).** In a corpus run, an answer that cites no
     address and names no coverage is refused — `NUDGE_CORPUS_UNCITED` is appended
     and the turn restarts, on its own budget (`corpus_uncited_nudges`, bounded by
-    `max_consecutive_nudges`). `_refuses_uncited` is the rule; the second arm is
+    `max_consecutive_nudges`). `_refusal_reason` is the rule; the second arm is
     the escape hatch and the reason it cannot trap a run: *"the corpus does not
     contain this, here is the coverage"* is a truthful answer and is accepted, and
     on a partly-indexed corpus it is the common one. The rule is applied on both
@@ -943,6 +943,26 @@ Each turn follows this exact sequence:
     The run's question is set on the bridge by `RootLoop.run` — not only by the CLI
     — so the label is measured against what was asked at every entry point.
 
+    **A citation must also rest on a passage that answers the question.** The served
+    check says the harness handed the address over; it does not say the passage is an
+    answer. So the band each hit was labelled with is remembered beside it
+    (`REPLSandbox.corpus_address_bands`), read from the hit's **own header line
+    only** — a passage that happens to quote the word `(weak)` must not be able to
+    label itself — and the strongest band for an address wins, so a later search on
+    a question the same passage does not answer cannot demote it. An answer whose
+    cited addresses were *all* served `weak`/`none` is refused with
+    `NUDGE_CORPUS_WEAK_EVIDENCE` unless it also names coverage
+    (`_cites_only_unanswering_evidence`). One `strong` or `partial` citation is
+    enough, and an address carrying no band at all — one handed over by
+    `corpus_read`, or any hit from a question with no content words — is `unknown`
+    and refuses nothing (AGENTS.md §1.8: a check that cannot see the truth says
+    `unknown`). The refusal is its own event, `corpus_weak_citation`, carrying
+    `band=` and `addresses=`: "the model cited nothing" and "the model cited a
+    non-answer" are different failures, and an operator counting one should not
+    count the other. It is enforced rather than merely stated because the statement
+    was measured and ignored — a run was served `weak` eight times and cited the
+    hits anyway (`docs/20260916-2200-corpus-weak-labels-were-served-and-ignored.md`).
+
 13. **Last-turn nudge (RO4).** A corpus run that reaches its **final turn** having
     called at least one helper but never submitted is told so before that turn's
     model call: `NUDGE_CORPUS_LAST_TURN` names both arms — cite what you read, or
@@ -960,7 +980,9 @@ Each turn follows this exact sequence:
 answer). In a corpus run it counts the answer (`RootLoop.corpus_answers`,
 `RootLoop.corpus_answers_uncited`) and writes one `corpus_citation` guardrail
 event carrying `answers_with_address=True|False`; refusals are recorded separately
-as `corpus_uncited`. The prompt requires a `Citations:` line
+as `corpus_uncited` (nothing cited, no coverage named, or an address no helper
+served) and `corpus_weak_citation` (every cited address was served as a
+`weak`/`none` hit). The prompt requires a `Citations:` line
 (`CORPUS_SECTION_LINES`, "Cite your evidence"), and the order matters: it was
 required and *measured* first, and the refusal was added only because three
 consecutive live runs of the 4B laptop model cited nothing at all

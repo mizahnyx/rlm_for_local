@@ -400,6 +400,12 @@ def corpus_bridge(tmp_path: Path):
     # address differ would test the refusal instead of the acceptance.
     (root / "notes" / "song.txt").write_text("Cuicani sang it first",
                                              encoding="utf-8")
+    # A second searchable file holding none of the graded question's words: the
+    # fixture for the absence-band rule, which needs a *real* hit that the search
+    # labels `none`. Exactly 21 bytes again, so the address is
+    # `notes/kettle.txt#L0-21`.
+    (root / "notes" / "kettle.txt").write_text("The kettle boiled dry",
+                                               encoding="utf-8")
     index_path = tmp_path / "derived" / "corpus.sqlite"
     index_path.parent.mkdir()
     mount = LocalTreeMount(root)
@@ -413,6 +419,11 @@ def corpus_bridge(tmp_path: Path):
     text_index.add_text(
         raw=b"notes/song.txt", display="notes/song.txt", source_hash="h-song",
         text=(root / "notes" / "song.txt").read_bytes(),
+    )
+    text_index.add_text(
+        raw=b"notes/kettle.txt", display="notes/kettle.txt",
+        source_hash="h-kettle",
+        text=(root / "notes" / "kettle.txt").read_bytes(),
     )
     b = CorpusBridge(mount=mount, index=idx)
     yield b
@@ -470,7 +481,12 @@ class TestCorpusUnsearchedNudge:
     def test_an_unsupported_claim_is_not_accepted_the_first_time(
         self, tiny_cfg, corpus_bridge,
     ) -> None:
-        """The unsearched answer must not become the run's final answer."""
+        """The unsearched answer must not become the run's final answer.
+
+        The question is the one the cited passage answers: under the absence-band
+        rule (2026-09-16) a citation whose hit the search labelled `weak`/`none` is
+        refused, so a question and a citation that disagree are a different test.
+        """
         unsearched = "\n".join([
             "```repl",
             "answer['content'] = 'nothing here'",
@@ -490,7 +506,7 @@ class TestCorpusUnsearchedNudge:
         loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
                         corpus_bridge=corpus_bridge)
         try:
-            answer = loop.run("Question", "stub context")
+            answer = loop.run("Who is Cuicani?", "stub context")
         finally:
             loop.shutdown()
         assert answer.startswith("the searched answer")
@@ -1144,6 +1160,202 @@ class TestCitationsMustBeServed:
                     and g.get("guardrail") == "corpus_uncited"]
         assert len(refusals) == 1
         assert "unserved=1" in refusals[0]["detail"]
+
+
+class TestAnAnswerMustRestOnAnAnsweringMatch:
+    """RO4: a served address is evidence only if the passage behind it answers (2026-09-16).
+
+    The relevance label was measured before it was enforced, and the measurement
+    said the label alone changes nothing: the run's searches were all labelled, the
+    best hit covered one word of a twelve-word question, the model was served
+    `weak` eight times, and it cited the hits and submitted anyway
+    (`docs/20260916-2200-corpus-weak-labels-were-served-and-ignored.md`). So the
+    parent reads its own label back at submission: when *every* address an answer
+    cites was served as a `weak` or `none` hit, the answer rests on passages the
+    harness itself told the model do not answer the question, and it is refused
+    once — with the absence arm still open, because that arm is the answer to a
+    question the corpus does not hold.
+
+    The band is only ever read from a hit's own header line, and an address with no
+    band (one handed over by `corpus_read`, or by a question with no content words)
+    never refuses anything: a check that cannot see the truth says `unknown`.
+    """
+
+    #: A question whose four content words appear nowhere in `notes/kettle.txt`.
+    _UNANSWERABLE = "Who ratified the Lisbon protocol safeguards?"
+
+    #: Searches something the corpus really holds, and cites it as if it answered.
+    _CITE_THE_NON_ANSWERING_HIT = "\n".join([
+        "```repl",
+        "hits = corpus_search('kettle')",
+        "print(hits)",
+        "answer['content'] = ('The corpus says the kettle boiled dry.\\n"
+        "Citations: ' + hits[0].split()[0])",
+        "answer['ready'] = True",
+        "```",
+    ])
+
+    #: The same search, and the answer the guard is trying to reach.
+    _ABSENCE_WITH_COVERAGE = "\n".join([
+        "```repl",
+        "print(corpus_search('kettle'))",
+        "answer['content'] = ('The corpus does not contain this.\\n' "
+        "+ corpus_coverage())",
+        "answer['ready'] = True",
+        "```",
+    ])
+
+    def test_an_answer_resting_on_a_non_answering_hit_is_refused(
+        self, tiny_cfg, corpus_bridge,
+    ) -> None:
+        from rlm_local.templates import NUDGE_CORPUS_WEAK_EVIDENCE
+
+        backend = StubBackend(responses=[
+            self._CITE_THE_NON_ANSWERING_HIT,
+            self._ABSENCE_WITH_COVERAGE,
+        ])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            answer = loop.run(self._UNANSWERABLE, "stub context")
+        finally:
+            loop.shutdown()
+
+        assert "kettle" not in answer, "the refused claim must not be the answer"
+        assert "does not contain" in answer
+        assert backend.count_appended(NUDGE_CORPUS_WEAK_EVIDENCE) == 1
+        assert loop.corpus_answers == 1
+
+    def test_the_absence_arm_is_open_on_the_first_submission(
+        self, tiny_cfg, corpus_bridge,
+    ) -> None:
+        """Naming the near-miss as a near-miss, with coverage, is an answer.
+
+        Refusing this would be a trap, not a guard: on a question the corpus does
+        not hold, "here is the nearest passage and it is not the answer" is the
+        truthful answer, and it is the one the nudge asks for.
+        """
+        from rlm_local.templates import NUDGE_CORPUS_WEAK_EVIDENCE
+
+        names_it_as_a_near_miss = "\n".join([
+            "```repl",
+            "hits = corpus_search('kettle')",
+            "answer['content'] = ('The corpus does not contain this; the closest "
+            "passage is not an answer.\\nCitations: ' + hits[0].split()[0] + "
+            "'\\n' + corpus_coverage())",
+            "answer['ready'] = True",
+            "```",
+        ])
+        backend = StubBackend(responses=[names_it_as_a_near_miss])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            answer = loop.run(self._UNANSWERABLE, "stub context")
+        finally:
+            loop.shutdown()
+
+        assert "does not contain" in answer
+        assert backend.count_appended(NUDGE_CORPUS_WEAK_EVIDENCE) == 0
+        assert loop.corpus_answers == 1
+        assert len(backend.calls) == 1
+
+    def test_one_answering_citation_is_enough(self, tiny_cfg, corpus_bridge) -> None:
+        """The best cited band decides, so a strong hit is not sunk by a weak one."""
+        from rlm_local.templates import NUDGE_CORPUS_WEAK_EVIDENCE
+
+        two_citations = "\n".join([
+            "```repl",
+            "near_misses = corpus_search('kettle')",
+            "hits = corpus_search('Cuicani')",
+            "answer['content'] = ('It is in the notes.\\nCitations: ' + "
+            "hits[0].split()[0] + '; ' + near_misses[0].split()[0])",
+            "answer['ready'] = True",
+            "```",
+        ])
+        backend = StubBackend(responses=[two_citations])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            answer = loop.run("Who is Cuicani?", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert "#L0-21" in answer
+        assert backend.count_appended(NUDGE_CORPUS_WEAK_EVIDENCE) == 0
+        assert loop.corpus_answers == 1
+
+    def test_a_question_with_no_content_words_cannot_label_a_citation(
+        self, tiny_cfg, corpus_bridge,
+    ) -> None:
+        """Every word a stopword means no hit carries a band: say unknown, accept."""
+        from rlm_local.templates import NUDGE_CORPUS_WEAK_EVIDENCE
+
+        cite_an_unlabelled_hit = "\n".join([
+            "```repl",
+            "hits = corpus_search('kettle')",
+            "answer['content'] = ('Cited.\\nCitations: ' + hits[0].split()[0])",
+            "answer['ready'] = True",
+            "```",
+        ])
+        backend = StubBackend(responses=[cite_an_unlabelled_hit])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            answer = loop.run("What is it?", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert "#L0-21" in answer
+        assert backend.count_appended(NUDGE_CORPUS_WEAK_EVIDENCE) == 0
+        assert loop.corpus_answers == 1
+
+    def test_the_refusal_records_the_band_it_refused_on(
+        self, tiny_cfg, corpus_bridge, tmp_path,
+    ) -> None:
+        """The instrument: a weak refusal is its own event, not an uncited one."""
+        import json
+
+        from rlm_local.logger import TrajectoryLogger
+        from rlm_local.templates import NUDGE_CORPUS_UNCITED
+
+        logger = TrajectoryLogger(tmp_path / "traj.jsonl")
+        backend = StubBackend(responses=[
+            self._CITE_THE_NON_ANSWERING_HIT,
+            self._ABSENCE_WITH_COVERAGE,
+        ])
+        loop = RootLoop(tiny_cfg, backend, logger=logger, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            loop.run(self._UNANSWERABLE, "stub context")
+        finally:
+            loop.shutdown()
+
+        events = [json.loads(line) for line in
+                  logger.path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        refusals = [e for e in events if e.get("event") == "guardrail"
+                    and e.get("guardrail") == "corpus_weak_citation"]
+        assert len(refusals) == 1
+        assert "band=none" in refusals[0]["detail"]
+        assert "addresses=1" in refusals[0]["detail"]
+        # And it is not counted as an uncited refusal: the answer did cite.
+        assert backend.count_appended(NUDGE_CORPUS_UNCITED) == 0
+
+    def test_the_weak_refusal_budget_is_bounded(self, tiny_cfg, corpus_bridge) -> None:
+        """A model that keeps citing its near-miss must still terminate."""
+        from rlm_local.templates import NUDGE_CORPUS_WEAK_EVIDENCE
+
+        backend = StubBackend(responses=[self._CITE_THE_NON_ANSWERING_HIT] * 50
+                              + ["FINAL: gave up"])
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
+                        corpus_bridge=corpus_bridge)
+        try:
+            answer = loop.run(self._UNANSWERABLE, "stub context")
+        finally:
+            loop.shutdown()
+
+        nudges = backend.count_appended(NUDGE_CORPUS_WEAK_EVIDENCE)
+        assert 0 < nudges <= tiny_cfg.max_consecutive_nudges
+        assert answer.strip() != ""
 
 
 class TestSearchQualityIsLogged:

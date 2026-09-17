@@ -284,6 +284,83 @@ class TestTheSandboxRemembersWhichAddressesItServed:
         assert repl.corpus_addresses_served == set()
 
 
+class TestTheSandboxRemembersWhichBandAServedHitHad:
+    """The label is served *and read back*: how much of the question a hit covered.
+
+    A search already tells the model how much of its question each hit covered. The
+    signal's first measurement (2026-09-16) found the model was served a `weak`
+    match eight times and cited the hits anyway — a label nobody checks is a label
+    that can be ignored, so the parent remembers the band beside the address and the
+    submission guard reads its own label back.
+    """
+
+    def _sandbox(self, bridge) -> REPLSandbox:
+        repl = REPLSandbox()
+        repl._worker_sock = FakeWorkerSock()  # type: ignore[assignment]
+        repl._corpus_bridge = bridge
+        return repl
+
+    def test_a_passage_cannot_label_itself(self) -> None:
+        """The band is read from the hit's header line, never from its text.
+
+        A passage that happens to quote the word `(weak)` — a note about this very
+        label, a transcript of a run — must not thereby acquire a band, because a
+        band is a judgement the harness made and the passage is the thing being
+        judged. The `{}` case is the AGENTS.md §1.8 corollary in miniature: the
+        harness said nothing about this hit, so the answer is `unknown`, and unknown
+        is not a verdict.
+        """
+        from rlm_local.repl import _served_bands
+
+        # No label in the header, `(weak)` in the passage: this hit carries none.
+        assert _served_bands([
+            "notes/x.txt#L0-10  [raw]\n    the note says the search called it (weak)"
+        ]) == {}
+
+        # And when the header does carry a label, that is the one recorded.
+        assert _served_bands([
+            "notes/x.txt#L0-10  [raw, covers 1/4 of the question's words (weak)]\n"
+            "    the passage's own text says (strong) and (partial)"
+        ]) == {"notes/x.txt#L0-10": "weak"}
+
+    def test_a_search_remembers_the_band_its_hit_was_served_with(self, bridge) -> None:
+        # Four content words in the question and none of them in `budget.md`: the
+        # honest band is `none`, and that is what the sandbox must remember.
+        bridge.question = "Who ratified the Lisbon protocol safeguards?"
+        repl = self._sandbox(bridge)
+        repl._handle_request("corpus_search", {"query": "sails"})
+        bands = repl.corpus_address_bands
+        assert bands, "a hit served with a label must be remembered with it"
+        assert set(bands.values()) == {"none"}
+
+    def test_the_strongest_band_for_an_address_is_the_one_kept(self, bridge) -> None:
+        """A later, worse match must not demote an address already judged good."""
+        repl = self._sandbox(bridge)
+        bridge.question = "Which sails?"
+        repl._handle_request("corpus_search", {"query": "sails"})
+        address, band = next(iter(repl.corpus_address_bands.items()))
+        assert band == "strong"
+        # The same hit, found again by a question it does not answer: the hit has
+        # not changed, and the harness has already told the model it answers.
+        bridge.question = "Who ratified the Lisbon protocol safeguards?"
+        repl._handle_request("corpus_search", {"query": "sails"})
+        assert repl.corpus_address_bands[address] == "strong"
+
+    def test_an_unlabelled_address_has_no_band(self, bridge) -> None:
+        """`corpus_read` hands over a passage, not a judgement about it.
+
+        Reading an address is evidence that the model *saw* it; it is not evidence
+        that the passage answers the question. The band map must say so by staying
+        silent rather than by inventing a band, and a silent band never refuses an
+        answer (AGENTS.md §1.8: a check that cannot see the truth says `unknown`).
+        """
+        repl = self._sandbox(bridge)
+        address = bridge.handle_search("sails")[0].split()[0]
+        repl._handle_request("corpus_read", {"rel": address})
+        assert address in repl.corpus_addresses_served
+        assert repl.corpus_address_bands == {}
+
+
 class TestTheSandboxCountsCorpusCalls:
     """`corpus_calls` is the evidence the root loop nudges on.
 

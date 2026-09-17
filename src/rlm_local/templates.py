@@ -94,6 +94,24 @@ NUDGE_CORPUS_UNCITED = (
     "this' is an acceptable answer, an uncited claim about it is not."
 )
 
+# Raised when a corpus answer's *entire* evidence is made of hits the search
+# labelled `weak` or `none` — passages the harness itself told the model do not
+# answer the question. The label alone was measured first and changed nothing: on
+# 2026-09-16 a run was served a `weak` match eight times and cited the hits and
+# submitted anyway (docs/20260916-2200-corpus-weak-labels-were-served-and-ignored.md).
+# Same escape hatch as the uncited nudge, and for the same reason: on a question
+# the corpus does not hold, "the corpus does not contain this, here is the
+# coverage" is the truthful answer, so this cannot trap a run.
+NUDGE_CORPUS_WEAK_EVIDENCE = (
+    "Your answer rests on a passage that does not answer the question: every "
+    "address you cited was a hit the search labelled `weak` or `none`, which means "
+    "it covers too few of the question's words to be an answer. Submit the same "
+    "answer again naming a passage the search called `strong` or `partial`, or — if "
+    "there is none — say the corpus does not contain the answer and quote the line "
+    "corpus_coverage() printed (it begins `[coverage:`). A weak match is a "
+    "coincidence of wording, not evidence, and citing it does not make it one."
+)
+
 # Raised before the *last* turn of a corpus run that has looked but not answered.
 # The turn header already says `Turn 8/8.`, so what is missing is not information
 # about the budget but permission to stop: three live runs on a question the

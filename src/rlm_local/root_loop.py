@@ -16,7 +16,7 @@ from rlm_local.logger import TrajectoryLogger
 from rlm_local.model_backend import ModelBackend
 from rlm_local.parser import FINAL_LINE_RE, Parser
 from rlm_local.prompts import build_messages
-from rlm_local.repl import REPLSandbox
+from rlm_local.repl import BAND_ORDER, REPLSandbox
 from rlm_local.subcall_manager import SubcallManager
 from rlm_local.templates import (
     FINALIZATION_FAILED,
@@ -25,6 +25,7 @@ from rlm_local.templates import (
     NO_ANSWER_PRODUCED,
     NUDGE_CORPUS_LAST_TURN,
     NUDGE_CORPUS_UNCITED,
+    NUDGE_CORPUS_WEAK_EVIDENCE,
     NUDGE_CORPUS_UNSEARCHED,
     NUDGE_EMPTY_ANSWER,
     REPL_BLOCK_LABEL,
@@ -351,14 +352,16 @@ class RootLoop:
                     if self._logger:
                         self._logger.log_root_message("user", NUDGE_CORPUS_UNSEARCHED)
                     continue
-                if (self._refuses_uncited(result.final_answer)
-                        and corpus_uncited_nudges < cfg.max_consecutive_nudges):
+                refusal = self._refusal_reason(result.final_answer)
+                if refusal and corpus_uncited_nudges < cfg.max_consecutive_nudges:
                     corpus_uncited_nudges += 1
                     self._log_uncited(display_turn, corpus_uncited_nudges, cfg,
-                                      answer=result.final_answer)
-                    messages.append({"role": "user", "content": NUDGE_CORPUS_UNCITED})
+                                      answer=result.final_answer, reason=refusal)
+                    nudge = (NUDGE_CORPUS_WEAK_EVIDENCE if refusal == "weak"
+                             else NUDGE_CORPUS_UNCITED)
+                    messages.append({"role": "user", "content": nudge})
                     if self._logger:
-                        self._logger.log_root_message("user", NUDGE_CORPUS_UNCITED)
+                        self._logger.log_root_message("user", nudge)
                     continue
                 final_answer = result.final_answer
                 self._record_citations(display_turn, final_answer)
@@ -374,6 +377,7 @@ class RootLoop:
             empty_submission = False
             corpus_unsearched = False
             corpus_uncited = False
+            corpus_uncited_reason = ""
 
             for bi, block in enumerate(result.blocks):
                 # Static read of the block: does it *declare* a submission, and
@@ -450,11 +454,14 @@ class RootLoop:
                     # hatch named in the nudge. Handled with the other flags after
                     # the block loop, for the same reason: a declaring block ends
                     # the response.
-                    if self._refuses_uncited(repl_result.final_answer):
+                    refusal = self._refusal_reason(repl_result.final_answer)
+                    if refusal:
                         corpus_uncited = True
+                        corpus_uncited_reason = refusal
                         corpus_uncited_nudges += 1
                         self._log_uncited(display_turn, corpus_uncited_nudges, cfg,
-                                          answer=repl_result.final_answer, block=bi)
+                                          answer=repl_result.final_answer, block=bi,
+                                          reason=refusal)
                         break
                     final_answer = repl_result.final_answer
                     self._record_citations(display_turn, final_answer)
@@ -510,11 +517,12 @@ class RootLoop:
             # a run on a 34%-indexed corpus.
             if corpus_uncited:
                 if corpus_uncited_nudges <= cfg.max_consecutive_nudges:
-                    messages.append({"role": "user",
-                                     "content": NUDGE_CORPUS_UNCITED})
+                    nudge = (NUDGE_CORPUS_WEAK_EVIDENCE
+                             if corpus_uncited_reason == "weak"
+                             else NUDGE_CORPUS_UNCITED)
+                    messages.append({"role": "user", "content": nudge})
                     if self._logger:
-                        self._logger.log_root_message("user",
-                                                      NUDGE_CORPUS_UNCITED)
+                        self._logger.log_root_message("user", nudge)
                     continue
                 break
 
@@ -605,38 +613,88 @@ class RootLoop:
         served = set(getattr(self._repl, "corpus_addresses_served", set()) or set())
         return addresses - served
 
-    def _refuses_uncited(self, answer: str | None) -> bool:
-        """Whether a corpus answer must be sent back (RO4).
+    def _cites_only_unanswering_evidence(self, addresses: set[str]) -> bool:
+        """Whether *every* address an answer cites was served as a weak hit (RO4).
+
+        The band comes from the sandbox, which reads it off the hit's own header
+        line. Three rules keep this from becoming a trap:
+
+        * **The best cited band decides.** One `strong` or `partial` citation is
+          enough; only an answer whose entire evidence is `weak`/`none` rests on
+          nothing.
+        * **An unlabelled address is not a verdict.** `corpus_read` hands over a
+          passage without judging it, and a question with no content words cannot
+          be matched against anything, so an address with no recorded band makes
+          this return False. AGENTS.md §1.8: a check that cannot see the truth says
+          `unknown`, and unknown never refuses.
+        * **Absence is still an answer.** The caller only refuses when the answer
+          also offers no coverage; "the corpus does not contain this" remains the
+          accepted route for a question the corpus does not hold.
+        """
+        bands = getattr(self._repl, "corpus_address_bands", None) or {}
+        seen = [bands.get(address) for address in addresses]
+        if not seen or any(band is None for band in seen):
+            return False
+        return all(band in ("weak", "none") for band in seen)
+
+    def _refusal_reason(self, answer: str | None) -> str | None:
+        """Why this corpus answer must be sent back, or `None` if it may stand (RO4).
+
+        The rule, and the only rule: this is what both submission channels ask.
 
         Refused when it cites an address the harness never served — no escape arm
-        excuses a fabricated citation — and otherwise when it offers neither a
-        served address nor a coverage statement. That coverage arm is the real
-        escape hatch, and it is why this cannot loop: "the corpus does not contain
-        this, here is the coverage" is a truthful answer, and on a partly-indexed
-        corpus it is the common one. A refusal a truthful run can always satisfy is
-        a guard; one that cannot is a trap.
+        excuses a fabricated citation — when every address it cites was served as a
+        `weak`/`none` hit and it offers no coverage, and otherwise when it offers
+        neither a served address nor a coverage statement. That coverage arm is the
+        real escape hatch, and it is why this cannot loop: "the corpus does not
+        contain this, here is the coverage" is a truthful answer, and on a
+        partly-indexed corpus it is the common one. A refusal a truthful run can
+        always satisfy is a guard; one that cannot is a trap.
+
+        The *reason* is returned rather than a boolean because the two failures need
+        different nudges: a fabricated citation is a lie about the harness, while a
+        citation that was served but does not answer the question is a misreading the
+        model can fix by citing better evidence or by saying the corpus does not
+        contain the answer.
         """
         if self._corpus_bridge is None:
-            return False
+            return None
         text = answer or ""
         if self._unserved_citations(text):
-            return True
-        if ADDRESS_TOKEN_RE.search(text):
-            return False
-        return COVERAGE_MARKER not in text.lower()
+            return "unserved"
+        addresses = set(ADDRESS_TOKEN_RE.findall(text))
+        if not addresses:
+            return None if COVERAGE_MARKER in text.lower() else "uncited"
+        if (self._cites_only_unanswering_evidence(addresses)
+                and COVERAGE_MARKER not in text.lower()):
+            return "weak"
+        return None
 
     def _log_uncited(self, turn: int, nudges: int, cfg: Config, answer: str = "",
-                     block: int | None = None) -> None:
+                     block: int | None = None, reason: str = "") -> None:
         """Record one refusal, so the guard's own hit rate is measurable."""
         if not self._logger:
             return
         where = f"block={block + 1} " if block is not None else "FINAL: "
         unserved = len(self._unserved_citations(answer))
-        reason = (f"{unserved} address(es) no helper served" if unserved
-                  else "no address and no coverage")
+        if reason == "weak":
+            bands = getattr(self._repl, "corpus_address_bands", None) or {}
+            addresses = set(ADDRESS_TOKEN_RE.findall(answer or ""))
+            best = min((bands.get(a, "unknown") for a in addresses),
+                       key=lambda b: BAND_ORDER.index(b) if b in BAND_ORDER else 99,
+                       default="unknown")
+            self._logger.log_guardrail(
+                turn, "corpus_weak_citation",
+                f"{where}answer refused: every cited address was served weak "
+                f"(band={best} addresses={len(addresses)} "
+                f"nudges={nudges}/{cfg.max_consecutive_nudges})",
+            )
+            return
+        why = (f"{unserved} address(es) no helper served" if unserved
+               else "no address and no coverage")
         self._logger.log_guardrail(
             turn, "corpus_uncited",
-            f"{where}answer refused: {reason} (unserved={unserved} "
+            f"{where}answer refused: {why} (unserved={unserved} "
             f"nudges={nudges}/{cfg.max_consecutive_nudges})",
         )
 

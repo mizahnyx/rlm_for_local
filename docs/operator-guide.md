@@ -650,18 +650,42 @@ first, and the refusal only after the measurement failed. Three consecutive live
 runs of the 4B laptop model searched, read up to five passages, printed addresses,
 and cited nothing — 0 for 3 (`docs/20260915-0655-corpus-citation-compliance-measured.md`).
 
+**A citation is checked twice: that the harness served it, and that it answers the
+question.** The first check refuses a fabricated address; the second, added
+2026-09-17, is the **absence band**. Every hit is labelled `covers <n>/<m> of the
+question's words (strong|partial|weak|none)`; the parent reads that label back off
+the hit's own header line, and an answer whose cited addresses were *all* served as
+`weak` or `none` is refused with `NUDGE_CORPUS_WEAK_EVIDENCE` — *"a weak match is a
+coincidence of wording, not evidence"* — unless it also names coverage. One
+`strong` or `partial` citation is enough, and an address that carries **no** label
+(one you only `corpus_read`, or any hit from a question with no content words) is
+`unknown` rather than weak, so it never refuses anything: the same rule as the mount
+probe and the coverage snapshot, that a check which cannot see the truth says
+"unknown".
+
+The band is the search's *own* label read back, not a second opinion computed at
+submission; the prompt states the rule too, and a harness that judged by a rule it
+never gave the model would be a trap. The reason it is enforced rather than merely
+stated is measured: the label was served and ignored — the run was handed a `weak`
+match eight times and cited the hits anyway
+(`docs/20260916-2200-corpus-weak-labels-were-served-and-ignored.md`).
+
 Every accepted answer is recorded as one `corpus_citation` guardrail event, and
-every refusal as `corpus_uncited`:
+every refusal as `corpus_uncited` or `corpus_weak_citation`:
 
 ```bash
 # How did this run's answers do on provenance? (counts only, no answer text)
 grep -c '"guardrail": "corpus_citation"' "$LOG"                    # answers recorded
 grep -c 'answers_with_address=True' "$LOG"                          # of which cited one
-grep -c '"guardrail": "corpus_uncited"' "$LOG"                      # refusals
+grep -c '"guardrail": "corpus_uncited"' "$LOG"                      # refusals: nothing checkable
+grep -c '"guardrail": "corpus_weak_citation"' "$LOG"                # refusals: cited a non-answer
 ```
 
 A run with many `corpus_uncited` events and few cited answers is a run the model
-fought; a run with none of either cites everything first time.
+fought; a run with none of either cites everything first time. A
+`corpus_weak_citation` is a third thing again — the model cited something, and what
+it cited was a passage the search had already told it does not answer the question —
+so an operator counting provenance should count it, and not read it as fabrication.
 
 `--count-only` prints counts and coverage and no path or fragment — the form that
 is safe to paste anywhere.

@@ -1733,12 +1733,12 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO4 an answer that cites nothing stops being refused",
         "src/rlm_local/root_loop.py",
-        "        if ADDRESS_TOKEN_RE.search(text):\n"
-        "            return False\n"
-        "        return COVERAGE_MARKER not in text.lower()",
-        "        if ADDRESS_TOKEN_RE.search(text):\n"
-        "            return False\n"
-        "        return False",
+        "        addresses = set(ADDRESS_TOKEN_RE.findall(text))\n"
+        "        if not addresses:\n"
+        "            return None if COVERAGE_MARKER in text.lower() else \"uncited\"",
+        "        addresses = set(ADDRESS_TOKEN_RE.findall(text))\n"
+        "        if not addresses:\n"
+        "            return None",
         [
             "tests/test_root_loop_integration.py::TestCorpusCitationGuard"
             "::test_an_uncited_answer_is_refused_and_then_a_cited_one_wins",
@@ -1747,8 +1747,18 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO4 the coverage escape hatch stops counting as an answer",
         "src/rlm_local/root_loop.py",
-        "        return COVERAGE_MARKER not in text.lower()",
-        "        return True",
+        "        if not addresses:\n"
+        "            return None if COVERAGE_MARKER in text.lower() else \"uncited\"\n"
+        "        if (self._cites_only_unanswering_evidence(addresses)\n"
+        "                and COVERAGE_MARKER not in text.lower()):\n"
+        "            return \"weak\"\n"
+        "        return None",
+        "        if not addresses:\n"
+        "            return \"uncited\"\n"
+        "        if (self._cites_only_unanswering_evidence(addresses)\n"
+        "                and COVERAGE_MARKER not in text.lower()):\n"
+        "            return \"weak\"\n"
+        "        return None",
         [
             "tests/test_root_loop_integration.py::TestCorpusCitationGuard"
             "::test_an_answer_that_names_coverage_is_accepted_without_a_nudge",
@@ -1757,10 +1767,10 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO4 a FINAL: line escapes the citation rule",
         "src/rlm_local/root_loop.py",
-        "                if (self._refuses_uncited(result.final_answer)\n"
-        "                        and corpus_uncited_nudges < cfg.max_consecutive_nudges):",
-        "                if (False\n"
-        "                        and corpus_uncited_nudges < cfg.max_consecutive_nudges):",
+        "                refusal = self._refusal_reason(result.final_answer)\n"
+        "                if refusal and corpus_uncited_nudges < cfg.max_consecutive_nudges:",
+        "                refusal = self._refusal_reason(result.final_answer)\n"
+        "                if False:",
         [
             "tests/test_root_loop_integration.py::TestCorpusCitationGuard"
             "::test_an_uncited_final_line_after_a_search_is_refused",
@@ -1903,10 +1913,8 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO4 a served search stops reporting what it served",
         "src/rlm_local/repl.py",
-        "        if msg_type == \"corpus_search\":\n"
         "            self._report_search_quality(text)",
-        "        if False:\n"
-        "            self._report_search_quality(text)",
+        "            pass",
         [
             "tests/test_root_loop_integration.py::TestSearchQualityIsLogged"
             "::test_a_search_records_what_it_served",
@@ -1924,6 +1932,85 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         [
             "tests/test_root_loop_integration.py::TestAModelFailureEndsTheRunRatherThanDiscardingIt"
             "::test_a_failing_turn_degrades_to_forced_finalization",
+        ],
+    ),
+    # ── RO4: the label is read back at submission (2026-09-17) ─────────────
+    (
+        "RO4 an answer may rest on a served weak hit again",
+        "src/rlm_local/root_loop.py",
+        "        return all(band in (\"weak\", \"none\") for band in seen)",
+        "        return False",
+        [
+            "tests/test_root_loop_integration.py::TestAnAnswerMustRestOnAnAnsweringMatch"
+            "::test_an_answer_resting_on_a_non_answering_hit_is_refused",
+            "tests/test_root_loop_integration.py::TestAnAnswerMustRestOnAnAnsweringMatch"
+            "::test_the_refusal_records_the_band_it_refused_on",
+        ],
+    ),
+    (
+        "RO4 an unlabelled address counts as a weak one",
+        "src/rlm_local/root_loop.py",
+        "        seen = [bands.get(address) for address in addresses]\n"
+        "        if not seen or any(band is None for band in seen):\n"
+        "            return False\n"
+        "        return all(band in (\"weak\", \"none\") for band in seen)",
+        "        seen = [bands.get(address) for address in addresses]\n"
+        "        if not seen:\n"
+        "            return False\n"
+        "        return all(band in (\"weak\", \"none\", None) for band in seen)",
+        [
+            "tests/test_root_loop_integration.py::TestAnAnswerMustRestOnAnAnsweringMatch"
+            "::test_a_question_with_no_content_words_cannot_label_a_citation",
+        ],
+    ),
+    (
+        "RO4 the sandbox stops remembering the band a hit was served with",
+        "src/rlm_local/repl.py",
+        "            for address, band in _served_bands(result).items():\n"
+        "                current = self.corpus_address_bands.get(address)\n"
+        "                if current is None or BAND_ORDER.index(band) < BAND_ORDER.index(current):\n"
+        "                    self.corpus_address_bands[address] = band",
+        "            for address, band in _served_bands(result).items():\n"
+        "                pass",
+        [
+            "tests/test_corpus_repl.py::TestTheSandboxRemembersWhichBandAServedHitHad"
+            "::test_a_search_remembers_the_band_its_hit_was_served_with",
+            "tests/test_root_loop_integration.py::TestAnAnswerMustRestOnAnAnsweringMatch"
+            "::test_an_answer_resting_on_a_non_answering_hit_is_refused",
+        ],
+    ),
+    (
+        "RO4 a passage's own text is allowed to label its hit",
+        "src/rlm_local/repl.py",
+        "        header = str(element).split(\"\\n\", 1)[0]",
+        "        header = str(element)",
+        [
+            "tests/test_corpus_repl.py::TestTheSandboxRemembersWhichBandAServedHitHad"
+            "::test_a_passage_cannot_label_itself",
+        ],
+    ),
+    (
+        "RO4 a later search demotes an address already judged good",
+        "src/rlm_local/repl.py",
+        "                current = self.corpus_address_bands.get(address)\n"
+        "                if current is None or BAND_ORDER.index(band) < BAND_ORDER.index(current):\n"
+        "                    self.corpus_address_bands[address] = band",
+        "                self.corpus_address_bands[address] = band",
+        [
+            "tests/test_corpus_repl.py::TestTheSandboxRemembersWhichBandAServedHitHad"
+            "::test_the_strongest_band_for_an_address_is_the_one_kept",
+        ],
+    ),
+    (
+        "RO4 a weak refusal sends the uncited nudge",
+        "src/rlm_local/root_loop.py",
+        "                    nudge = (NUDGE_CORPUS_WEAK_EVIDENCE\n"
+        "                             if corpus_uncited_reason == \"weak\"\n"
+        "                             else NUDGE_CORPUS_UNCITED)",
+        "                    nudge = NUDGE_CORPUS_UNCITED",
+        [
+            "tests/test_root_loop_integration.py::TestAnAnswerMustRestOnAnAnsweringMatch"
+            "::test_the_refusal_records_the_band_it_refused_on",
         ],
     ),
 ]

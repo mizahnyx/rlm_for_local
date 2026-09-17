@@ -738,6 +738,43 @@ if __name__ == "__main__":
 """
 
 
+# ── Match bands: reading the search label back ─────────────────────────────
+# `CorpusBridge.handle_search` labels every hit `covers <n>/<m> of the question's
+# words (<band>)`. The harness needs to read its own label back, because the first
+# measurement of the relevance signal (2026-09-16) found the label alone changed
+# nothing: the model was served `weak` eight times and cited the hits anyway. The
+# bands are ordered strongest first, which is also the comparison order.
+BAND_ORDER = ("strong", "partial", "weak", "none")
+
+_BAND_LABEL_RE = re.compile(r"\((" + "|".join(BAND_ORDER) + r")\)")
+
+
+def _served_bands(result: Any) -> dict[str, str]:
+    """Map each hit's address to the band its *own header line* carries.
+
+    Only the header line — `<address>  [labels]` — is read, never the snippet
+    beneath it: a passage that happens to quote the word `(weak)` must not be able
+    to label itself. A hit with no label (a question with no content words, or a
+    search that returned nothing) contributes no entry, and an absent band is
+    `unknown` rather than a verdict.
+    """
+    bands: dict[str, str] = {}
+    elements = result if isinstance(result, (list, tuple)) else [result]
+    for element in elements:
+        header = str(element).split("\n", 1)[0]
+        label = _BAND_LABEL_RE.search(header)
+        if label is None:
+            continue
+        address = ADDRESS_TOKEN_RE.search(header)
+        if address is None:
+            continue
+        name = label.group(1)
+        current = bands.get(address.group(0))
+        if current is None or BAND_ORDER.index(name) < BAND_ORDER.index(current):
+            bands[address.group(0)] = name
+    return bands
+
+
 class REPLSandbox:
     """Subprocess-isolated Python REPL with callbacks for sub-LLM calls."""
 
@@ -771,6 +808,14 @@ class REPLSandbox:
         #: not evidence — on 2026-09-16 a four-turn run ended with a `Citations:`
         #: line naming an address nobody had ever given it.
         self.corpus_addresses_served: set[str] = set()
+        #: Address → the band of the hit that served it, strongest band wins. The
+        #: bands are the search's own labels (`strong`/`partial`/`weak`/`none`),
+        #: read back so the submission guard can tell a citation that answers the
+        #: question from one that merely shares a word with it. An address a helper
+        #: handed over *without* a verdict — a `corpus_read`, or any hit from a
+        #: question with no content words — is absent here on purpose: absent means
+        #: unknown, and the guard refuses only on a band it can actually read.
+        self.corpus_address_bands: dict[str, str] = {}
         #: Called as `report(distribution, served_chars)` after every search this
         #: sandbox serves, so the run's trajectory records what the model was shown.
         #: Injected by the root loop like the other bridges.
@@ -1125,6 +1170,10 @@ class REPLSandbox:
             served.update(ADDRESS_TOKEN_RE.findall(str(msg.get("rel") or "")))
         self.corpus_addresses_served.update(served)
         if msg_type == "corpus_search":
+            for address, band in _served_bands(result).items():
+                current = self.corpus_address_bands.get(address)
+                if current is None or BAND_ORDER.index(band) < BAND_ORDER.index(current):
+                    self.corpus_address_bands[address] = band
             self._report_search_quality(text)
 
     def _report_search_quality(self, text: str) -> None:

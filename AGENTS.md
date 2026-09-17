@@ -183,6 +183,18 @@ died before the model could submit, because the search counted the index it was
 searching (roadmap CL6). Re-run it now that the search path reads a published
 snapshot instead.
 
+**A citation must also answer the question, not merely have been served.** Every
+search hit is labelled `covers n/m … (strong|partial|weak|none)`; the harness reads
+that label back off the hit's own header line at submission, and an answer whose
+cited addresses were **all** `weak`/`none` is refused once
+(`NUDGE_CORPUS_WEAK_EVIDENCE`) unless it names coverage. One `strong`/`partial`
+citation is enough, and an address with no label at all — one only `corpus_read`,
+or any hit from a question with no content words — is `unknown` and refuses
+nothing (the `AGENTS.md` §1.8 corollary again). Such refusals are their own event,
+`corpus_weak_citation`, so they are never counted as `corpus_uncited`. Measured
+2026-09-17: **implemented and unit-proved, never yet observed against a live
+model** — `docs/20260917-0410-corpus-a-citation-must-answer-the-question.md`.
+
 **Never count a big table on a cell's path.** `corpus_search` and
 `corpus_coverage` quote a *published* coverage snapshot (`rlm corpus counters`,
 recomputed by `--refresh` or at the end of every mining window); a search that
@@ -228,7 +240,13 @@ over `tests/` is **1179 passed, 7 skipped, 12 deselected** in ~7 min.)
   quotes break `-m`; write the message to a file and use `git commit -F`.
 - **Never run `check_guard_nonvacuity.py` while editing source.** It rewrites the
   file, runs one test, and restores the *version it read* — an edit made in that
-  window is silently lost.
+  window is silently lost. **An interrupted run does not restore anything**: the
+  mutation it was applying when it was killed stays in the file. Measured
+  2026-09-17: cancelling a full-table run left `src/rlm_web/app.py` with
+  `require_same_origin` deleted from the `POST /jobs` dependencies — a security
+  regression in the working tree, visible only to `git diff`. So after killing or
+  losing a run, `git status --porcelain` must show no unexpected `src/` file, and a
+  stray one is restored with `git checkout --` before anything else.
 - **`ssh` to `lunacode`** uses key auth with no persisted host key:
   `ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL lunacode …`.
   PowerShell re-adds CR to piped scripts; pipe remote scripts through
