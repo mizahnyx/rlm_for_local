@@ -1912,6 +1912,20 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_search_records_what_it_served",
         ],
     ),
+    (
+        "a model transport failure discards the run again",
+        "src/rlm_local/root_loop.py",
+        "                if not self._model_ok:\n"
+        "                    raise\n"
+        "                break",
+        "                if not self._model_ok:\n"
+        "                    raise\n"
+        "                raise",
+        [
+            "tests/test_root_loop_integration.py::TestAModelFailureEndsTheRunRatherThanDiscardingIt"
+            "::test_a_failing_turn_degrades_to_forced_finalization",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

@@ -26,7 +26,12 @@ from rlm_local.root_loop import RootLoop
 # ── Stub model backend ─────────────────────────────────────────────────────
 
 class StubBackend:
-    """A ModelBackend that returns scripted responses in sequence."""
+    """A ModelBackend that returns scripted responses in sequence.
+
+    A response may be an `Exception` instance, which is *raised* instead of
+    returned — that is how a transport failure is scripted, and it is the only
+    honest way to test that a run survives one.
+    """
 
     def __init__(self, responses: list[str] | None = None) -> None:
         self.responses = responses or []
@@ -54,7 +59,10 @@ class StubBackend:
             "messages": [dict(m) for m in messages],
         })
         if self.responses:
-            return self.responses.pop(0)
+            response = self.responses.pop(0)
+            if isinstance(response, BaseException):
+                raise response
+            return response
         # Default: answer-dict response
         return "\n".join([
             "I'll submit the answer now.",
@@ -1177,6 +1185,64 @@ class TestSearchQualityIsLogged:
         # the honest label and it is what the event must carry.
         assert "strong=1" in quality[0]["detail"]
         assert "chars=" in quality[0]["detail"]
+
+
+class TestAModelFailureEndsTheRunRatherThanDiscardingIt:
+    """A transport failure must cost a turn, not the run (2026-09-16).
+
+    A read timeout in the middle of a real corpus run propagated out of `run()`;
+    the CLI exited 2 with `Error: The read operation timed out`, produced no answer,
+    and left a trajectory with 49 events and **no `end` record** — a run that looks
+    like absent data instead of a failure. Every run now ends in an answer string
+    and an `end` event, whatever the model does.
+    """
+
+    def test_a_failing_turn_degrades_to_forced_finalization(
+        self, tiny_cfg, tmp_path,
+    ) -> None:
+        import json
+
+        from rlm_local.logger import TrajectoryLogger
+
+        logger = TrajectoryLogger(tmp_path / "traj.jsonl")
+        backend = StubBackend(responses=[
+            # Turn 0 answers normally, so the run has a working model...
+            "```repl\nprint('probing')\n```",
+            # ...and then the router times out mid-run, which is the q2 case.
+            TimeoutError("The read operation timed out"),
+            "```repl\nanswer['content'] = 'answered after the timeout'\n"
+            "answer['ready'] = True\n```",
+        ])
+        loop = RootLoop(tiny_cfg, backend, logger=logger, kernel_bridge=None)
+        try:
+            answer = loop.run("Question", "Some context")
+        finally:
+            loop.shutdown()
+
+        assert answer.strip() != ""
+        assert loop.model_errors == 1
+        events = [json.loads(line) for line in
+                  logger.path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        assert any(e.get("event") == "end" for e in events), (
+            "a run that survived a model failure must still record its end"
+        )
+        errors = [e for e in events if e.get("event") == "guardrail"
+                  and e.get("guardrail") == "model_error"]
+        assert errors, "the failure must be recorded, not swallowed"
+        assert "TimeoutError" in errors[0]["detail"]
+
+    def test_a_model_that_never_answers_propagates_instead_of_pretending(
+        self, tiny_cfg,
+    ) -> None:
+        """The other half of the rule, and the half a real test caught: a *dead*
+        server must be reported, not papered over with a placeholder and exit 0."""
+        backend = StubBackend(responses=[TimeoutError("down")] * 6)
+        loop = RootLoop(tiny_cfg, backend, kernel_bridge=None)
+        try:
+            with pytest.raises(TimeoutError):
+                loop.run("Question", "Some context")
+        finally:
+            loop.shutdown()
 
 
 class TestStderrSelfCorrectionWiring:

@@ -78,6 +78,14 @@ class RootLoop:
         # `_record_citations` for why the owner's call was to measure first.
         self.corpus_answers = 0
         self.corpus_answers_uncited = 0
+        #: How many model calls raised instead of answering. A run that survives a
+        #: transport failure records it here and in the trajectory, so a degraded
+        #: run is visible rather than looking like a normal one (2026-09-16).
+        self.model_errors = 0
+        #: Whether the model has ever answered in this run. A failure before that
+        #: is a dead server and propagates; a failure after it is a timeout and the
+        #: run finishes (2026-09-16).
+        self._model_ok = False
 
         # Subsystem instances (created fresh per run)
         self._parser: Parser | None = None
@@ -267,13 +275,39 @@ class RootLoop:
                     self._logger.log_root_message("user", last_turn_nudge)
 
             # ── Get root model response ───────────────────────────────────
-            root_text = self._backend.chat(
-                messages,
-                tier="root",
-                max_tokens=3000 if turn == 0 else 1500,
-                temperature=0.0,
-            )
+            # A transport failure here must not discard the run. Measured
+            # 2026-09-16: a read timeout during a turn propagated out of `run()`,
+            # the CLI exited 2 with `Error: The read operation timed out`, no answer
+            # was produced, and the trajectory ended after 49 events with **no
+            # `end` record** — so the run looked like absent data rather than a
+            # failure. Breaking into forced finalization instead keeps every run
+            # ending in an answer string and an `end` event, and the forced call is
+            # already guarded (a failing one yields FINALIZATION_FAILED).
+            try:
+                root_text = self._backend.chat(
+                    messages,
+                    tier="root",
+                    max_tokens=3000 if turn == 0 else 1500,
+                    temperature=0.0,
+                )
+            except Exception as e:
+                self.model_errors += 1
+                if self._logger:
+                    self._logger.log_guardrail(
+                        display_turn, "model_error",
+                        f"{type(e).__name__}: {e}"[:200],
+                    )
+                # A failure *after* the model has answered is a transient timeout,
+                # and the run is worth finishing. A failure on the first call means
+                # there was never a working model: that propagates, because the CLI
+                # then reports it and exits non-zero, whereas a placeholder answer
+                # with exit 0 would tell an operator the run succeeded. `test_chat`
+                # pins that half, and it caught this over-correction.
+                if not self._model_ok:
+                    raise
+                break
 
+            self._model_ok = True
             messages.append({"role": "assistant", "content": root_text})
             if self._logger:
                 self._logger.log_root_message("assistant", root_text)
