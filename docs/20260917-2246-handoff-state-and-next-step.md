@@ -75,12 +75,10 @@ branch not stopping (`not extended` removed); `ask_overrides` dropping the hard 
 ## 4. Verification state, including the debt
 
 - Fast suite at `ba529fa`: **1317 passed / 8 skipped / 12 deselected / 0 failed** (8:17).
-- Doc lint: **48 documents clean**; linter self-test 6/6.
-- New mutation entries were run **individually** and both went red.
-- **Debt, stated plainly: the full mutation table has not been re-run since `ba529fa`.**
-  The last full run was 176 guards / 0 problems before this commit. Running
-  `python scripts/check_guard_nonvacuity.py` (~25 min) is the first verification task of
-  the next session, before anything new lands.
+- Doc lint: **49 documents clean**; linter self-test 6/6.
+- Mutation table: **178 guards / 0 problems**, re-run in full after the counter fix, so
+  the debt this section previously carried is cleared. Log kept at
+  `.tmp_verify/table.txt` in the checkout (scratch, gitignored).
 - Traces: `~/rlm-derived/traces/` on `lunacode`, **22 pages**, index at `index.md`.
   The two probe pages (`…-probe-budget-real-slow-with-helper.md`,
   `…-probe-budget-real-stuck-no-helper.md`) show the real magnitudes.
