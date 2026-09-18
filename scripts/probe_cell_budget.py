@@ -117,6 +117,10 @@ def install() -> None:
 
 def run_case(name: str, *, soft: float, hard: float, bridge, out_dir: Path) -> dict:
     path = out_dir / f"probe-budget-{name}.jsonl"
+    # Truncate: the logger appends, so a second probe run would otherwise leave both
+    # runs' events in one file and the trace would show executions that never happened
+    # in that run.
+    path.unlink(missing_ok=True)
     logger = TrajectoryLogger(path)
     _PROBE["logger"] = logger
     _PROBE["cells"] = 0
