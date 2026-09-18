@@ -1,0 +1,80 @@
+# Decisions recorded: the cell budget in two stages, and three ledger calls
+
+**Created:** 2026-09-17 20:42
+**Status:** point-in-time record of the owner's answers to
+`docs/20260917-2008-before-you-answer-budgets-and-the-ledger.md`. Two of the four are
+ready to build; the budget answer carries a caveat that needs one more scope decision
+before it is coded.
+**Supersedes nothing.**
+
+## The four answers
+
+| question | owner's answer |
+|---|---|
+| what a cell's budget counts | **bytes read, with the clock as the outer guard** — plus a two-stage time limit: *"We know we are in old hardware, so, some operations on your table are necessarily time consuming. The hard limit in time can be upped to 20 minutes if the initial 120 seconds are consumed, and then a warning should be sent to the user about starting a time consuming operation."* |
+| where the ledger is read | **all three eventually**; the CLI first, since it is the smallest honest step and the others can render the same computation |
+| a search over a stale index | **caveat when staleness is known, refuse when it is unknown** — the same distinction the mount probe makes between `ro=1` and `ro=?` |
+| the mining queue as action list | **one table with remedies typed `queue` or `command`** — one source of truth for work, without pretending a queue item can do what only a re-walk can |
+
+## The budget, as the owner's caveat makes it
+
+Today: one limit, `cell_timeout` seconds (60 on `tiny`/`laptop`, 120 on `workstation`),
+and a cell that exceeds it is killed. The owner's answer makes it **two stages**, and
+the reason is sound rather than merely permissive: the hardware is old, so a
+*legitimate* corpus operation can exceed any short limit, and killing it wastes the
+work and teaches the model nothing.
+
+**Stage 1 — the short limit.** The cell runs for the initial budget (the profile's
+value, or `--cell-timeout`). This is unchanged, and it is what protects against a cell
+that is stuck rather than slow.
+
+**Stage 2 — the extension.** If the cell reaches the initial limit, the harness does
+**not** kill it immediately. It raises the deadline to a hard ceiling (20 minutes,
+`--cell-timeout-max`, default 1200 s), **warns the operator** that a time-consuming
+operation has started, and lets it finish. Two things must be true for the extension
+to be granted rather than the cell killed, or the mechanism becomes a licence to hang:
+
+1. **The cell is making progress** — it has read bytes, or a helper call is in flight.
+   A cell that has consumed nothing and is waiting (a `sleep`, a wedged mount) gets no
+   extension: the second stage exists for *slow work*, not for *stuck work*.
+2. **The extension is announced** — an operator-visible line naming the cell, the
+   elapsed time and the helper in flight, plus a `cell_extended` guardrail event with
+   the same facts. Silence would make a 20-minute cell look like a hang, which is the
+   confusion this project keeps paying for.
+
+The fact that makes this safe rather than reckless is the bytes accounting from the
+first half of the answer: a cell that asks for 3.4 GB now *says so* ("this call has
+read 900 MB and is still going"), so the extension is a decision about real work
+instead of a wait.
+
+### What is not yet settled, and why I am asking rather than assuming
+
+- **Per cell, or per run?** "Upped to 20 minutes" is unambiguous for one cell; eight
+  cells at the ceiling is 2.7 hours. A run-level ceiling (say 45 minutes of *cell time*,
+  after which the next cell starts on stage 1 only) would bound the worst case without
+  punishing one slow call. This changes the worst-case runtime by hours, so it is the
+  owner's call rather than my default.
+- **Does the warning reach the model too?** The owner said "a warning should be sent to
+  the user". I would keep it operator-facing: the model is told (as it is today) only
+  that the cell was stopped, if it ever is. Telling the model "you are being slow" adds
+  a prompt the harness has no evidence helps, and this project has measured three
+  prompt-only levers that changed nothing.
+
+## What follows, in order
+
+1. **Structured hits** (decided earlier, still unbuilt): the observed `'S'` failure, and
+   independent of the alias work.
+2. **The two-stage budget with bytes accounting and the extension warning** — the only
+   change here that directly addresses the three live `cell_timeout` events, all of
+   which landed on `corpus_search`.
+3. **RO14's read path**: archive members read through the extraction cache; a miss
+   reports "this container needs mining" instead of scanning.
+4. **RO15's fingerprints and the CLI report** (`rlm corpus freshness`), then the trace
+   index section and the console page.
+5. **The staleness caveat** in search results, and the refusal path when freshness is
+   unknown.
+
+Each lands with its tests, its mutation entries and its living-document updates, as
+every other change here has. The mnemonic *alias* half stays gated on a run that
+actually cites an address — Run A's forced answer cited none, so the prize remains
+unmeasured rather than small.
