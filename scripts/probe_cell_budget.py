@@ -91,7 +91,8 @@ def instrument(logger: TrajectoryLogger) -> dict:
             getattr(self, "_probe_turn", 0), "probe_cell",
             f"cell={counts['cells']} first_line={code.strip().splitlines()[0][:40]!r} "
             f"elapsed={(time.monotonic() - started):.2f}s "
-            f"timed_out={result.timed_out} hard={result.hard_timeout} "
+            f"timed_out={result.timed_out} "
+            f"hard={getattr(result, 'hard_timeout', 'n/a')} "
             f"corpus_calls={getattr(self, 'corpus_calls', 0)} "
             f"activity={getattr(self, '_cell_activity', 'n/a')} "
             f"stdout={len(result.stdout)} stderr={len(result.stderr)}",
