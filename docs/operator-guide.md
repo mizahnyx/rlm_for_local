@@ -878,6 +878,36 @@ re-runnable and what was asked sits with what happened. With no `--questions` it
 the three built-in questions about the corpus's own **aggregates** — counts, coverage,
 kinds of material — which are the only questions that may live in the repository.
 
+A question file is one question per line, `#` for comments, and an optional id before a
+**TAB**:
+
+```text
+# A question file for: scripts/run_question_probe.py --questions THIS_FILE
+#
+# * `id<TAB>question` — the separator is a TAB, not spaces — names the trajectory
+#   the question writes (`<id>.jsonl`).
+# * A line with no TAB is the whole question, and gets an automatic id: q1, q2, … in
+#   file order.
+# * Ids are slugged and kept unique, because an id is a file name.
+
+how-many-entries	How many files and how many directories does the corpus contain?
+
+what-it-says-about	What does the corpus say about <the thing your passages suggest>?
+```
+
+`--example PATH` writes that file — commented, and parsed by a test, so the documented
+format cannot drift from the parser — and exits without touching the corpus or a model.
+Two rules earn their place because breaking either one loses evidence quietly:
+
+- **The id is a file name, so it is slugged and kept unique.** `../../escape/me` becomes
+  `escape-me` (it cannot walk out of `--out-dir`), and a repeated id gains a numeric
+  suffix — `dup`, then `dup-2` — unless that name is written explicitly further down, in
+  which case the duplicate is the one that moves. Without this, two questions sharing an
+  id would share one trajectory and the second run would overwrite the first's evidence.
+- **A TAB, not spaces.** A line shaped like `some-id  Question?` is *refused* with a
+  message naming the fix, rather than being read as a question and filed under an
+  automatic id, where the mistake would surface only as a trajectory called `q7`.
+
 **It prints aggregates and nothing else**: one line per question — turns, timeouts,
 extensions, helper calls, citations, refusals, wall clock — never an answer, a passage
 or an address. Those stay in the trajectories beside the corpus, and the same

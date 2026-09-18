@@ -50,6 +50,7 @@ from rlm_local.model_backend import HTTPModelBackend  # noqa: E402
 from rlm_local.question_probe import (  # noqa: E402
     DEFAULT_QUESTIONS,
     Question,
+    example_question_set_text,
     parse_questions,
     render_line,
     run_question,
@@ -59,6 +60,9 @@ from rlm_local.question_probe import (  # noqa: E402
 
 def main() -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--example", type=Path, default=None,
+                    help="Write a commented, valid question file to this path and exit. "
+                         "Needs no corpus and no model: it is the format, stated.")
     ap.add_argument("--questions", type=Path, default=None,
                     help="A question set (one per line, `id<TAB>question`, # comments). "
                          "Defaults to the built-in aggregate questions; a set devised "
@@ -78,8 +82,19 @@ def main() -> int:
                     help="Run only the question whose id contains this substring")
     args = ap.parse_args()
 
+    if args.example is not None:
+        args.example.parent.mkdir(parents=True, exist_ok=True)
+        args.example.write_text(example_question_set_text(), encoding="utf-8")
+        print(f"Wrote an example question set to {args.example}")
+        print("It parses as-is; edit a copy beside the corpus (AGENTS.md §1.9).")
+        return 0
+
     if args.questions is not None:
-        questions = parse_questions(args.questions.read_text(encoding="utf-8"))
+        try:
+            questions = parse_questions(args.questions.read_text(encoding="utf-8"))
+        except ValueError as e:
+            print(f"Error: {args.questions}: {e}", file=sys.stderr)
+            return 2
         source = str(args.questions)
     else:
         questions = [Question(id=name, question=text)

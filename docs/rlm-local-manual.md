@@ -2123,7 +2123,14 @@ deliberately different in kind:
 | `scripts/run_question_probe.py` | the **task**: real questions, a real model, the real index | one aggregate line per question (turns, timeouts, extensions, helper calls, citations, refusals, wall clock), one trajectory each, and the question set it used |
 
 `rlm_local/question_probe.py` holds the question-set parser, the per-question runner and
-the aggregate line; the script is a thin wrapper. Two properties are structural rather
+the aggregate line; the script is a thin wrapper. A set is one question per line,
+`id<TAB>question` (the separator is a TAB — a line shaped like `some-id  Question?` is
+refused rather than misread as a question), an id is slugged so it cannot name a path
+outside `--out-dir`, and ids are kept unique because an id *is* a file name: a repeated
+id gains a numeric suffix, except that an id written explicitly in the file keeps its
+name and the duplicate is the one that moves. `--example PATH` writes a valid, commented
+set, which a test parses, so the documented format cannot drift from the parser. Two
+properties are structural rather
 than promised, and both are tested (`tests/test_question_probe.py`): the line the probe
 prints **never carries the answer** (`render_summary` carries no question, no address and
 no quote, and the answer stays in the trajectory), and an id from a hand-edited question

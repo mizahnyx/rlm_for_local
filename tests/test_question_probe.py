@@ -72,6 +72,42 @@ class TestParsingAQuestionSet:
         assert parsed[0].id == "escape-me", parsed[0].id
         assert "/" not in parsed[0].id and ".." not in parsed[0].id
 
+    def test_two_questions_cannot_share_one_trajectory(self) -> None:
+        """A repeated id would otherwise overwrite the first question's evidence.
+
+        Note whose id moves: the *second* `dup` becomes `dup-3` rather than `dup-2`,
+        because `dup-2` is written explicitly on the next line and an id the owner
+        wrote down keeps its name. Every question survives, under a distinct name.
+        """
+        parsed = parse_questions(
+            "dup\tWhat is the first thing?\n"
+            "dup\tWhat is the second thing?\n"
+            "dup-2\tAnd a third?\n"
+            "dup\tAnd a fourth?\n"
+        )
+        assert [q.id for q in parsed] == ["dup", "dup-3", "dup-2", "dup-4"]
+        assert len({q.id for q in parsed}) == 4
+        assert "second" in parsed[1].question, "no question may be dropped"
+
+    def test_an_id_separated_by_spaces_is_refused_not_misread(self) -> None:
+        """A TAB separates the id from the question; spaces would hide the mistake.
+
+        Read as a question, `how-many-files  How many files?` would file itself under
+        an automatic id and the error would surface only as a trajectory named `q3`.
+        The refusal names the fix, and the shape it refuses is narrow enough that a
+        question beginning with a short lowercase word is still a question (below).
+        """
+        with pytest.raises(ValueError) as raised:
+            parse_questions("how-many-files  How many files are there?\n")
+        assert "TAB" in str(raised.value)
+
+    def test_a_question_that_merely_contains_spaces_is_still_a_question(self) -> None:
+        for line in ("what  is this about?\n", "Note  two spaces after a capital.\n"):
+            parsed = parse_questions(line)
+            assert len(parsed) == 1, line
+            assert parsed[0].id == "q1"
+            assert parsed[0].question == line.strip()
+
     def test_an_empty_set_is_empty_rather_than_an_error(self) -> None:
         assert parse_questions("# nothing here\n") == []
 
@@ -147,6 +183,21 @@ class TestTheQuestionSetThatShipsHere:
         write_question_set(questions, path)
         parsed = parse_questions(path.read_text(encoding="utf-8"))
         assert parsed == questions
+
+    def test_the_shipped_example_is_a_valid_question_set(self) -> None:
+        """The example the owner is handed must parse — and to exactly the defaults.
+
+        A documented format that no longer parses is worse than no documentation, and
+        `--example` writes this text straight to a file the operator then edits.
+        """
+        from rlm_local.question_probe import example_question_set_text
+
+        expected = [Question(id=name, question=text)
+                    for name, text in DEFAULT_QUESTIONS]
+        assert parse_questions(example_question_set_text()) == expected
+        # ...and its header must state the two rules a hand-editor gets wrong.
+        example = example_question_set_text()
+        assert "TAB" in example and "unique" in example
 
 
 @pytest.mark.parametrize("questions", [DEFAULT_QUESTIONS])

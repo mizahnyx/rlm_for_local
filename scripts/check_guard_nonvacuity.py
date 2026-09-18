@@ -2442,6 +2442,26 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_an_id_cannot_escape_the_output_directory",
         ],
     ),
+    (
+        "two questions can share one trajectory again",
+        "src/rlm_local/question_probe.py",
+        "    if identifier not in seen:\n        return identifier",
+        "    if True:\n        return identifier",
+        [
+            "tests/test_question_probe.py::TestParsingAQuestionSet"
+            "::test_two_questions_cannot_share_one_trajectory",
+        ],
+    ),
+    (
+        "an id separated by spaces is silently read as a question",
+        "src/rlm_local/question_probe.py",
+        "            if _SPACE_SEPARATED_ID_RE.match(line):",
+        "            if False:",
+        [
+            "tests/test_question_probe.py::TestParsingAQuestionSet"
+            "::test_an_id_separated_by_spaces_is_refused_not_misread",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
