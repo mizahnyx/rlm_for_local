@@ -1573,6 +1573,74 @@ class TestInvalidPythonIsRetriedWithoutPenalty:
         assert counted and "consecutive_errors=1" in counted[0]["detail"]
 
 
+class TestATimedOutCellCostsOneTurn:
+    """A timeout spends the turn it happened in, and exactly one (2026-09-17).
+
+    Found by a probe at the real limits (`scripts/probe_cell_budget.py`, 60 s soft):
+    one timed-out cell then ended a two-turn run — `turn_start=1` of 2, the scripted
+    submission never executed, its text delivered by forced finalization instead. The
+    cause was placement rather than arithmetic: the timeout branch advanced the turn
+    counter *inside* the block loop, so the turn loop's own advance became a second
+    one. With `max_turns=8` every timeout was stealing two turns, which means every
+    recorded run that hit a timeout reported a turn count it never had.
+    """
+
+    @staticmethod
+    def _events(logger) -> list[dict]:
+        import json
+
+        return [json.loads(line) for line in
+                logger.path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    def _run(self, tmp_path: Path):
+        from rlm_local.config import load_config
+        from rlm_local.logger import TrajectoryLogger
+
+        logger = TrajectoryLogger(tmp_path / "traj.jsonl")
+        # Three turns, two of which sleep. The second timeout is not padding: a cell
+        # that times out leaves the *worker* still running it, so the next cell waits
+        # behind the same sleep and dies on the same budget — which is what triggers
+        # the sandbox's worker restart, and it is why a run that hits one timeout
+        # usually hits two. The third turn then has a fresh worker and must run.
+        # `cell_timeout_hard` equals the soft limit so there is no second limit to
+        # reason about: this test is about the counter, not about extension.
+        cfg = load_config("tiny", max_turns=3, cell_timeout=1.5,
+                          cell_timeout_hard=1.5)
+        backend = StubBackend(responses=[
+            "```repl\nimport time; time.sleep(8)\n```",
+            "```repl\nimport time; time.sleep(8)\n```",
+            "```repl\nanswer['content'] = 'the last turn ran'\n"
+            "answer['ready'] = True\n```",
+        ])
+        loop = RootLoop(cfg, backend, logger=logger, kernel_bridge=None)
+        try:
+            answer = loop.run("Question", "stub context")
+        finally:
+            loop.shutdown()
+        return answer, self._events(logger)
+
+    def test_the_last_turn_is_still_executed_after_timeouts(self, tmp_path: Path) -> None:
+        answer, events = self._run(tmp_path)
+
+        timeouts = [e for e in events if e.get("guardrail") == "cell_timeout"]
+        assert timeouts, "cells must have hit their budget"
+        starts = [e for e in events if e.get("event") == "turn_start"]
+        assert len(starts) == 3, f"every turn must be entered, got {len(starts)}"
+        end = next(e for e in events if e.get("event") == "end")
+        assert end["turns_used"] == 3, end
+        assert end["forced"] is False, "the final submission must have been executed"
+        assert answer == "the last turn ran", answer
+
+    def test_the_model_is_told_once_per_timeout(self, tmp_path: Path) -> None:
+        _, events = self._run(tmp_path)
+
+        timeouts = [e for e in events if e.get("guardrail") == "cell_timeout"]
+        told = [e for e in events
+                if e.get("event") == "root_message" and e.get("role") == "user"
+                and "stopped after" in str(e.get("content"))]
+        assert len(told) == len(timeouts) == 2, (len(told), len(timeouts))
+
+
 class TestTurnAccounting:
     """`turns_used` must be the number of turns spent, and never more than the budget.
 

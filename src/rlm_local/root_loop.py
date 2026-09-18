@@ -254,6 +254,7 @@ class RootLoop:
         while turn < max_turns:
             display_turn = turn + 1
             syntax_nudge = ""
+            timeout_nudge = ""
             # Counted once per turn actually *entered*: the syntax retry repeats the
             # body without re-entering, and every break path leaves the loop in the
             # middle of a turn it has already spent. `turn` alone cannot say how many
@@ -461,6 +462,14 @@ class RootLoop:
                     break
 
                 if repl_result.timed_out:
+                    # The nudge is *set* here and sent after the block loop, because
+                    # this is the block loop: a `continue` in it resumes the next
+                    # block, and advancing the turn here as well would make the turn
+                    # loop's own advance a second one. Measured 2026-09-17 with a
+                    # probe at the real limits (60 s soft): one timed-out cell then
+                    # spent a two-turn budget — `turn_start=1` of 2, the scripted
+                    # submission never executed — so with `max_turns=8` every timeout
+                    # was stealing two turns. The syntax branch below shows the shape.
                     self._log_cell_timeout(display_turn, bi + 1)
                     # Tell the model *what happened*: a budget, not a mistake in
                     # its code. The generic traceback nudge would read as if the
@@ -470,11 +479,7 @@ class RootLoop:
                         timeout=f"{cfg.cell_timeout:g}",
                         helper=self._last_corpus_helper or "none",
                     )
-                    messages.append({"role": "user", "content": timeout_nudge})
-                    if self._logger:
-                        self._logger.log_root_message("user", timeout_nudge)
-                    turn += 1
-                    continue
+                    break
 
                 # ── §5.6 stage 4: stderr self-correction (R5) ─────────────
                 if repl_result.stderr and repl_result.stderr.strip():
@@ -571,6 +576,16 @@ class RootLoop:
                 messages.append({"role": "user", "content": syntax_nudge})
                 if self._logger:
                     self._logger.log_root_message("user", syntax_nudge)
+                continue
+
+            # A cell stopped by its time budget: the model is told it hit a *budget*
+            # (not a bug in its code), and the turn is spent — exactly one advance,
+            # here and nowhere else (2026-09-17).
+            if timeout_nudge:
+                messages.append({"role": "user", "content": timeout_nudge})
+                if self._logger:
+                    self._logger.log_root_message("user", timeout_nudge)
+                turn += 1
                 continue
 
             # R6: tell the model its submission was empty instead of silently

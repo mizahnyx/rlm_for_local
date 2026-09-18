@@ -2261,6 +2261,31 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_exhausting_the_budget_reports_exactly_the_budget",
         ],
     ),
+    (
+        "a timed-out cell is charged two turns again",
+        "src/rlm_local/root_loop.py",
+        "                    timeout_nudge = NUDGE_CELL_TIMEOUT.format(\n"
+        "                        timeout=f\"{cfg.cell_timeout:g}\",",
+        "                    turn += 1\n"
+        "                    timeout_nudge = NUDGE_CELL_TIMEOUT.format(\n"
+        "                        timeout=f\"{cfg.cell_timeout:g}\",",
+        [
+            "tests/test_root_loop_integration.py::TestATimedOutCellCostsOneTurn"
+            "::test_the_last_turn_is_still_executed_after_timeouts",
+        ],
+    ),
+    (
+        "a timed-out cell stops being announced to the model",
+        "src/rlm_local/root_loop.py",
+        "            if timeout_nudge:\n"
+        "                messages.append({\"role\": \"user\", \"content\": timeout_nudge})",
+        "            if False:\n"
+        "                messages.append({\"role\": \"user\", \"content\": timeout_nudge})",
+        [
+            "tests/test_root_loop_integration.py::TestATimedOutCellCostsOneTurn"
+            "::test_the_model_is_told_once_per_timeout",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
