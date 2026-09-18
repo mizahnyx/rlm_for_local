@@ -6,6 +6,30 @@ rolled. It records what is landed, what is half-done and where, the two traps th
 time, the verification state *including the debt*, and the exact next action.
 **Supersedes nothing.** It summarises and points; the dated records remain the history.
 
+> **Update, 2026-09-18 05:10 — the next action in §2 is done, and §5's measurement is half
+> done. Read this before acting on anything below.**
+>
+> - **§2 (re-land the hard cell limit): landed** as `d30265e` — `cell_timeout_hard`, the
+>   progress gate, the `cell_extended` event and the operator warning, `--cell-timeout-hard`
+>   / `RLM_CELL_TIMEOUT_HARD`. 5 sandbox-level tests, 3 integration/CLI tests. Fast suite
+>   **1326 passed / 0 failed**; mutation table **184 guards / 0 problems**; doc lint 50
+>   documents clean.
+> - **Two defects were found in §8's verbatim code, by exactly the test strategy §2
+>   prescribed**: the extension branch sat at the top of the wait loop, where a real wait
+>   never returns, so it *could never fire*; and telling "the window closed" from "the
+>   worker closed the socket" by comparing the clock was wrong about one run in four, and
+>   is now decided by `select`. Details, with the deviations from §8 that were deliberate:
+>   `docs/20260918-0451-two-stage-cell-budget-landed.md`.
+> - **§5 step 3, partly run**: the probe at the real limits on `lunacode`
+>   (`two_limits_supported=True`) shows the working cell extended at 60 s and finishing at
+>   75.00 s with **0 timeouts**, and the stuck control stopped at 60.03 s with
+>   `limit=soft activity=0`. **Still open**: a third case that outlives 1 200 s (the hard
+>   limit firing for real, ~22 minutes, not yet added to the probe), and any *model* run
+>   producing an extension — these cells are scripted.
+>   `docs/20260918-0510-probe-two-limits-at-the-real-limits.md`.
+> - Everything else in this document — §3's two traps, §6's standing rules, §7's map —
+>   still holds, and §7's map now also includes the two records above.
+
 ---
 
 ## 1. Where the code is
