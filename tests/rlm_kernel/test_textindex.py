@@ -668,3 +668,33 @@ class TestRandomPassages:
 
         assert index.random_chunks(3, attempts=40) == []
 
+    def test_the_draw_never_asks_sqlite_for_both_extremes_at_once(
+        self, index: TextIndex, corpus: Path,
+    ) -> None:
+        """`MIN(id), MAX(id)` together cost 272 s on the live index; seeks cost nothing.
+
+        Measured 2026-09-18 on the complete index (29 015 791 chunks): asked for both
+        extremes in one query, SQLite chose `SCAN text_chunks USING COVERING INDEX
+        text_chunks_source` — a full scan of a covering index, **272.5 seconds** — and
+        that single statement was 8m17s of an 8m17s `rlm corpus sample` run. The
+        probes themselves were instant (`SEARCH … USING INTEGER PRIMARY KEY`). The
+        bounds are therefore read as two single-ended `ORDER BY id` seeks, and this
+        test holds the query *shape*, because the cost is invisible on a fixture
+        index and the failure only appears at the corpus's scale.
+        """
+        import random
+
+        self._stock(index, corpus, "docs/one.txt")
+        self._stock(index, corpus, "docs/two.txt")
+        issued: list[str] = []
+        index._conn.set_trace_callback(lambda sql: issued.append(sql))
+        try:
+            assert len(index.random_chunks(2, rng=random.Random(1))) == 2
+        finally:
+            index._conn.set_trace_callback(None)
+
+        assert issued, "the draw must read the index"
+        assert not [sql for sql in issued if "MIN(" in sql.upper()
+                    or "MAX(" in sql.upper()], issued
+        assert any("ORDER BY id DESC" in sql for sql in issued), issued
+

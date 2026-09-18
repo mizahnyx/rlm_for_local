@@ -464,6 +464,12 @@ class TextIndex:
           after it (`WHERE id >= ? ORDER BY id LIMIT 1`, an indexed lookup), rather
           than taking the head of a scan. `ORDER BY RANDOM()` over 29M rows is a sort
           of the whole table and is not an option at this scale.
+        * **Cheap at any size, and that took measuring.** The bounds come from
+          `ORDER BY id LIMIT 1` and `ORDER BY id DESC LIMIT 1`, *not* from
+          `SELECT MIN(id), MAX(id)`: asked for both extremes at once, SQLite scanned a
+          covering index over all 29 015 791 rows — **272.5 s** on the live index, which
+          was 8m17s of an 8m17s draw. Two single-ended seeks are instant, and the random
+          probes themselves measured 0.000 s each.
         * **Not exactly uniform over rows** — probing a uniform random `id` weights a
           row by the gap of deleted ids in front of it, so a heavily pruned index
           would be mildly biased. On this index (29M chunks, few deletions) the id
@@ -481,12 +487,15 @@ class TextIndex:
         if want == 0:
             return []
         picker = rng if rng is not None else random.Random()
-        bounds = self._conn.execute(
-            "SELECT MIN(id), MAX(id) FROM text_chunks"
-        ).fetchone()
-        if not bounds or bounds[0] is None:
+        # Two single-ended seeks rather than `MIN(id), MAX(id)`: see the docstring.
+        # `id` is the rowid, so `ORDER BY id LIMIT 1` is answered from the btree ends.
+        first = self._conn.execute(
+            "SELECT id FROM text_chunks ORDER BY id LIMIT 1").fetchone()
+        last = self._conn.execute(
+            "SELECT id FROM text_chunks ORDER BY id DESC LIMIT 1").fetchone()
+        if not first or not last:
             return []
-        low, high = int(bounds[0]), int(bounds[1])
+        low, high = int(first[0]), int(last[0])
 
         clauses: list[str] = []
         tail: tuple[Any, ...] = ()

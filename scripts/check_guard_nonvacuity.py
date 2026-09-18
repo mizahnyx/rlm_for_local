@@ -2400,6 +2400,26 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_draw_is_reproducible_from_its_seed",
         ],
     ),
+    (
+        "the draw goes back to asking for both extremes at once",
+        "src/rlm_kernel/textindex.py",
+        "        first = self._conn.execute(\n"
+        "            \"SELECT id FROM text_chunks ORDER BY id LIMIT 1\").fetchone()\n"
+        "        last = self._conn.execute(\n"
+        "            \"SELECT id FROM text_chunks ORDER BY id DESC LIMIT 1\").fetchone()\n"
+        "        if not first or not last:\n"
+        "            return []\n"
+        "        low, high = int(first[0]), int(last[0])",
+        "        bounds = self._conn.execute(\n"
+        "            \"SELECT MIN(id), MAX(id) FROM text_chunks\").fetchone()\n"
+        "        if not bounds or bounds[0] is None:\n"
+        "            return []\n"
+        "        low, high = int(bounds[0]), int(bounds[1])",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestRandomPassages"
+            "::test_the_draw_never_asks_sqlite_for_both_extremes_at_once",
+        ],
+    ),
     # ── Probing with real questions (2026-09-18) ───────────────────────────
     (
         "the question probe prints the answer instead of the aggregates",
