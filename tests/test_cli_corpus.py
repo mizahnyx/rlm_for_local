@@ -493,6 +493,103 @@ class TestCorpusCountersCommand:
         assert "no index at" in capsys.readouterr().err
 
 
+class TestCorpusSampleCommand:
+    """`rlm corpus sample` — random passages with their addresses (2026-09-18).
+
+    The owner's tool for devising questions: it hands back real text blocks from
+    the live corpus, each with the address that re-reads it, so a question set can
+    be written against the corpus instead of against a fixture that sleeps. It is
+    also the one corpus command whose *whole output* is corpus text, which is why
+    the header says so: the output is readable only where the corpus is
+    (`AGENTS.md` §1.9).
+    """
+
+    @pytest.fixture
+    def sampled(self, corpus: Path, index_path: Path,
+                capsys: pytest.CaptureFixture) -> Path:
+        (corpus / "papers" / "long.md").write_text(
+            ("The engine was Godot, and Cuicani sang the archive awake. " * 14) + "\n",
+            encoding="utf-8",
+        )
+        cli_main(["corpus", "index", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path)])
+        cli_main(["corpus", "classify", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path)])
+        cli_main(["mine", "plan", "--corpus-index", str(index_path)])
+        cli_main(["mine", "run", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path), "--tasks", "index_text"])
+        capsys.readouterr()
+        return index_path
+
+    @staticmethod
+    def _addresses(out: str) -> list[str]:
+        return [line.split()[-1] for line in out.splitlines()
+                if line.startswith("=== ")]
+
+    def test_a_passage_arrives_with_an_address_that_can_re_read_it(
+        self, corpus: Path, sampled: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        rc = cli_main(["corpus", "sample", "--n", "3", "--seed", "5",
+                       "--corpus-root", str(corpus), "--corpus-index", str(sampled)])
+        out = capsys.readouterr().out
+        assert rc == 0
+        addresses = self._addresses(out)
+        assert addresses, out
+        assert all("#L" in address for address in addresses)
+        # The text really is the text: this command's job is to show it.
+        assert "Cuicani" in out
+
+    def test_the_same_seed_hands_back_the_same_passages(
+        self, corpus: Path, sampled: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        """A question set must be re-runnable, which needs a reproducible draw."""
+        def draw(seed: str) -> tuple[str, list[str]]:
+            cli_main(["corpus", "sample", "--n", "3", "--seed", seed,
+                      "--corpus-root", str(corpus), "--corpus-index", str(sampled)])
+            out = capsys.readouterr().out
+            return out, self._addresses(out)
+
+        header, first = draw("1234")
+        _, again = draw("1234")
+        assert first == again, "the same seed must hand back the same passages"
+        assert "seed=1234" in header, header
+        assert len(first) == 3
+
+    def test_the_header_says_the_output_is_corpus_text(
+        self, corpus: Path, sampled: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        cli_main(["corpus", "sample", "--n", "1", "--seed", "1",
+                  "--corpus-root", str(corpus), "--corpus-index", str(sampled)])
+        out = capsys.readouterr().out
+        header = "\n".join(line for line in out.splitlines()
+                           if line.startswith("#"))
+        assert "seed=1" in header
+        assert "corpus text" in header.lower()
+        assert "1.9" in header, "the header names the rule that keeps it local"
+
+    def test_a_long_passage_is_clipped_and_says_so(
+        self, corpus: Path, sampled: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        cli_main(["corpus", "sample", "--n", "4", "--seed", "2", "--chars", "60",
+                  "--corpus-root", str(corpus), "--corpus-index", str(sampled)])
+        out = capsys.readouterr().out
+        blocks = out.split("=== ")[1:]
+        assert blocks, out
+        for block in blocks:
+            first_line = block.split("\n", 1)[1].split("\n")[0]
+            assert "clipped at 60" in block or len(first_line) <= 60, block
+            assert len(first_line) <= 60, (
+                f"the cap is a cap: {len(first_line)} characters printed"
+            )
+
+    def test_it_needs_an_index(self, tmp_path: Path,
+                               capsys: pytest.CaptureFixture) -> None:
+        rc = cli_main(["corpus", "sample", "--n", "1",
+                       "--corpus-index", str(tmp_path / "absent.sqlite")])
+        assert rc == 2
+        assert "no index at" in capsys.readouterr().err
+
+
 class TestAskWithACorpus:
     def test_ask_with_only_a_corpus_uses_the_stub_context(
         self, corpus: Path, index_path: Path, monkeypatch: pytest.MonkeyPatch,

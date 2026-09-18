@@ -2349,6 +2349,79 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_worker_that_went_away_is_not_credited_with_slow_work",
         ],
     ),
+    # ── Drawing passages to devise questions from (2026-09-18) ─────────────
+    (
+        "the sample draws vendored passages by default",
+        "src/rlm_kernel/textindex.py",
+        "        if not include_vendored:\n            clauses.append(\"vendored = 0\")",
+        "        if False:\n            clauses.append(\"vendored = 0\")",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestRandomPassages"
+            "::test_a_draw_skips_vendored_and_derived_chunks_unless_asked",
+        ],
+    ),
+    (
+        "the sample draws container-member passages by default",
+        "src/rlm_kernel/textindex.py",
+        "        if not include_derived:",
+        "        if False:",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestRandomPassages"
+            "::test_a_draw_skips_vendored_and_derived_chunks_unless_asked",
+        ],
+    ),
+    (
+        "the sample can hand back the same passage twice",
+        "src/rlm_kernel/textindex.py",
+        "            if hit.chunk_id in seen:\n                continue",
+        "            if False:\n                continue",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestRandomPassages"
+            "::test_a_draw_never_hands_back_the_same_passage_twice",
+        ],
+    ),
+    (
+        "an all-vendored index stops drawing nothing",
+        "src/rlm_kernel/textindex.py",
+        "        if not include_vendored:\n            clauses.append(\"vendored = 0\")",
+        "        if False:\n            clauses.append(\"vendored = 0\")",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestRandomPassages"
+            "::test_a_filter_that_matches_nothing_terminates",
+        ],
+    ),
+    (
+        "the sample stops being reproducible from its seed",
+        "src/rlm_kernel/textindex.py",
+        "        picker = rng if rng is not None else random.Random()",
+        "        picker = random.Random()",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestRandomPassages"
+            "::test_a_draw_is_reproducible_from_its_seed",
+        ],
+    ),
+    # ── Probing with real questions (2026-09-18) ───────────────────────────
+    (
+        "the question probe prints the answer instead of the aggregates",
+        "src/rlm_local/question_probe.py",
+        "    summary = render_summary(read_trajectory(path))",
+        "    _trace = read_trajectory(path)\n"
+        "    summary = _trace.final_answer or render_summary(_trace)",
+        [
+            "tests/test_question_probe.py::TestWhatTheProbePrints"
+            "::test_the_line_carries_the_run_and_not_the_answer",
+        ],
+    ),
+    (
+        "a question id can walk out of the output directory",
+        "src/rlm_local/question_probe.py",
+        "    return cleaned.strip(\"-\") or \"question\"",
+        "    return name.strip() or \"question\"",
+        [
+            "tests/test_question_probe.py::TestParsingAQuestionSet"
+            "::test_an_id_cannot_escape_the_output_directory",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

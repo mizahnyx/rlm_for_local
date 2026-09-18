@@ -582,6 +582,40 @@ If a search reports coverage as unknown, publish one. If the numbers look old af
 a long window, `--refresh` is the way to bring them forward; expect it to read the
 whole chunk table, and prefer running it when no mining window is active.
 
+### `rlm corpus sample` — passages to devise questions from
+
+Probe questions that matter are the ones drawn from *this* corpus, not invented. This
+command hands back random passages, each with the address that re-reads it:
+
+```bash
+python -m rlm_local.cli corpus sample --n 5 --seed 1234 \
+    --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite
+```
+
+```text
+# 5 of 5 passage(s) drawn from the corpus index, seed=1234
+# This is corpus text, read through the read-only mount: it may be read where
+# the corpus is and must not be copied anywhere else (AGENTS.md §1.9).
+
+=== 1/5  papers/…/report.md#L4096-5287
+…the passage itself, clipped at --chars with a marker if it is long…
+```
+
+It draws by probing a random chunk id — a handful of indexed lookups however large the
+index is — so nothing is searched and nothing is counted. `--seed` makes a draw
+reproducible, so a question set written from one sample can be re-run against a changed
+harness and "same question, a different answer" means something. Vendored paths and
+container-member chunks (`arch.zip!member.txt`, the family that still re-reads slowly,
+roadmap RO11) are out unless `--include-vendored` / `--include-derived` ask for them;
+`--chars` clips a long passage and says so rather than ending mid-sentence.
+
+**The output is corpus text, and it is the one corpus command whose whole purpose is to
+print content.** Read it where the corpus is: not into a chat window, not into a commit,
+not into this repository (`AGENTS.md` §1.9). Questions devised from it are corpus-derived
+too, so a hand-written question set belongs beside the corpus
+(`~/rlm-derived/questions/mine.txt`) rather than in the repo — which is what
+`scripts/run_question_probe.py --questions` reads.
+
 ### `rlm corpus search` and the `corpus_search` helper
 
 ```bash
@@ -823,6 +857,50 @@ neither a turn nor the error budget (`syntax_retry` / `syntax_giveup` events, bo
 by `max_syntax_retries`), so a run with several of those events is a model with a
 syntax habit, not a model that reasoned badly — and `turns_used` in the `end` event
 is the number that stays honest about it.
+
+### Probing with real questions (the measurement that is about the task)
+
+A probe whose cell sleeps for 75 seconds measures a mechanism. The question that matters
+is whether the harness can find and cite things in *this* corpus, so the probes worth
+running are real questions, asked by the real model, against the real index:
+
+```bash
+# On lunacode, where the corpus and the models are.
+python scripts/run_question_probe.py \
+    --out-dir ~/rlm-derived/questions \
+    --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite \
+    --profile laptop --max-turns 6 --cell-timeout 60 --cell-timeout-hard 600
+```
+
+It runs each question in turn, writes one trajectory per question to `--out-dir`, and
+copies the question set it used beside them (`questions.txt`), so a measurement is
+re-runnable and what was asked sits with what happened. With no `--questions` it runs
+the three built-in questions about the corpus's own **aggregates** — counts, coverage,
+kinds of material — which are the only questions that may live in the repository.
+
+**It prints aggregates and nothing else**: one line per question — turns, timeouts,
+extensions, helper calls, citations, refusals, wall clock — never an answer, a passage
+or an address. Those stay in the trajectories beside the corpus, and the same
+`render_summary` line powers `rlm trace summary`, so the operator reads one vocabulary
+everywhere. Read the pages a human can audit with:
+
+```bash
+rlm trace render ~/rlm-derived/questions --out-dir ~/rlm-derived/traces \
+    --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite
+```
+
+Two things to know before reading a question run:
+
+- **The probe has no wall-clock ceiling of its own.** The owner's call is that the
+  harness has none, so the bound is what you pass: `--max-turns`, `--cell-timeout`,
+  `--cell-timeout-hard`. A question that hits them says so in its own line
+  (`cell_timeout`, `forced`), which is a diagnosis rather than a mystery.
+- **A question that fails does not take the probe with it.** A router that goes down on
+  question four is recorded as `error=…` on that line and the remaining questions still
+  run — five answers and one recorded failure is a measurement; losing the run is not.
+
+`docs/20260918-0510-probe-two-limits-at-the-real-limits.md` is the mechanism probe, and
+`scripts/probe_cell_budget.py` is its reproducer.
 
 ---
 

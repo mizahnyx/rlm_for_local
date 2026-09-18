@@ -287,6 +287,37 @@ def build_parser() -> argparse.ArgumentParser:
                            help="Print indexing coverage and exit")
     p_csearch.add_argument("--cache-root", type=Path, default=None)
 
+    p_csample = corpus_sub.add_parser(
+        "sample",
+        help="Print random passages with their addresses, to devise questions from",
+        description=(
+            "Draw real passages out of the index, each with the address that re-reads "
+            "it, so questions can be written against the corpus instead of against a "
+            "fixture. Nothing is searched and nothing is counted: the draw probes a "
+            "random chunk id, so it costs a handful of indexed lookups however large "
+            "the index is. Reproducible with --seed, and vendored paths and "
+            "container-member chunks are left out unless asked for. The output is "
+            "corpus text: it may be read where the corpus is and must not travel "
+            "(AGENTS.md §1.9)."
+        ),
+    )
+    _add_corpus_flags(p_csample, require_root=True, require_index=True)
+    p_csample.add_argument("-n", "--n", type=int, default=5,
+                           help="How many passages to draw (default 5)")
+    p_csample.add_argument("--chars", type=int, default=2000,
+                           help="Clip each passage to this many characters "
+                                "(default 2000; 0 prints the whole chunk)")
+    p_csample.add_argument("--seed", type=int, default=None,
+                           help="Seed the draw, so the same passages can be produced "
+                                "again; the seed is printed either way")
+    p_csample.add_argument("--include-vendored", action="store_true",
+                           help="Allow passages from vendored/build/cache paths")
+    p_csample.add_argument("--include-derived", action="store_true",
+                           help="Allow passages extracted from containers (PDF, "
+                                "office, archives) — the addresses that still re-read "
+                                "slowly (RO11)")
+    p_csample.add_argument("--cache-root", type=Path, default=None)
+
     p_ccounters = corpus_sub.add_parser(
         "counters",
         help="Show or refresh the published coverage snapshot a search quotes",
@@ -1076,6 +1107,9 @@ def _cmd_corpus(args: argparse.Namespace) -> int:
     if sub == "search":
         return _cmd_corpus_search(args)
 
+    if sub == "sample":
+        return _cmd_corpus_sample(args)
+
     if sub == "counters":
         return _cmd_corpus_counters(args)
 
@@ -1207,6 +1241,85 @@ def _cmd_corpus_search(args: argparse.Namespace) -> int:
         return 0
     finally:
         index.close()
+
+
+def _cmd_corpus_sample(args: argparse.Namespace) -> int:
+    """`rlm corpus sample` — random passages with addresses, to ask questions about.
+
+    The only corpus command whose entire output is corpus text, which is why the
+    header says so out loud: the passages and their addresses are readable where the
+    corpus is and nowhere else (`AGENTS.md` §1.9). It reads through the same
+    read-only mount as everything else, and it never searches or counts — a draw is
+    a bounded number of indexed lookups, so `--n 20` costs the same on a 29M-chunk
+    index as on a small one.
+    """
+    import random
+
+    from rlm_kernel.corpus import CorpusIndex
+    from rlm_kernel.mounts import LocalTreeMount, ReadOnlyViolation
+
+    if not args.corpus_index:
+        print("Error: --corpus-index is required (env RLM_CORPUS_INDEX).",
+              file=sys.stderr)
+        return 2
+    if not Path(args.corpus_index).exists():
+        print(f"Error: no index at {args.corpus_index}.", file=sys.stderr)
+        return 2
+    if not args.corpus_root:
+        print("Error: --corpus-root is required to read the passages.",
+              file=sys.stderr)
+        return 2
+
+    index = CorpusIndex(args.corpus_index)
+    try:
+        text_index = index.text()
+        text_index.ensure()
+        seed = args.seed if args.seed is not None else random.randrange(2 ** 31)
+        hits = text_index.random_chunks(
+            args.n, rng=random.Random(seed),
+            include_vendored=args.include_vendored,
+            include_derived=args.include_derived,
+        )
+        cache_root, _, _ = _mine_paths(args)
+        try:
+            mount = LocalTreeMount(args.corpus_root)
+        except ReadOnlyViolation as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 2
+        print(f"# {len(hits)} of {args.n} passage(s) drawn from the corpus index, "
+              f"seed={seed}")
+        print("# This is corpus text, read through the read-only mount: it may be "
+              "read where")
+        print("# the corpus is and must not be copied anywhere else (AGENTS.md §1.9).")
+        print()
+        for position, hit in enumerate(hits, 1):
+            print(f"=== {position}/{len(hits)}  {hit.address}")
+            try:
+                text = text_index.read(hit, mount=mount, cache_root=cache_root)
+            except (ReadOnlyViolation, OSError) as e:
+                print(f"(cannot re-read this passage: {e})")
+                print()
+                continue
+            print(_clip_passage(text.strip(), args.chars))
+            print()
+        if not hits:
+            print("(the index drew nothing — is anything indexed, and are the "
+                  "vendored/derived filters hiding it?)")
+        return 0
+    finally:
+        index.close()
+
+
+def _clip_passage(text: str, chars: int) -> str:
+    """Clip a passage for printing, saying so rather than ending mid-sentence.
+
+    Console output, so not a template (`AGENTS.md` §1.3): the marker is for the
+    operator reading it, not for the model.
+    """
+    cap = int(chars or 0)
+    if cap <= 0 or len(text) <= cap:
+        return text
+    return f"{text[:cap].rstrip()}\n[... clipped at {cap} characters ...]"
 
 
 def _cmd_corpus_classify(args: argparse.Namespace) -> int:

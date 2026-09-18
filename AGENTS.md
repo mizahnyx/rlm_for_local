@@ -34,9 +34,11 @@ exist, written down in one place so they stop being re-derived per session.
    three wrong stories about this model, whereas the owner can read a page of
    events and see what happened. So: instrument it, render the trajectory
    (`rlm trace render`), point at the file, and stop short of concluding.
-   Reproducers live in `scripts/` beside the mutation table (e.g.
-   `scripts/probe_cell_budget.py`), and the traces go where the corpus is, never
-   into this conversation.
+   Reproducers live in `scripts/` beside the mutation table — `scripts/probe_cell_budget.py`
+   measures a *mechanism* (a cell that sleeps), `scripts/run_question_probe.py` measures
+   the *task* (real questions asked of the corpus, one trajectory each, aggregates on
+   stdout and the answers left beside the corpus) — and the traces go where the corpus
+   is, never into this conversation.
 6. **No scope creep without an owner call.** Scoring semantics, vault-format
    changes, sandbox boundaries and load-test scope are owner decisions. Ask, or
    record the item in the roadmap's ledger as `owner call`.
@@ -148,6 +150,10 @@ uv run python -m rlm_local.cli corpus classify --corpus-root /srv/corpus \
 uv run python -m rlm_local.cli corpus search "…" --corpus-index ~/rlm-derived/corpus.sqlite
 uv run python -m rlm_local.cli corpus search "…" --corpus-index ~/rlm-derived/corpus.sqlite \
     --count-only                                    # counts + coverage, no path, safe to paste
+uv run python -m rlm_local.cli corpus sample --n 5 --seed 1234 \
+    --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite
+                                                    # random passages + addresses, to devise
+                                                    # questions from; output is corpus text
 uv run python -m rlm_local.cli corpus counters --corpus-index ~/rlm-derived/corpus.sqlite
 uv run python -m rlm_local.cli corpus counters --corpus-index ~/rlm-derived/corpus.sqlite \
     --refresh                                       # recompute the snapshot (~16 min; idle index)

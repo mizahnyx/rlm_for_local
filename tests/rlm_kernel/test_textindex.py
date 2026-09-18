@@ -539,3 +539,132 @@ class TestCoverageSnapshot:
                               "text_coverage": 0.05})
         assert "5 sources indexed" in note
         assert "ago" not in note
+
+
+class TestRandomPassages:
+    """Drawing real passages out, to devise questions against (2026-09-18).
+
+    The owner's request: something that hands back *text blocks with their
+    addresses* from the live corpus, so the questions used as probes come from the
+    corpus rather than from a fixture that sleeps. Three properties are guarded
+    here, because each of them silent-fails in a different way:
+
+    * **reproducible** — the same seed must give the same passages, or a question
+      set cannot be re-run against a changed harness and "same question, different
+      answer" means nothing;
+    * **reachable** — every indexed source must be drawable. A sampler that
+      returns the same little corner of the index every time seeds questions that
+      say nothing about the corpus as a whole;
+    * **filtered** — vendored and derived (container-member) chunks are out by
+      default: one is noise the ranking already down-weights, and the other is the
+      address family that still costs >150 s to re-read (RO11).
+    """
+
+    def _stock(self, index: TextIndex, corpus: Path, display: str,
+               body: str | None = None, **kwargs) -> None:
+        relative = corpus / display
+        relative.parent.mkdir(parents=True, exist_ok=True)
+        text = (body or (display + " — " + ("filler sentence. " * 40) + "\n"))
+        relative.write_text(text, encoding="utf-8")
+        index.add_text(raw=display.encode("utf-8"), display=display,
+                       source_hash=f"h-{display}", text=relative.read_bytes(),
+                       **kwargs)
+
+    def test_a_draw_is_reproducible_from_its_seed(
+        self, index: TextIndex, corpus: Path,
+    ) -> None:
+        import random
+
+        for name in ("a.txt", "b.txt", "c.txt", "d.txt"):
+            self._stock(index, corpus, f"docs/{name}")
+
+        first = index.random_chunks(3, rng=random.Random(7))
+        again = index.random_chunks(3, rng=random.Random(7))
+        assert [h.address for h in first] == [h.address for h in again]
+        # Distinct: a draw of three passages must not be one passage three times.
+        assert len({h.chunk_id for h in first}) == len(first) == 3
+
+    def test_a_draw_never_hands_back_the_same_passage_twice(
+        self, index: TextIndex, corpus: Path,
+    ) -> None:
+        """No duplicates, checked over many seeds rather than one lucky draw.
+
+        The first version of this guard asserted distinctness on a *single* draw from
+        a four-chunk table, and the mutation table reported it VACUOUS: with the
+        dedupe removed, three random probes into four chunks usually do land on three
+        different chunks, so the test passed with the guard gone. Thirty seeds fix
+        that — a duplicate-free draw is certain with the dedupe and near-certain to
+        show a duplicate without it.
+        """
+        import random
+
+        for name in ("a.txt", "b.txt", "c.txt", "d.txt"):
+            self._stock(index, corpus, f"docs/{name}")
+
+        for seed in range(30):
+            drawn = index.random_chunks(4, rng=random.Random(seed))
+            ids = [h.chunk_id for h in drawn]
+            assert len(ids) == len(set(ids)) == 4, (seed, ids)
+
+    def test_every_indexed_source_can_be_reached_by_drawing(
+        self, index: TextIndex, corpus: Path,
+    ) -> None:
+        """No source is unreachable, and none is sampled only by accident.
+
+        A weak uniformity claim on purpose: over 60 draws, all four sources must
+        appear. With 60 independent draws over 4 equally likely chunks the chance
+        of missing one is ~(3/4)**60 ≈ 3e-8, so this fails only if the draw is
+        genuinely biased towards part of the table — which is the failure a
+        "take the first N rows" sampler has.
+        """
+        import random
+
+        for name in ("a.txt", "b.txt", "c.txt", "d.txt"):
+            self._stock(index, corpus, f"docs/{name}")
+
+        seen = {h.source for h in
+                index.random_chunks(60, rng=random.Random(11))}
+        assert seen == {f"docs/{name}" for name in
+                        ("a.txt", "b.txt", "c.txt", "d.txt")}
+
+    def test_a_draw_skips_vendored_and_derived_chunks_unless_asked(
+        self, index: TextIndex, corpus: Path,
+    ) -> None:
+        import random
+
+        from rlm_kernel.textindex import ORIGIN_CACHE
+
+        self._stock(index, corpus, "docs/ordinary.txt")
+        self._stock(index, corpus, "node_modules/lib/index.js")
+        self._stock(index, corpus, "docs/from-a-container.txt",
+                    origin=ORIGIN_CACHE, cache_task="extract_text",
+                    cache_key="a" * 64, derived=True, engine="pdftotext")
+
+        default = index.random_chunks(20, rng=random.Random(3))
+        assert {h.source for h in default} == {"docs/ordinary.txt"}
+
+        with_vendored = index.random_chunks(20, rng=random.Random(3),
+                                            include_vendored=True)
+        assert "node_modules/lib/index.js" in {h.source for h in with_vendored}
+
+        derived = index.random_chunks(20, rng=random.Random(3),
+                                      include_derived=True)
+        assert "docs/from-a-container.txt" in {h.source for h in derived}
+
+    def test_an_empty_index_draws_nothing(self, index: TextIndex) -> None:
+        assert index.random_chunks(5) == []
+
+    def test_a_filter_that_matches_nothing_terminates(
+        self, index: TextIndex, corpus: Path,
+    ) -> None:
+        """An index whose every chunk is filtered out returns [] — it does not spin.
+
+        The budget is explicit here so the test proves the *bound* rather than
+        waiting for a hang: a sampler that retried until it found a match would
+        never return on an all-vendored index, and the operator would see a
+        command that simply stopped responding.
+        """
+        self._stock(index, corpus, "node_modules/lib/index.js")
+
+        assert index.random_chunks(3, attempts=40) == []
+

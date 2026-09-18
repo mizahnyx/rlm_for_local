@@ -173,6 +173,23 @@ class SearchResult:
     coverage_note: str | None = None
 
 
+#: The columns every `Hit` is built from, in the order `_hit_from_row` reads them.
+#: One definition on purpose: a second copy of this list is how two readers of the
+#: same table come to disagree about what a column means.
+_HIT_COLUMNS = ("id, source, display, source_hash, origin, byte_start, byte_end,"
+                " derived, engine, vendored, cache_task, cache_key")
+
+
+def _hit_from_row(row: Any, *, score: float = 0.0) -> Hit:
+    """One `text_chunks` row, as the `Hit` the rest of the system passes around."""
+    return Hit(
+        chunk_id=int(row[0]), source=str(row[2]), origin=str(row[4]),
+        source_hash=str(row[3]), byte_start=int(row[5]), byte_end=int(row[6]),
+        derived=bool(row[7]), engine=row[8], vendored=bool(row[9]),
+        score=score, cache_task=row[10], cache_key=row[11],
+    )
+
+
 class TextIndex:
     """The chunk table and its contentless FTS5 companion."""
 
@@ -409,28 +426,108 @@ class TextIndex:
         display = match.group("source")
         start = int(match.group("start"))
         end = int(match.group("end"))
-        columns = ("id, source, display, source_hash, origin, byte_start, byte_end,"
-                   " derived, engine, vendored, cache_task, cache_key")
         if raw_source is None:
             row = self._conn.execute(
-                f"SELECT {columns} FROM text_chunks"
+                f"SELECT {_HIT_COLUMNS} FROM text_chunks"
                 " WHERE display = ? AND byte_start = ? AND byte_end = ? LIMIT 1",
                 (display, start, end),
             ).fetchone()
         else:
             row = self._conn.execute(
-                f"SELECT {columns} FROM text_chunks"
+                f"SELECT {_HIT_COLUMNS} FROM text_chunks"
                 " WHERE source = ? AND byte_start = ? AND byte_end = ? LIMIT 1",
                 (raw_source, start, end),
             ).fetchone()
         if row is None:
             return None
-        return Hit(
-            chunk_id=int(row[0]), source=str(row[2]), origin=str(row[4]),
-            source_hash=str(row[3]), byte_start=int(row[5]), byte_end=int(row[6]),
-            derived=bool(row[7]), engine=row[8], vendored=bool(row[9]),
-            score=0.0, cache_task=row[10], cache_key=row[11],
-        )
+        return _hit_from_row(row)
+
+    def random_chunks(
+        self,
+        count: int,
+        *,
+        rng: Any = None,
+        include_vendored: bool = False,
+        include_derived: bool = False,
+        attempts: int | None = None,
+    ) -> list[Hit]:
+        """Draw `count` distinct chunks from anywhere in the table (2026-09-18).
+
+        The owner's use: hand back *real passages with their addresses*, so questions
+        can be devised against the corpus instead of against a fixture. Two
+        properties matter, and a third is stated rather than claimed:
+
+        * **Reproducible** — pass an `rng` seeded the same way and the same passages
+          come back. Without that, a question set cannot be re-run against a changed
+          harness, and "the same question, a different answer" says nothing.
+        * **Spread out** — the draw probes a random `id` and takes the first row at or
+          after it (`WHERE id >= ? ORDER BY id LIMIT 1`, an indexed lookup), rather
+          than taking the head of a scan. `ORDER BY RANDOM()` over 29M rows is a sort
+          of the whole table and is not an option at this scale.
+        * **Not exactly uniform over rows** — probing a uniform random `id` weights a
+          row by the gap of deleted ids in front of it, so a heavily pruned index
+          would be mildly biased. On this index (29M chunks, few deletions) the id
+          space is dense and the two are indistinguishable; it is written down because
+          a sampler that quietly over-samples one region would seed questions that say
+          nothing about the corpus as a whole.
+
+        `attempts` bounds the work, so a filter that can never match returns an empty
+        list instead of spinning — an operator staring at a command that stopped
+        responding is a worse failure than a short draw.
+        """
+        import random
+
+        want = max(0, int(count))
+        if want == 0:
+            return []
+        picker = rng if rng is not None else random.Random()
+        bounds = self._conn.execute(
+            "SELECT MIN(id), MAX(id) FROM text_chunks"
+        ).fetchone()
+        if not bounds or bounds[0] is None:
+            return []
+        low, high = int(bounds[0]), int(bounds[1])
+
+        clauses: list[str] = []
+        tail: tuple[Any, ...] = ()
+        if not include_vendored:
+            clauses.append("vendored = 0")
+        if not include_derived:
+            # Container members and extracted text live in the derivation cache
+            # (`origin = cache`): out by default, because re-reading one is the
+            # address family that still costs >150 s (RO11).
+            clauses.append("origin = ?")
+            tail = (ORIGIN_FILE,)
+        where = (" AND " + " AND ".join(clauses)) if clauses else ""
+
+        budget = attempts if attempts is not None else max(50, want * 25)
+        picked: list[Hit] = []
+        seen: set[int] = set()
+        for _ in range(max(1, int(budget))):
+            if len(picked) >= want:
+                break
+            target = picker.randint(low, high)
+            row = self._conn.execute(
+                f"SELECT {_HIT_COLUMNS} FROM text_chunks"
+                f" WHERE id >= ?{where} ORDER BY id LIMIT 1",
+                (target, *tail),
+            ).fetchone()
+            if row is None:
+                # Past the last matching row: wrap around, so a filter that holds
+                # only in the tail cannot waste the whole budget on misses.
+                row = self._conn.execute(
+                    f"SELECT {_HIT_COLUMNS} FROM text_chunks"
+                    f" WHERE id <= ?{where} ORDER BY id DESC LIMIT 1",
+                    (target, *tail),
+                ).fetchone()
+            if row is None:
+                continue
+            hit = _hit_from_row(row)
+            if hit.chunk_id in seen:
+                continue
+            seen.add(hit.chunk_id)
+            picked.append(hit)
+        return picked
 
     def read_address(
         self,

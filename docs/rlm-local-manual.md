@@ -2112,6 +2112,29 @@ Answer matching is case-, hyphen-, and whitespace-insensitive — the documented
   `(?!\d)` so that `25.8C` still matches. The convention and the enforcing tests
   live in `tests/evals/__init__.py` and `tests/evals/test_eval_patterns.py`.
 
+### 16.6 Probes: measuring the mechanism, and measuring the task
+
+Two scripts gather the evidence this project's corpus work is judged on, and they are
+deliberately different in kind:
+
+| probe | measures | what its page shows |
+|---|---|---|
+| `scripts/probe_cell_budget.py` | a **mechanism**: a cell that sleeps past the soft limit, with and without a helper call | `two_limits_supported`, `probe_request` (every request with its millisecond offset), `probe_cell` (elapsed, `timed_out`, `hard`, `activity`), `cell_extended` |
+| `scripts/run_question_probe.py` | the **task**: real questions, a real model, the real index | one aggregate line per question (turns, timeouts, extensions, helper calls, citations, refusals, wall clock), one trajectory each, and the question set it used |
+
+`rlm_local/question_probe.py` holds the question-set parser, the per-question runner and
+the aggregate line; the script is a thin wrapper. Two properties are structural rather
+than promised, and both are tested (`tests/test_question_probe.py`): the line the probe
+prints **never carries the answer** (`render_summary` carries no question, no address and
+no quote, and the answer stays in the trajectory), and an id from a hand-edited question
+file is slugged so it cannot walk out of `--out-dir`. Question sets devised from passages
+are corpus-derived and belong beside the corpus; the set that ships in the repository is
+`DEFAULT_QUESTIONS`, which asks about aggregates only.
+
+Neither probe sets a wall-clock ceiling of its own: the harness has none (the owner's
+call), so a probe run is bounded by the `--max-turns`, `--cell-timeout` and
+`--cell-timeout-hard` it is given, and a run that hits them says so in its own line.
+
 ---
 
 ## 17. API Reference
