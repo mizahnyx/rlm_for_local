@@ -136,6 +136,64 @@ class CitationAudit:
 
 
 @dataclass
+class AddressCorruption:
+    """How the addresses an answer cites relate to the ones the harness served.
+
+    Three outcomes, and the middle one is the point: a citation *one edit* from a
+    served address is a copy slip that a repairable handle would have saved, whereas
+    a citation near nothing is an invention. In the trajectory both are simply "not
+    in the served set", which is why the size of the mnemonic prize was unknown until
+    this existed (owner's finding, 2026-09-17).
+    """
+
+    exact: list[str] = field(default_factory=list)
+    one_edit: list[tuple[str, str]] = field(default_factory=list)
+    unmatched: list[str] = field(default_factory=list)
+
+    @property
+    def cited(self) -> int:
+        return len(self.exact) + len(self.one_edit) + len(self.unmatched)
+
+
+def _one_edit_apart(a: str, b: str) -> bool:
+    """Whether `a` becomes `b` with one insert, delete, substitution or *swap*.
+
+    Deliberately one edit and not "close": the repair rule the mnemonic design
+    proposes accepts a unique candidate within one edit, so counting anything looser
+    would credit the harness with a rescue it would not have made. An **adjacent
+    transposition counts as one** (Damerau, not plain Levenshtein), because swapping
+    two neighbouring characters is the classic slip on a short token — `KQ7` typed as
+    `K7Q` — and a repair rule that refused it would fail on the very corruption it
+    exists for.
+    """
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        mismatches = [i for i, (x, y) in enumerate(zip(a, b)) if x != y]
+        if len(mismatches) == 1:
+            return True
+        if len(mismatches) == 2:
+            i, j = mismatches
+            return j == i + 1 and a[i] == b[j] and a[j] == b[i]
+        return False
+    short, long = (a, b) if len(a) < len(b) else (b, a)
+    i = j = 0
+    skipped = False
+    while i < len(short) and j < len(long):
+        if short[i] != long[j]:
+            if skipped:
+                return False
+            skipped = True
+            j += 1
+            continue
+        i += 1
+        j += 1
+    return True
+
+
+@dataclass
 class RunTrace:
     """One trajectory, parsed into the shape a reader needs."""
 
@@ -216,6 +274,32 @@ class RunTrace:
 
     def searches(self) -> list[ServedCall]:
         return [call for call in self.served if call.verb == "corpus_search"]
+
+    def address_corruption(self) -> AddressCorruption:
+        """Bucket each cited address by how far it is from what was served.
+
+        Needs a served set, so a run recorded before the instrumentation returns
+        every citation as unmatched — and the caller can tell, because the audit
+        says the served set is unknown. The two are kept separate on purpose: an
+        unverifiable run must not be read as a model that invents addresses.
+        """
+        served = self.served_addresses()
+        result = AddressCorruption()
+        for address in self.cited_addresses():
+            if address in served:
+                result.exact.append(address)
+                continue
+            near = [candidate for candidate in served
+                    if _one_edit_apart(address, candidate)]
+            if len(near) == 1:
+                result.one_edit.append((address, near[0]))
+            elif len(near) > 1:
+                # More than one candidate is not a repairable slip; a repair would
+                # have had to refuse here too, so it is counted as unmatched.
+                result.unmatched.append(address)
+            else:
+                result.unmatched.append(address)
+        return result
 
     def audit(self) -> CitationAudit:
         """The citation audit, with its own honesty about what it could not see."""
@@ -411,6 +495,7 @@ def render_run_markdown(
     """The page for one run: header, counts, citation audit, turn by turn."""
     passages = passages or {}
     audit = run.audit()
+    corruption = run.address_corruption()
     bands = run.bands_served()
 
     lines: list[str] = []
@@ -472,6 +557,10 @@ def render_run_markdown(
         ("Cited, but no helper ever served it",
          audit.cited_unserved,
          "a citation pointing at nothing — a fabrication, and refused outright"),
+        ("Cited with one character out (a repairable slip)",
+         [f"`{got}` — one edit from `{near}`" for got, near in corruption.one_edit],
+         "what a repairable handle would have rescued: the model meant a passage it "
+         "had been served, and today this reads as an invention"),
         ("Cited, but whether a helper served it is unknown",
          audit.cited_unknown,
          "this run predates the served-address instrumentation, so its citations "
@@ -601,6 +690,7 @@ def render_summary(run: RunTrace) -> str:
     (AGENTS.md §1.9).
     """
     audit = run.audit()
+    corruption = run.address_corruption()
     bands = ", ".join(f"{name}={count}" for name, count in sorted(run.bands_served().items()))
     elapsed = (f"{run.elapsed_s:.1f}s" if isinstance(run.elapsed_s, (int, float))
                else "unknown")
@@ -613,6 +703,9 @@ def render_summary(run: RunTrace) -> str:
         f" cited_non_answering={len(audit.cited_non_answering)}"
         f" cited_unserved={len(audit.cited_unserved)}"
         f" cited_unknown={len(audit.cited_unknown)}"
+        f" cited_exact={len(corruption.exact)}"
+        f" cited_one_edit={len(corruption.one_edit)}"
+        f" cited_unmatched={len(corruption.unmatched)}"
         f" served_not_cited={len(audit.served_not_cited)}"
         f" refusals_uncited={run.guardrail_count('corpus_uncited')}"
         f" refusals_weak={run.guardrail_count('corpus_weak_citation')}"

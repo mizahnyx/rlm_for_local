@@ -287,6 +287,118 @@ def test_a_citation_no_helper_served_is_a_fabrication_when_serves_were_recorded(
     assert audit.served_not_cited == ["notes/song.txt#L0-21"]
 
 
+class TestHowBadlyTheModelCorruptsAddresses:
+    """The measurement that decides whether mnemonic addresses are worth building.
+
+    The owner's finding (2026-09-17): small models struggle to keep path-like exact
+    strings consistent. Until now that was an impression, because a citation that
+    differs from a served address by one character is indistinguishable in the
+    trajectory from one that was invented: both are simply "not in the served set".
+    Three buckets separate them, and the middle one is the size of the prize a
+    repairable mnemonic would collect.
+    """
+
+    def _run_with(self, tmp_path: Path, cited: str) -> "object":
+        from rlm_local.traceview import read_trajectory
+
+        events = [
+            {"event": "start", "timestamp": T0, "query": "q", "context_len": 0,
+             "config": {}},
+            {"event": "turn_start", "timestamp": T0, "turn": 1, "max_turns": 1},
+            _served(1, "cuicani", ("notes/song.txt#L0-21", "strong"),
+                    ("notes/kettle.txt#L0-21", "none")),
+            {"event": "end", "timestamp": T0 + 2, "elapsed_s": 2.0,
+             "final_answer": f"See {cited}", "turns_used": 1,
+             "subcalls_used": 0, "forced": True},
+        ]
+        return read_trajectory(_write_trajectory(tmp_path / "c.jsonl", events))
+
+    def test_an_exact_citation_is_counted_as_exact(self, tmp_path: Path) -> None:
+        run = self._run_with(tmp_path, "notes/song.txt#L0-21")
+        corruption = run.address_corruption()
+        assert corruption.exact == ["notes/song.txt#L0-21"]
+        assert corruption.one_edit == []
+        assert corruption.unmatched == []
+
+    def test_a_citation_one_character_out_is_the_prize(self, tmp_path: Path) -> None:
+        """`#L0-21` → `#L0-2`: one dropped character, and today it reads as an
+        invention. This is what a repairable handle would have caught."""
+        run = self._run_with(tmp_path, "notes/song.txt#L0-2")
+        corruption = run.address_corruption()
+        assert corruption.one_edit == [("notes/song.txt#L0-2", "notes/song.txt#L0-21")]
+        assert corruption.exact == []
+        assert corruption.unmatched == []
+
+    def test_a_transposition_inside_a_path_is_one_edit_too(self, tmp_path: Path) -> None:
+        run = self._run_with(tmp_path, "notes/snog.txt#L0-21")
+        corruption = run.address_corruption()
+        assert corruption.one_edit == [("notes/snog.txt#L0-21", "notes/song.txt#L0-21")]
+
+    def test_an_invented_citation_is_unmatched_not_one_edit(self, tmp_path: Path) -> None:
+        run = self._run_with(tmp_path, "elsewhere/other.txt#L9000-9100")
+        corruption = run.address_corruption()
+        assert corruption.unmatched == ["elsewhere/other.txt#L9000-9100"]
+        assert corruption.one_edit == []
+
+    def test_an_address_two_edits_away_is_not_the_prize(self, tmp_path: Path) -> None:
+        """The repair rule the design proposes is one edit, so two is not a repair
+        the harness would have made — counting it would overstate the case."""
+        run = self._run_with(tmp_path, "notes/snogg.txt#L0-21")
+        corruption = run.address_corruption()
+        assert corruption.one_edit == []
+        assert corruption.unmatched == ["notes/snogg.txt#L0-21"]
+
+    def test_two_equally_close_candidates_are_not_guessed_between(
+        self, tmp_path: Path,
+    ) -> None:
+        """A repair must refuse an ambiguous slip, not pick one.
+
+        With `…#L0-21` and `…#L0-22` both served, a citation of `…#L0-23` is one
+        edit from either. A resolver that picked the first would silently answer
+        with a passage the model may not have meant, which is worse than saying it
+        could not tell — so this is counted as unmatched, like the repair would.
+        """
+        from rlm_local.traceview import read_trajectory
+
+        events = [
+            {"event": "start", "timestamp": T0, "query": "q", "context_len": 0,
+             "config": {}},
+            {"event": "turn_start", "timestamp": T0, "turn": 1, "max_turns": 1},
+            _served(1, "cuicani", ("notes/song.txt#L0-21", "strong"),
+                    ("notes/song.txt#L0-22", "partial")),
+            {"event": "end", "timestamp": T0 + 2, "elapsed_s": 2.0,
+             "final_answer": "See notes/song.txt#L0-23", "turns_used": 1,
+             "subcalls_used": 0, "forced": True},
+        ]
+        run = read_trajectory(_write_trajectory(tmp_path / "amb.jsonl", events))
+        corruption = run.address_corruption()
+        assert corruption.one_edit == [], "two candidates is not a repairable slip"
+        assert corruption.unmatched == ["notes/song.txt#L0-23"]
+
+    def test_the_summary_carries_the_three_counts_and_nothing_else(
+        self, tmp_path: Path,
+    ) -> None:
+        from rlm_local.traceview import render_summary
+
+        run = self._run_with(tmp_path, "notes/snog.txt#L0-21")
+        summary = render_summary(run)
+        assert "cited_exact=0" in summary
+        assert "cited_one_edit=1" in summary
+        assert "cited_unmatched=0" in summary
+        assert "notes/song.txt" not in summary
+
+    def test_the_page_shows_what_each_broken_citation_looked_like(
+        self, tmp_path: Path,
+    ) -> None:
+        from rlm_local.traceview import render_run_markdown
+
+        run = self._run_with(tmp_path, "notes/snog.txt#L0-21")
+        page = render_run_markdown(run)
+        assert "one edit" in page.lower()
+        assert "notes/snog.txt#L0-21" in page
+        assert "notes/song.txt#L0-21" in page
+
+
 def test_the_summary_carries_no_question_no_address_and_no_quote(
     simple_trajectory: Path,
 ) -> None:

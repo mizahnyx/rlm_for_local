@@ -2225,6 +2225,29 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_the_budget_is_a_cli_flag",
         ],
     ),
+    # ── How badly the model corrupts addresses (2026-09-17) ───────────────
+    (
+        "an adjacent swap stops counting as one edit",
+        "src/rlm_local/traceview.py",
+        "            return j == i + 1 and a[i] == b[j] and a[j] == b[i]",
+        "            return False",
+        [
+            "tests/test_traceview.py::TestHowBadlyTheModelCorruptsAddresses"
+            "::test_a_transposition_inside_a_path_is_one_edit_too",
+        ],
+    ),
+    (
+        "a repairable slip is counted however many candidates are close",
+        "src/rlm_local/traceview.py",
+        "            if len(near) == 1:\n"
+        "                result.one_edit.append((address, near[0]))",
+        "            if len(near) >= 1:\n"
+        "                result.one_edit.append((address, near[0]))",
+        [
+            "tests/test_traceview.py::TestHowBadlyTheModelCorruptsAddresses"
+            "::test_two_equally_close_candidates_are_not_guessed_between",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
