@@ -24,41 +24,30 @@ the reason is sound rather than merely permissive: the hardware is old, so a
 *legitimate* corpus operation can exceed any short limit, and killing it wastes the
 work and teaches the model nothing.
 
-**Stage 1 — the short limit.** The cell runs for the initial budget (the profile's
-value, or `--cell-timeout`). This is unchanged, and it is what protects against a cell
-that is stuck rather than slow.
+**Stage 1 — the soft limit, which signals.** The cell runs for `cell_timeout` (default
+120 s, configurable per invocation and per profile). When it is reached, the harness
+does **not** kill a cell that is doing real work: it **announces** that a
+time-consuming operation has started — an operator-visible line naming the cell, the
+elapsed time and the helper in flight, plus a `cell_extended` guardrail event with the
+same facts — and lets it continue.
 
-**Stage 2 — the extension.** If the cell reaches the initial limit, the harness does
-**not** kill it immediately. It raises the deadline to a hard ceiling (20 minutes,
-`--cell-timeout-max`, default 1200 s), **warns the operator** that a time-consuming
-operation has started, and lets it finish. Two things must be true for the extension
-to be granted rather than the cell killed, or the mechanism becomes a licence to hang:
+**Stage 2 — the hard limit, which stops it.** `cell_timeout_hard` (default 1 200 s =
+20 minutes, configurable) is the ceiling: reaching it kills the cell, with the
+`cell_timeout` event naming the hard limit as what fired.
 
-1. **The cell is making progress** — it has read bytes, or a helper call is in flight.
-   A cell that has consumed nothing and is waiting (a `sleep`, a wedged mount) gets no
-   extension: the second stage exists for *slow work*, not for *stuck work*.
-2. **The extension is announced** — an operator-visible line naming the cell, the
-   elapsed time and the helper in flight, plus a `cell_extended` guardrail event with
-   the same facts. Silence would make a 20-minute cell look like a hang, which is the
-   confusion this project keeps paying for.
+**The gate, settled by the owner (2026-09-17): extension requires demonstrable
+progress.** A cell that has read bytes, or has a helper call in flight, is *slow work*
+and gets the second stage. A cell that has consumed nothing and is waiting — a `sleep`,
+a wedged mount read — is *stuck work* and is killed at the soft limit, because the
+second stage exists for slow work and not for stuck work. And the announcement is not
+optional: silence would make a 20-minute cell look like a hang, which is the confusion
+this project keeps paying for.
 
-The fact that makes this safe rather than reckless is the bytes accounting from the
-first half of the answer: a cell that asks for 3.4 GB now *says so* ("this call has
-read 900 MB and is still going"), so the extension is a decision about real work
-instead of a wait.
-
-### What is not yet settled, and why I am asking rather than assuming
-
-- **Per cell, or per run?** "Upped to 20 minutes" is unambiguous for one cell; eight
-  cells at the ceiling is 2.7 hours. A run-level ceiling (say 45 minutes of *cell time*,
-  after which the next cell starts on stage 1 only) would bound the worst case without
-  punishing one slow call. This changes the worst-case runtime by hours, so it is the
-  owner's call rather than my default.
-- **Does the warning reach the model too?** The owner said "a warning should be sent to
-  the user". I would keep it operator-facing: the model is told (as it is today) only
-  that the cell was stopped, if it ever is. Telling the model "you are being slow" adds
-  a prompt the harness has no evidence helps, and this project has measured three
-  prompt-only levers that changed nothing.
+**Both limits are configurable**, and there is **no run-level ceiling** — the owner's
+call, recorded here so it is not re-litigated: two limits per cell, the first
+signalling and the second hard, each settable by flag, environment or profile. A run
+that hits the hard limit eight times can take hours; that is the operator's business,
+and the events make it visible.
 
 ## What follows, in order
 
