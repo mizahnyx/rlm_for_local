@@ -44,10 +44,31 @@ from rlm_local.logger import TrajectoryLogger  # noqa: E402
 from rlm_local.repl import REPLSandbox  # noqa: E402
 from rlm_local.root_loop import RootLoop  # noqa: E402
 
-#: The cell both configurations run. It asks the corpus for one thing, then works
-#: longer than the soft limit — the shape that must be *extended*, not killed.
-SLOW_CELL = "```repl\ncorpus_coverage()\nimport time; time.sleep(12)\n```"
+#: The *real* limits (owner's criticism, 2026-09-17): 6 s and 60 s were picked for test
+#: speed and are not our operating regime. A probe whose cases cannot reach the real
+#: magnitudes cannot say anything about the real magnitudes.
+SOFT = 60.0        # the profile's cell_timeout on tiny/laptop
+HARD = 1200.0      # the agreed hard ceiling: 20 minutes
+
+#: The cell bodies. Both run *past* the soft limit and well inside the hard one, so
+#: what is observed is the boundary that matters: a cell slower than any normal
+#: operation but nowhere near the theoretical ceiling.
+SLOW_WITH_HELPER = "```repl\ncorpus_coverage()\nimport time; time.sleep(75)\n```"
+SLOW_NO_HELPER = "```repl\nimport time; time.sleep(75)\n```"
 SUBMIT = "```repl\nanswer['content'] = 'done'\nanswer['ready'] = True\n```"
+
+
+def supports_two_limits() -> bool:
+    """Whether the build under test can even express a second limit.
+
+    The first version of this probe compared two configurations and got identical
+    traces, because the second limit was not in the tree — the comparison could not
+    exist and nothing on the page said so. That is recorded now, on the page.
+    """
+    import inspect
+
+    params = inspect.signature(REPLSandbox.__init__).parameters
+    return "cell_timeout_hard" in params
 
 
 class StubBackend:
@@ -115,17 +136,24 @@ def install() -> None:
     REPLSandbox.execute = execute
 
 
-def run_case(name: str, *, soft: float, hard: float, bridge, out_dir: Path) -> dict:
+def run_case(name: str, *, soft: float, hard: float, cell: str, bridge,
+             out_dir: Path) -> dict:
     path = out_dir / f"probe-budget-{name}.jsonl"
     # Truncate: the logger appends, so a second probe run would otherwise leave both
     # runs' events in one file and the trace would show executions that never happened
     # in that run.
     path.unlink(missing_ok=True)
     logger = TrajectoryLogger(path)
+    logger.log_guardrail(
+        0, "probe_env",
+        f"requested soft={soft:g}s hard={hard:g}s two_limits_supported="
+        f"{supports_two_limits()} cell_sleeps={cell.count('sleep') and 'yes' or 'no'} "
+        f"python={sys.version.split()[0]}",
+    )
     _PROBE["logger"] = logger
     _PROBE["cells"] = 0
     cfg = load_config("tiny", max_turns=2, cell_timeout=soft, cell_timeout_hard=hard)
-    backend = StubBackend([SLOW_CELL, SUBMIT])
+    backend = StubBackend([cell, SUBMIT])
     loop = RootLoop(cfg, backend, logger=logger, kernel_bridge=None,
                     corpus_bridge=bridge)
     warnings: list[str] = []
@@ -159,15 +187,17 @@ def main() -> int:
                                    cache_root=Path(args.corpus_index).parent / "cache")
     install()
     try:
-        # The two configurations differ in exactly one thing: whether a second,
-        # higher limit exists. Everything else — cell body, bridge, host — is equal.
+        # At the real magnitudes, and one thing at a time: a cell that asks for
+        # something and runs past the soft limit; and the same cell that asks for
+        # nothing, which is the "stuck, not slow" control. ~2.5 minutes of wall clock,
+        # because a probe that cannot reach the real boundary measures nothing.
         cases = [
-            ("A-soft-equals-hard", 6.0, 6.0),
-            ("B-soft-below-hard", 6.0, 60.0),
+            ("real-slow-with-helper", SOFT, HARD, SLOW_WITH_HELPER),
+            ("real-stuck-no-helper", SOFT, HARD, SLOW_NO_HELPER),
         ]
-        summary = [run_case(name, soft=soft, hard=hard, bridge=bridge,
+        summary = [run_case(name, soft=soft, hard=hard, cell=cell, bridge=bridge,
                             out_dir=args.out_dir)
-                   for name, soft, hard in cases]
+                   for name, soft, hard, cell in cases]
     finally:
         bridge.close()
 
