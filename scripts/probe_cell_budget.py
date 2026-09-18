@@ -62,52 +62,64 @@ class StubBackend:
         return "FINAL: no more scripted responses"
 
 
-def instrument(logger: TrajectoryLogger) -> dict:
+#: Installed once for the whole probe. Installed per case, the wrappers stack and a
+#: later case's requests are logged into the earlier case's trajectory — which is
+#: exactly the kind of confusing evidence this script exists to prevent.
+_PROBE: dict = {"logger": None, "cell_start": 0.0, "cells": 0, "installed": False}
+
+
+def install() -> None:
     """Wrap the sandbox so every request and cell outcome lands in the trajectory.
 
-    Returns a dict of counters the caller prints — counts only, never content.
+    Returns nothing; the counters are in `_PROBE`, and the caller prints them —
+    counts only, never content.
     """
-    counts = {"requests": 0, "cell_start": 0.0, "cells": 0}
+    if _PROBE["installed"]:
+        return
+    _PROBE["installed"] = True
     original_handle = REPLSandbox._handle_request
     original_execute = REPLSandbox.execute
 
     def handle(self, msg_type, msg):
-        elapsed_ms = (time.monotonic() - counts["cell_start"]) * 1000.0
-        counts["requests"] += 1
-        logger.log_guardrail(
-            getattr(self, "_probe_turn", 0), "probe_request",
-            f"after={elapsed_ms:.0f}ms type={msg_type} "
-            f"msg_cell={msg.get('cell_id')} sandbox_cell={self._cell_seq} "
-            f"corpus_calls={getattr(self, 'corpus_calls', 0)}",
-        )
+        elapsed_ms = (time.monotonic() - _PROBE["cell_start"]) * 1000.0
+        logger = _PROBE["logger"]
+        if logger is not None:
+            logger.log_guardrail(
+                getattr(self, "_probe_turn", 0), "probe_request",
+                f"after={elapsed_ms:.0f}ms type={msg_type} "
+                f"msg_cell={msg.get('cell_id')} sandbox_cell={self._cell_seq} "
+                f"corpus_calls={getattr(self, 'corpus_calls', 0)}",
+            )
         return original_handle(self, msg_type, msg)
 
     def execute(self, code):
-        counts["cell_start"] = time.monotonic()
-        counts["cells"] += 1
-        started = counts["cell_start"]
+        _PROBE["cell_start"] = time.monotonic()
+        _PROBE["cells"] += 1
+        started = _PROBE["cell_start"]
         result = original_execute(self, code)
-        logger.log_guardrail(
-            getattr(self, "_probe_turn", 0), "probe_cell",
-            f"cell={counts['cells']} first_line={code.strip().splitlines()[0][:40]!r} "
-            f"elapsed={(time.monotonic() - started):.2f}s "
-            f"timed_out={result.timed_out} "
-            f"hard={getattr(result, 'hard_timeout', 'n/a')} "
-            f"corpus_calls={getattr(self, 'corpus_calls', 0)} "
-            f"activity={getattr(self, '_cell_activity', 'n/a')} "
-            f"stdout={len(result.stdout)} stderr={len(result.stderr)}",
-        )
+        logger = _PROBE["logger"]
+        if logger is not None:
+            logger.log_guardrail(
+                getattr(self, "_probe_turn", 0), "probe_cell",
+                f"cell={_PROBE['cells']} first_line={code.strip().splitlines()[0][:40]!r} "
+                f"elapsed={(time.monotonic() - started):.2f}s "
+                f"timed_out={result.timed_out} "
+                f"hard={getattr(result, 'hard_timeout', 'n/a')} "
+                f"corpus_calls={getattr(self, 'corpus_calls', 0)} "
+                f"activity={getattr(self, '_cell_activity', 'n/a')} "
+                f"stdout={len(result.stdout)} stderr={len(result.stderr)}",
+            )
         return result
 
     REPLSandbox._handle_request = handle
     REPLSandbox.execute = execute
-    return counts
 
 
 def run_case(name: str, *, soft: float, hard: float, bridge, out_dir: Path) -> dict:
     path = out_dir / f"probe-budget-{name}.jsonl"
     logger = TrajectoryLogger(path)
-    counts = instrument(logger)
+    _PROBE["logger"] = logger
+    _PROBE["cells"] = 0
     cfg = load_config("tiny", max_turns=2, cell_timeout=soft, cell_timeout_hard=hard)
     backend = StubBackend([SLOW_CELL, SUBMIT])
     loop = RootLoop(cfg, backend, logger=logger, kernel_bridge=None,
@@ -118,10 +130,11 @@ def run_case(name: str, *, soft: float, hard: float, bridge, out_dir: Path) -> d
         answer = loop.run("Probe: does the parent see the helper?", "probe context")
     finally:
         loop.shutdown()
+    _PROBE["logger"] = None
     return {
         "name": name, "soft": soft, "hard": hard, "path": str(path),
-        "requests": counts["requests"], "cells": counts["cells"],
-        "corpus_calls": getattr(loop, "_probe_calls", None),
+        "cells": _PROBE["cells"],
+        "sandbox_corpus_calls": getattr(loop._repl, "corpus_calls", None),
         "timeouts": loop.cell_timeouts,
         "answer_is_cell_text": answer.strip().startswith("```"),
         "warnings": len(warnings),
@@ -140,6 +153,7 @@ def main() -> int:
 
     bridge = CorpusBridge.open_for(args.corpus_root, args.corpus_index,
                                    cache_root=Path(args.corpus_index).parent / "cache")
+    install()
     try:
         # The two configurations differ in exactly one thing: whether a second,
         # higher limit exists. Everything else — cell body, bridge, host — is equal.
