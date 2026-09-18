@@ -100,12 +100,13 @@ deliberately and once. Its page must show `two_limits_supported=True`; if it sho
 - **Traces before verdicts**: on anything unexpected, instrument it, render the
   trajectory, point at the file, and stop short of concluding. `AGENTS.md` §1.5.
 - **Read-only corpus, three layers**, the mount being the only real boundary; derived
-  state never inside the corpus (§1.8), and corpus-derived data never leaves the machine
-  that holds it (§1.9) — aggregates travel, identifiers and quotes do not.
-- **Do not state what you have not verified** (§1.5); a check that cannot see the truth
-  says `unknown` (§1.8 corollary).
+  state never inside the corpus (`AGENTS.md` §1.8), and corpus-derived data never leaves
+  the machine that holds it (`AGENTS.md` §1.9) — aggregates travel, identifiers and
+  quotes do not.
+- **Do not state what you have not verified** (`AGENTS.md` §1.5); a check that cannot
+  see the truth says `unknown` (`AGENTS.md` §1.8 corollary).
 - **Test first, and prove each guard non-vacuous** in `scripts/check_guard_nonvacuity.py`
-  (§1.1, §1.2); never edit source while that table runs (§3).
+  (`AGENTS.md` §1.1 and §1.2); never edit source while that table runs (`AGENTS.md` §3).
 - **The owner's other direction, still open by design**: mnemonic addresses are
   **per chat session**, the harness sees mnemonics and the owner sees true addresses,
   the delivered answer has addresses substituted inline with the model's raw output kept
