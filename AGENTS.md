@@ -28,7 +28,15 @@ exist, written down in one place so they stop being re-derived per session.
 5. **Do not state what you have not verified.** If a number, a behaviour or a
    mechanism is inferred rather than observed, label it inferred. Several of this
    project's best findings came from that habit, and its worst incidents came
-   from skipping it.
+   from skipping it. And when something *unexpected* happens, the response is to
+   produce the traces and let the owner reach the verdict (owner, 2026-09-17):
+   the instinct to explain an anomaly from the code is the instinct that produced
+   three wrong stories about this model, whereas the owner can read a page of
+   events and see what happened. So: instrument it, render the trajectory
+   (`rlm trace render`), point at the file, and stop short of concluding.
+   Reproducers live in `scripts/` beside the mutation table (e.g.
+   `scripts/probe_cell_budget.py`), and the traces go where the corpus is, never
+   into this conversation.
 6. **No scope creep without an owner call.** Scoring semantics, vault-format
    changes, sandbox boundaries and load-test scope are owner decisions. Ask, or
    record the item in the roadmap's ledger as `owner call`.
