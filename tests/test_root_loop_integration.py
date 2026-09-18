@@ -1573,6 +1573,61 @@ class TestInvalidPythonIsRetriedWithoutPenalty:
         assert counted and "consecutive_errors=1" in counted[0]["detail"]
 
 
+class TestTurnAccounting:
+    """`turns_used` must be the number of turns spent, and never more than the budget.
+
+    A live run on 2026-09-17 reported `turns=9/8`: the explicit turn counter of the
+    syntax-retry change sits at `max_turns` when the loop exhausts naturally and one
+    lower when it breaks early, so `turn + 1` was wrong in one case and right by
+    accident in the other. The count is now kept where turns are *entered*.
+    """
+
+    def _end(self, logger) -> dict:
+        import json
+
+        events = [json.loads(line) for line in
+                  logger.path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        return next(e for e in events if e.get("event") == "end")
+
+    def test_exhausting_the_budget_reports_exactly_the_budget(self, tmp_path: Path) -> None:
+        from rlm_local.config import load_config
+        from rlm_local.logger import TrajectoryLogger
+
+        logger = TrajectoryLogger(tmp_path / "traj.jsonl")
+        cfg = load_config("tiny", max_turns=3)
+        backend = StubBackend(responses=["```repl\nprint('probe')\n```"] * 20
+                              + ["FINAL: gave up"])
+        loop = RootLoop(cfg, backend, logger=logger, kernel_bridge=None)
+        try:
+            loop.run("Question", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert self._end(logger)["turns_used"] == 3
+
+    def test_an_early_break_reports_the_turns_it_actually_spent(
+        self, tmp_path: Path,
+    ) -> None:
+        from rlm_local.config import load_config
+        from rlm_local.logger import TrajectoryLogger
+
+        logger = TrajectoryLogger(tmp_path / "traj.jsonl")
+        cfg = load_config("tiny", max_turns=6, max_consecutive_errors=1)
+        # Every cell raises, so the error budget breaks out on turn 2 of 6.
+        backend = StubBackend(responses=[
+            "```repl\nraise ValueError('boom')\n```",
+            "```repl\nraise ValueError('boom again')\n```",
+            "FINAL: gave up",
+        ])
+        loop = RootLoop(cfg, backend, logger=logger, kernel_bridge=None)
+        try:
+            loop.run("Question", "stub context")
+        finally:
+            loop.shutdown()
+
+        assert self._end(logger)["turns_used"] == 2
+
+
 class TestTheCellBudgetIsVisibleAndConfigurable:
     """The owner's finding: 60 s is too little on a loaded host, and a run that
     died on its budget must say so rather than looking like a bad answer.

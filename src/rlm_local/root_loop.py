@@ -250,9 +250,18 @@ class RootLoop:
         # other path through the body advances it exactly once.
         turn = 0
         syntax_retries = 0
+        turns_started = 0
         while turn < max_turns:
             display_turn = turn + 1
             syntax_nudge = ""
+            # Counted once per turn actually *entered*: the syntax retry repeats the
+            # body without re-entering, and every break path leaves the loop in the
+            # middle of a turn it has already spent. `turn` alone cannot say how many
+            # were spent — it sits at `max_turns` after a natural exhaustion and one
+            # lower after an early break, which is how a live run came to report
+            # `turns_used=9` against an 8-turn budget (2026-09-17). `max` rather than
+            # `+=`: a retry re-runs this body for the *same* display turn.
+            turns_started = max(turns_started, display_turn)
             # The quality callback fires while a cell runs, so it needs to know
             # which turn that is without being passed one.
             self._current_turn = display_turn
@@ -665,7 +674,7 @@ class RootLoop:
             if self._logger:
                 self._logger.log_end(
                     final_answer if final_answer is not None else "",
-                    turn + 1,
+                    turns_started,
                     self._subcall_mgr.calls_used if self._subcall_mgr else 0,
                     forced=True,
                 )
@@ -673,7 +682,7 @@ class RootLoop:
             if self._logger:
                 self._logger.log_end(
                     final_answer,
-                    turn + 1,
+                    turns_started,
                     self._subcall_mgr.calls_used if self._subcall_mgr else 0,
                     forced=False,
                 )

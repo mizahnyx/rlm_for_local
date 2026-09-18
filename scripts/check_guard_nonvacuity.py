@@ -2248,6 +2248,19 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_two_equally_close_candidates_are_not_guessed_between",
         ],
     ),
+    # ── turns_used is the number of turns spent (2026-09-17) ──────────────
+    (
+        "the reported turn count goes back to the loop counter",
+        "src/rlm_local/root_loop.py",
+        "                    final_answer if final_answer is not None else \"\",\n"
+        "                    turns_started,",
+        "                    final_answer if final_answer is not None else \"\",\n"
+        "                    turn + 1,",
+        [
+            "tests/test_root_loop_integration.py::TestTurnAccounting"
+            "::test_exhausting_the_budget_reports_exactly_the_budget",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
