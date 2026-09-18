@@ -241,7 +241,9 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "R7 the REPL timeout error goes back to an inline f-string",
         "src/rlm_local/repl.py",
-        "        message = CELL_TIMEOUT_ERROR.format(timeout=self._cell_timeout)",
+        "        message = (CELL_HARD_TIMEOUT_ERROR.format(timeout=f\"{self._cell_timeout_hard:g}\")\n"
+        "                   if extended else\n"
+        "                   CELL_TIMEOUT_ERROR.format(timeout=self._cell_timeout))",
         "        message = f\"Error: REPL timed out after {self._cell_timeout}s\"",
         [
             "tests/test_templates.py::TestNoInlineHarnessStrings"
@@ -2265,10 +2267,10 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         "a timed-out cell is charged two turns again",
         "src/rlm_local/root_loop.py",
         "                    timeout_nudge = NUDGE_CELL_TIMEOUT.format(\n"
-        "                        timeout=f\"{cfg.cell_timeout:g}\",",
+        "                        timeout=(f\"{cfg.cell_timeout_hard:g}\"",
         "                    turn += 1\n"
         "                    timeout_nudge = NUDGE_CELL_TIMEOUT.format(\n"
-        "                        timeout=f\"{cfg.cell_timeout:g}\",",
+        "                        timeout=(f\"{cfg.cell_timeout_hard:g}\"",
         [
             "tests/test_root_loop_integration.py::TestATimedOutCellCostsOneTurn"
             "::test_the_last_turn_is_still_executed_after_timeouts",
@@ -2284,6 +2286,67 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         [
             "tests/test_root_loop_integration.py::TestATimedOutCellCostsOneTurn"
             "::test_the_model_is_told_once_per_timeout",
+        ],
+    ),
+    # ── The second cell limit: signalled, gated, announced (RO16, 2026-09-17) ──
+    (
+        "the extension is granted without any progress",
+        "src/rlm_local/repl.py",
+        "                            and self._cell_activity > 0):",
+        "                            ):",
+        [
+            "tests/test_repl.py::TestTheTwoStageCellBudget"
+            "::test_a_cell_that_asked_for_nothing_is_stopped_at_the_soft_limit",
+        ],
+    ),
+    (
+        "the extension branch can never fire again",
+        "src/rlm_local/repl.py",
+        "                            and not extended",
+        "                            and extended",
+        [
+            "tests/test_repl.py::TestTheTwoStageCellBudget"
+            "::test_the_hard_limit_stops_even_a_working_cell",
+        ],
+    ),
+    (
+        "a single limit stops meaning no extension",
+        "src/rlm_local/repl.py",
+        "                            and self._cell_timeout_hard > self._cell_timeout",
+        "                            and True",
+        [
+            "tests/test_repl.py::TestTheTwoStageCellBudget"
+            "::test_one_limit_means_no_extension_at_all",
+        ],
+    ),
+    (
+        "the hard budget is reported as the soft one",
+        "src/rlm_local/root_loop.py",
+        "            f\"block={block} limit={'hard' if hard else 'soft'} \"",
+        "            f\"block={block} limit={'soft'} \"",
+        [
+            "tests/test_root_loop_integration.py::TestTheCellBudgetIsVisibleAndConfigurable"
+            "::test_a_cell_that_dies_on_its_budget_is_recorded_with_its_budget_and_verb",
+        ],
+    ),
+    (
+        "the hard cell budget stops being configurable",
+        "src/rlm_local/cli.py",
+        "        overrides[\"cell_timeout_hard\"] = float(args.cell_timeout_hard)",
+        "        pass",
+        [
+            "tests/test_root_loop_integration.py::TestTheCellBudgetIsVisibleAndConfigurable"
+            "::test_the_hard_budget_is_a_cli_flag_too",
+        ],
+    ),
+    (
+        "a closed socket is read as a spent window",
+        "src/rlm_local/repl.py",
+        "        return _recv_msg(self._worker_sock, timeout=remaining), False",
+        "        return _recv_msg(self._worker_sock, timeout=remaining), True",
+        [
+            "tests/test_repl.py::TestTheTwoStageCellBudget"
+            "::test_a_worker_that_went_away_is_not_credited_with_slow_work",
         ],
     ),
 ]

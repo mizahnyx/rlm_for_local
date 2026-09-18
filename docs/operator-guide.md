@@ -757,29 +757,62 @@ A trajectory whose last line was torn by a kill says so too. `trace summary` car
 
 ### Was it the budget? (a diagnosis, not a guess)
 
-A cell has a time budget (`cell_timeout`: 60 s on `tiny`/`laptop`, 120 s on
-`workstation`). When a cell dies on it, that is a **harness limit, not a verdict on
-the model** — and the two used to look identical in a trajectory, because the only
-trace was stderr prose that the harness then reported like a code error. Now:
+A cell has **two** time limits, both configurable. The *soft* one (`cell_timeout`: 60 s
+on `tiny`/`laptop`, 120 s on `workstation`) is reached first and **signals**: if the cell
+has asked the harness for something — a corpus helper, a sub-call — it is demonstrably
+working, so it is allowed to continue up to the *hard* limit (`cell_timeout_hard`,
+default 1 200 s = 20 min). A cell that has asked for nothing at its soft limit is stuck,
+and is stopped there. When a cell dies on either limit that is a **harness limit, not a
+verdict on the model** — and the two used to look identical in a trajectory, because the
+only trace was stderr prose that the harness then reported like a code error. Now:
 
 ```bash
 rlm ask "…" --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite \
-    --cell-timeout 240            # or: export RLM_CELL_TIMEOUT=240
+    --cell-timeout 240 --cell-timeout-hard 1800
+    # or: export RLM_CELL_TIMEOUT=240 RLM_CELL_TIMEOUT_HARD=1800
+```
+
+A granted extension is announced **while the cell is still running** — on stderr, and as
+its own event — because a run that has allowed one cell twenty minutes must not look
+hung:
+
+```bash
+# A cell that was given the second stage:
+grep '"guardrail": "cell_extended"' "$LOG"
+#   … "detail": "elapsed=61s soft=60s hard=1200s last_helper=corpus_count"
+# …and the operator line, on the run's stderr:
+#   [rlm] a cell has been running for 61s (soft limit 60s) and is doing work —
+#   corpus_count — so it is allowed up to 1200s. This is a time-consuming
+#   operation on this host, not a hang.
 ```
 
 ```bash
-# Did anything die on its budget, and what was it doing?
+# Did anything die on its budget, on which limit, and what was it doing?
 grep '"guardrail": "cell_timeout"' "$LOG"
-#   … "detail": "block=1 budget=60s last_helper=corpus_count corpus_calls=4 …"
+#   … "detail": "block=1 limit=soft budget=60s activity=0 last_helper=none corpus_calls=0 …"
 ```
 
 The reading:
 
 | what you see | what it means |
 |---|---|
-| several `cell_timeout` events, **`last_helper=` the same verb every time** | that verb needs more than the budget on this host. Raise `--cell-timeout` for the run — and if it keeps happening, the helper is a defect to fix (RO11 was exactly this: one passage read scanned 29M rows for >150 s) |
-| `cell_timeout` scattered across verbs, or `last_helper=none` | the model is asking for too much at once (or spinning). The nudge it receives says so; the fix is a prompt/behaviour problem, not a budget |
+| `limit=soft`, `activity=0` | the cell asked for nothing in its whole window: stuck, spinning, or sleeping. This is what the soft limit is for |
+| `limit=hard`, `activity>0`, `last_helper=` the same verb every time | that verb is genuinely slower than the hard limit on this host. Raise `--cell-timeout-hard`, and treat the helper as a defect to fix — one passage read that scanned 29M rows was this (RO11) |
+| `cell_extended` events, no `cell_timeout` | the second limit did its job: slow work finished instead of being killed. Not a failure |
+| `cell_timeout` scattered across verbs, `last_helper=none` | the model is asking for too much at once (or spinning). The nudge it receives says so; the fix is a prompt/behaviour problem, not a budget |
 | no `cell_timeout` events, but a bad answer | the budget had nothing to do with it. This is the distinction the counts exist to make |
+
+Two things to know before reading a budget event:
+
+- **`--cell-timeout-hard` equal to `--cell-timeout` switches the second limit off**: every
+  cell then stops at the soft limit whether or not it was working. That is the behaviour
+  of every release before RO16, and it is a supported configuration.
+- **A cell queued behind an abandoned one has no activity of its own.** A timed-out cell
+  leaves the *worker* still running it, so the next cell waits behind that work, reaches
+  its soft limit having asked for nothing, and is stopped as stuck. This is why one
+  timeout usually costs two cells, and why a cluster of `limit=soft activity=0` events can
+  be the *previous* cell's work rather than the model spinning — `block=` in the event
+  says which cell each one belongs to.
 
 **A run whose cells died on the budget is not evidence about the answer.** Raise the
 budget and re-run before judging the model — and note the host state, because the

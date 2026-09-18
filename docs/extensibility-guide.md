@@ -1013,7 +1013,7 @@ code. What the harness enforces is bounded *damage to the run*:
 
 | Enforced | Where | Effect |
 |---|---|---|
-| Cell wall-clock timeout (`cell_timeout`: 60 s / 60 s / 120 s by profile) | `REPLSandbox.execute` | The cell is abandoned with a templated timeout error; the worker keeps running, and its late result is discarded by `cell_id` (R4) |
+| Cell wall-clock limits (`cell_timeout` soft: 60 s / 60 s / 120 s by profile, `cell_timeout_hard` 1 200 s) | `REPLSandbox.execute` | A cell that asked the harness for something when its soft limit was reached is extended to the hard limit (a `cell_extended` event plus an operator warning); one that asked for nothing is abandoned with a templated timeout error, as is one that spends the hard limit. The worker keeps running either way, and its late result is discarded by `cell_id` (R4, RO16) |
 | Two consecutive timeouts → worker restart | `REPLSandbox._on_timeout` | The model is told the namespace was lost (`REPL_WORKER_RESTARTED`) |
 | stdout cap = `repl_output_char_cap` (2 000 / 4 000 / 8 000) | `REPLSandbox._build_result` | Head-truncated with an explicit marker (R10) |
 | stderr cap = same value, **head and tail kept** | `REPLSandbox._build_result` | The elided middle is marked; a traceback's last line survives |

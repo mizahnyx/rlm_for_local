@@ -37,7 +37,11 @@ class Profile:
     # Turn limits
     max_turns: int = 15
     max_concurrent_subcalls: int = 2
+    # Two, and both configurable: the soft limit *signals* that a time-consuming
+    # operation has started and lets the cell continue, the hard limit stops it
+    # (owner, 2026-09-17 — old hardware makes some legitimate operations slow).
     cell_timeout: float = 60.0
+    cell_timeout_hard: float = 1200.0
 
     # Context store
     context_spill_threshold: int = 1_000_000

@@ -31,6 +31,7 @@ def completion(
     log_path: str | None = None,
     kernel_bridge: Any = None,
     corpus_bridge: Any = None,
+    warning_sink: Any = None,
     **overrides: Any,
 ) -> str:
     """Run a single RLM completion.
@@ -50,6 +51,9 @@ def completion(
                  When given, the REPL gains `corpus_find`, `corpus_list`,
                  `corpus_stat`, `corpus_read` and `corpus_count`, and the system
                  prompt says so.
+        warning_sink: Optional callable that receives operator-facing warnings as
+                 strings — currently the line announcing that a cell has been
+                 granted its hard time limit. The CLI wires it to stderr.
         **overrides: Individual config value overrides (e.g. max_turns=10).
 
     Returns:
@@ -77,7 +81,7 @@ def completion(
         logger = TrajectoryLogger(log_path)
 
     loop = RootLoop(config, backend, logger, kernel_bridge=kernel_bridge,
-                    corpus_bridge=corpus_bridge)
+                    corpus_bridge=corpus_bridge, warning_sink=warning_sink)
     try:
         return loop.run(query, context)
     finally:

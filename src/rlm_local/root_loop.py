@@ -19,6 +19,7 @@ from rlm_local.prompts import build_messages
 from rlm_local.repl import BAND_ORDER, REPLSandbox
 from rlm_local.subcall_manager import SubcallManager
 from rlm_local.templates import (
+    CELL_EXTENDED_WARNING,
     FINALIZATION_FAILED,
     FORCED_FINALIZATION_CORPUS_PROMPT,
     FORCED_FINALIZATION_PROMPT,
@@ -67,11 +68,16 @@ class RootLoop:
         logger: TrajectoryLogger | None = None,
         kernel_bridge: Any = None,
         corpus_bridge: Any = None,
+        warning_sink: Any = None,
     ) -> None:
         self._config = config
         self._backend = backend
         self._logger = logger
         self._kernel_bridge = kernel_bridge
+        #: Where an operator-visible warning goes (the CLI wires it to stderr). A
+        #: cell granted its hard limit is announced *while it runs*, not only in the
+        #: trajectory afterwards (owner, 2026-09-17).
+        self._warning_sink = warning_sink
         # RO4: the read-only corpus handlers, when a corpus is configured. Kept
         # separate from the kernel bridge because a corpus run needs no vault:
         # "answer questions about a file tree" is its own capability.
@@ -164,6 +170,7 @@ class RootLoop:
         # and behaviour cannot drift apart.
         self._repl = REPLSandbox(
             cell_timeout=cfg.cell_timeout,
+            cell_timeout_hard=cfg.cell_timeout_hard,
             stdout_cap=cfg.repl_output_char_cap,
         )
 
@@ -226,6 +233,11 @@ class RootLoop:
         # Which addresses each helper handed over, with the band it came with, so a
         # rendered trace can audit a citation against what was served (RO10).
         self._repl._corpus_serve_logger = self._log_corpus_served
+        # A cell that reaches the soft limit while it is demonstrably working is
+        # given the hard limit — and that grant is recorded as an event and
+        # announced to the operator, because a run that is allowed twenty minutes
+        # must say so while it happens (RO16).
+        self._repl._extension_reporter = self._report_cell_extension
         self._repl.start(ctx_handle, self._subcall_mgr, definitions=definitions)
 
         # ── Main loop ─────────────────────────────────────────────────────
@@ -470,13 +482,18 @@ class RootLoop:
                     # spent a two-turn budget — `turn_start=1` of 2, the scripted
                     # submission never executed — so with `max_turns=8` every timeout
                     # was stealing two turns. The syntax branch below shows the shape.
-                    self._log_cell_timeout(display_turn, bi + 1)
+                    self._log_cell_timeout(display_turn, bi + 1,
+                                           hard=repl_result.hard_timeout)
                     # Tell the model *what happened*: a budget, not a mistake in
                     # its code. The generic traceback nudge would read as if the
                     # cell had raised, which is the confusion the owner's finding
                     # named — a harness limit was being reported as a model failure.
+                    # The budget named is the one that actually fired: a cell that
+                    # was granted 1200 s and spent it must not be told "60s".
                     timeout_nudge = NUDGE_CELL_TIMEOUT.format(
-                        timeout=f"{cfg.cell_timeout:g}",
+                        timeout=(f"{cfg.cell_timeout_hard:g}"
+                                 if repl_result.hard_timeout
+                                 else f"{cfg.cell_timeout:g}"),
                         helper=self._last_corpus_helper or "none",
                     )
                     break
@@ -807,26 +824,64 @@ class RootLoop:
             f"nudges={nudges}/{cfg.max_consecutive_nudges})",
         )
 
-    def _log_cell_timeout(self, turn: int, block: int) -> None:
+    def _log_cell_timeout(self, turn: int, block: int, hard: bool = False) -> None:
         """Record a cell that died on its time budget, and what it was doing.
 
         The owner's finding (2026-09-17): a 60 s budget can be too little for a
         legitimate corpus call on a loaded host, and nothing in the trajectory said
-        which of the two had happened. This event names the budget and the last
-        corpus helper the cell asked for, which is the whole diagnosis — a budget
-        too low for `corpus_count` is a different problem from a model that asks for
-        the wrong thing, and only one of them is fixed by raising the budget.
+        which of the two had happened. This event names the limit that fired, the
+        budget behind it, and the last corpus helper the cell asked for, which is
+        the whole diagnosis — a budget too low for `corpus_count` is a different
+        problem from a model that asks for the wrong thing, and only one of them is
+        fixed by raising the budget.
+
+        Since RO16 there are two limits, so the event must say *which*: `limit=soft`
+        is a cell that was doing nothing when its window closed, `limit=hard` is a
+        cell that was working and was granted the ceiling anyway. `activity=` is the
+        gate's own input, recorded so the reason for either verdict is on the page
+        rather than in the code that produced it.
         """
         self.cell_timeouts += 1
         if not self._logger:
             return
+        budget = (self._config.cell_timeout_hard if hard
+                  else self._config.cell_timeout)
+        activity = getattr(self._repl, "cell_activity", 0)
         self._logger.log_guardrail(
             turn, "cell_timeout",
-            f"block={block} budget={self._config.cell_timeout:g}s "
+            f"block={block} limit={'hard' if hard else 'soft'} "
+            f"budget={budget:g}s activity={activity} "
             f"last_helper={self._last_corpus_helper or 'none'} "
             f"corpus_calls={getattr(self._repl, 'corpus_calls', 0)} "
             f"cell_timeouts={self.cell_timeouts}",
         )
+
+    def _report_cell_extension(self, elapsed: float) -> None:
+        """Record and announce a cell that has been granted its hard limit (RO16).
+
+        Two audiences, one fact: the trajectory gets a `cell_extended` event naming
+        what the cell was doing, and the operator gets a line on the warning sink
+        *while the cell runs* — because the alternative is a harness that looks
+        hung for twenty minutes with nothing on screen to say otherwise.
+        """
+        helper = self._last_corpus_helper or "no corpus helper in flight"
+        if self._logger:
+            self._logger.log_guardrail(
+                getattr(self, "_current_turn", 0), "cell_extended",
+                f"elapsed={elapsed:.0f}s soft={self._config.cell_timeout:g}s "
+                f"hard={self._config.cell_timeout_hard:g}s last_helper="
+                f"{self._last_corpus_helper or 'none'}",
+            )
+        sink = self._warning_sink
+        if sink is None:
+            return
+        try:
+            sink(CELL_EXTENDED_WARNING.format(
+                elapsed=elapsed, soft=self._config.cell_timeout,
+                hard=self._config.cell_timeout_hard, helper=helper,
+            ))
+        except Exception:  # pragma: no cover - a warning must never break a run
+            pass
 
     def _log_corpus_served(self, verb: str, query: str,
                            addresses: list[dict[str, Any]], chars: int,

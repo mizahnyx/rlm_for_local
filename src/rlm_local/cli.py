@@ -64,6 +64,15 @@ def build_parser() -> argparse.ArgumentParser:
              "stopped by the harness is not a model failure, and the trajectory "
              "records it as a `cell_timeout` event naming the budget and the helper.",
     )
+    p_ask.add_argument(
+        "--cell-timeout-hard", type=float,
+        default=os.environ.get("RLM_CELL_TIMEOUT_HARD"),
+        help="Seconds one REPL cell may run in total, after the soft limit has "
+             "signalled that the cell is doing work (default: the profile's value — "
+             "1200 s; env RLM_CELL_TIMEOUT_HARD). Set it equal to --cell-timeout to "
+             "switch the second limit off: a cell then stops at the soft limit "
+             "whether or not it was working.",
+    )
     p_ask.add_argument("--log-path", type=Path, default=None,
                        help="Write trajectory JSONL to this path")
     _add_model_server_flags(p_ask)
@@ -533,15 +542,17 @@ def ask_overrides(args: argparse.Namespace) -> dict[str, Any]:
     """The per-run overrides `rlm ask` applies on top of the profile.
 
     Split out so the flags that change *how a run is allowed to spend its budget*
-    are testable without a model server: `--max-turns` and `--cell-timeout` are the
-    two knobs an operator reaches for under load, and a knob that silently fails to
-    reach the run is worse than no knob (2026-09-17).
+    are testable without a model server: `--max-turns`, `--cell-timeout` and
+    `--cell-timeout-hard` are the knobs an operator reaches for under load, and a
+    knob that silently fails to reach the run is worse than no knob (2026-09-17).
     """
     overrides: dict[str, Any] = _model_server_overrides(args)
     if getattr(args, "max_turns", None) is not None:
         overrides["max_turns"] = args.max_turns
     if getattr(args, "cell_timeout", None) is not None:
         overrides["cell_timeout"] = float(args.cell_timeout)
+    if getattr(args, "cell_timeout_hard", None) is not None:
+        overrides["cell_timeout_hard"] = float(args.cell_timeout_hard)
     return overrides
 
 
@@ -570,6 +581,7 @@ def _cmd_ask(args: argparse.Namespace) -> int:
             profile=args.profile,
             log_path=str(args.log_path) if args.log_path else None,
             corpus_bridge=corpus_bridge,
+            warning_sink=lambda message: print(message, file=sys.stderr),
             **overrides,
         )
         print(answer)

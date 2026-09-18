@@ -345,7 +345,8 @@ The complete reference:
 | `max_subcalls` | `int` | 30 | 60 | 100 | Hard limit on total sub-calls |
 | `max_subcall_chars` | `int` | 1M | 4M | 12M | Hard limit on total sub-call prompt characters |
 | `max_depth` | `int` | 1 | 1 | 1 | Recursion depth (1 = root + flat sub-calls) |
-| `cell_timeout` | `float` | 60.0 | 60.0 | 120.0 | Per-REPL-cell wall-clock timeout (seconds) |
+| `cell_timeout` | `float` | 60.0 | 60.0 | 120.0 | Per-REPL-cell *soft* wall-clock limit (seconds): reached it, the cell is extended to `cell_timeout_hard` if it has asked the harness for something |
+| `cell_timeout_hard` | `float` | 1200.0 | 1200.0 | 1200.0 | *Hard* limit for one REPL cell (seconds). Equal to `cell_timeout` means no extension: every cell stops at the soft limit |
 | `context_spill_threshold` | `int` | 500K | 1M | 1M | Context size above which disk spill activates |
 | `max_consecutive_errors` | `int` | 3 | 3 | 3 | stderr errors before forced finalization |
 | `max_consecutive_nudges` | `int` | 2 | 2 | 2 | Parse nudges before counting as error |
@@ -665,6 +666,7 @@ promise a different limit than the one enforced.
 ```python
 class REPLSandbox:
     def __init__(self, cell_timeout: float = 60.0,
+                 cell_timeout_hard: float = 1200.0,
                  stdout_cap: int = 256 * 1024,
                  restart_after_consecutive_timeouts: int = 2): ...
     def start(self, context: Any, subcall_manager: Any,
@@ -1328,7 +1330,9 @@ Sixteen frozen constants, all `str.format()` templates. The most important:
 | `SHORTCUT_WARNING` | Anti-shortcut guard triggered | `{pct}` |
 | `NUDGE_STDERR_ERROR` | Retry nudge after a cell raised | `{error_kind}`, `{errors}`, `{max_errors}` |
 | `FORCED_FINALIZATION_PROMPT` | Final forced-finalization message | (none — static) |
-| `CELL_TIMEOUT_ERROR` | Cell exceeded time limit | `{timeout}` |
+| `CELL_TIMEOUT_ERROR` | Cell exceeded the soft time limit | `{timeout}` |
+| `CELL_HARD_TIMEOUT_ERROR` | Cell exceeded the hard time limit (it was working, and was granted the ceiling) | `{timeout}` |
+| `CELL_EXTENDED_WARNING` | Operator line: a cell was granted its hard limit | `{elapsed}`, `{soft}`, `{hard}`, `{helper}` |
 | `CELL_STDOUT_TRUNCATED` | Output truncated marker | `{cap}` |
 | `CELL_STDERR_TRUNCATED` | Middle of a long traceback elided | `{elided}` |
 | `REPL_WORKER_RESTARTED` | Two consecutive timeouts; namespace lost | (none — static) |
@@ -1799,8 +1803,12 @@ Budget: `max_consecutive_errors` (default 3), then forced finalization.
 
 **Symptom:** `while True:` or huge list allocation hangs the REPL.
 
-**Mitigation:** Subprocess isolation + per-cell `cell_timeout`. On timeout the
-harness returns a templated `CELL_TIMEOUT_ERROR` while **the worker keeps
+**Mitigation:** Subprocess isolation + per-cell time limits. A cell that reaches the soft
+limit (`cell_timeout`) having asked the harness for nothing is stopped, and the harness
+returns a templated `CELL_TIMEOUT_ERROR`; one that asked for something is demonstrably
+working and is granted the hard limit (`cell_timeout_hard`), announced on stderr and as a
+`cell_extended` event. If it spends that too, it is stopped with
+`CELL_HARD_TIMEOUT_ERROR`. Either way **the worker keeps
 running** — it is not killed, because killing it would discard the namespace the
 model may still be relying on. The late result is then discarded by `cell_id`
 rather than being handed to the model as the next cell's output (R4). Only after
@@ -2210,6 +2218,7 @@ class REPLResult:
 
 class REPLSandbox:
     def __init__(self, cell_timeout: float = 60.0,
+                 cell_timeout_hard: float = 1200.0,
                  stdout_cap: int = 256 * 1024,
                  restart_after_consecutive_timeouts: int = 2) -> None: ...
     def start(self, context: Any, subcall_manager: Any,

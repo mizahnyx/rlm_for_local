@@ -2,8 +2,17 @@
 
 from __future__ import annotations
 
-from rlm_local.repl import REPLSandbox
+import socket
+import threading
+import time
+
+from rlm_local.repl import (
+    REPLSandbox,
+    _recv_msg,
+    _send_msg,
+)
 from rlm_local.templates import (
+    CELL_HARD_TIMEOUT_ERROR,
     CELL_STDERR_TRUNCATED,
     CELL_STDOUT_TRUNCATED,
     CELL_TIMEOUT_ERROR,
@@ -551,3 +560,201 @@ class TestDiskBackedContextInWorker:
         finally:
             repl.shutdown()
             store.cleanup()
+
+
+# ── RO16: the two-stage cell budget ───────────────────────────────────────
+#
+# The subject here is `REPLSandbox.execute()`'s clock, so the worker is a socket
+# and a thread rather than a process. That is not a convenience: the first attempt
+# at this feature drove the extension through the root loop with a short soft
+# limit, which put the worker's own startup *inside* the first cell's window, and
+# the gate correctly stopped a cell it believed was stuck
+# (`docs/20260917-2059-blocked-two-stage-budget-and-a-gate.md`). No process
+# startup is inside any measurement below.
+
+
+class _StubCorpusBridge:
+    """Just enough bridge for a cell to make one helper call that succeeds."""
+
+    def handle_count(self, *, kind=None, under=""):
+        return "[count: 7 files]"
+
+
+class _StubWorker:
+    """The worker's end of the socket, played by a thread.
+
+    A script is a list of `(action, payload)` pairs:
+
+    * `("request", {...})` — the cell asks the harness for something, which is
+      what the extension gate counts as work;
+    * `("sleep", seconds)` — the cell is busy and silent;
+    * `("close", None)` — the worker goes away, as a crashed worker does;
+    * `("result", {...})` — the cell finishes with this result message.
+    """
+
+    def __init__(self, script: list[tuple]) -> None:
+        self.parent, self._worker = socket.socketpair()
+        self._thread = threading.Thread(
+            target=self._play, args=(self._worker, script), daemon=True,
+        )
+        self._thread.start()
+
+    def _play(self, sock: socket.socket, script: list[tuple]) -> None:
+        try:
+            exec_msg = _recv_msg(sock, timeout=10)
+            if exec_msg is None:
+                return
+            cell_id = exec_msg.get("cell_id")
+            for action, payload in script:
+                if action == "sleep":
+                    time.sleep(payload)
+                elif action == "close":
+                    sock.close()
+                    return
+                elif action == "request":
+                    _send_msg(sock, {**payload, "cell_id": cell_id})
+                    # The harness answers every helper request; drain the answer
+                    # so this end stays in step with the real protocol.
+                    _recv_msg(sock, timeout=10)
+                elif action == "result":
+                    _send_msg(sock, {"type": "result", "cell_id": cell_id, **payload})
+        except OSError:  # the test closed the socket; nothing to report
+            pass
+
+    def close(self) -> None:
+        self.parent.close()
+        self._worker.close()
+
+
+class TestTheTwoStageCellBudget:
+    """The soft limit signals, the hard limit stops, and only work buys the extension.
+
+    Two limits per cell, both configurable (owner, 2026-09-17): a cell that reaches
+    the soft limit while it is *demonstrably* working is allowed to continue up to
+    the hard limit, and a cell that reaches it having asked for nothing is stopped
+    there. `cell_timeout_hard == cell_timeout` switches the second limit off
+    entirely, which is the behaviour that existed before the feature.
+    """
+
+    @staticmethod
+    def _drive(soft: float, hard: float, script: list[tuple]):
+        extensions: list[float] = []
+        repl = REPLSandbox(cell_timeout=soft, cell_timeout_hard=hard)
+        repl._corpus_bridge = _StubCorpusBridge()
+        repl._extension_reporter = extensions.append
+        stub = _StubWorker(script)
+        repl._worker_sock = stub.parent
+        return repl, stub, extensions
+
+    def test_a_working_cell_is_granted_the_hard_limit_and_finishes(self):
+        repl, stub, extensions = self._drive(
+            soft=0.3, hard=5.0,
+            script=[
+                ("request", {"type": "corpus_count"}),
+                ("sleep", 0.4),
+                ("result", {"stdout": "DONE\n"}),
+            ],
+        )
+        try:
+            result = repl.execute("corpus_count()")
+        finally:
+            stub.close()
+            repl._worker_sock = None
+
+        assert result.timed_out is False, result
+        assert result.hard_timeout is False, result
+        assert "DONE" in result.stdout, result
+        assert result.stderr == "", result
+        # Announced exactly once, with the elapsed seconds the operator line needs.
+        assert len(extensions) == 1, extensions
+        assert 0.3 * 0.8 <= extensions[0] < 5.0, extensions
+        assert repl.cell_activity == 1, repl.cell_activity
+
+    def test_a_cell_that_asked_for_nothing_is_stopped_at_the_soft_limit(self):
+        repl, stub, extensions = self._drive(
+            soft=0.3, hard=2.0,
+            script=[("sleep", 3.0)],
+        )
+        try:
+            result = repl.execute("while True: pass")
+        finally:
+            stub.close()
+            repl._worker_sock = None
+
+        assert result.timed_out is True, result
+        assert result.hard_timeout is False, result
+        assert CELL_TIMEOUT_ERROR.format(timeout="0.3") in result.stderr, result.stderr
+        assert CELL_HARD_TIMEOUT_ERROR.format(timeout="2") not in result.stderr
+        assert extensions == [], extensions
+        assert repl.cell_activity == 0, repl.cell_activity
+
+    def test_the_hard_limit_stops_even_a_working_cell(self):
+        repl, stub, extensions = self._drive(
+            soft=0.2, hard=0.7,
+            script=[("request", {"type": "corpus_count"})],
+        )
+        try:
+            result = repl.execute("corpus_count()")
+        finally:
+            stub.close()
+            repl._worker_sock = None
+
+        assert result.timed_out is True, result
+        assert result.hard_timeout is True, result
+        # The message names the budget that actually fired: a cell granted 0.7 s
+        # must not be told its 0.2 s window closed.
+        assert CELL_HARD_TIMEOUT_ERROR.format(timeout="0.7") in result.stderr, result.stderr
+        assert CELL_TIMEOUT_ERROR.format(timeout="0.2") not in result.stderr
+        assert len(extensions) == 1, extensions
+
+    def test_one_limit_means_no_extension_at_all(self):
+        repl, stub, extensions = self._drive(
+            soft=0.3, hard=0.3,
+            script=[("request", {"type": "corpus_count"})],
+        )
+        try:
+            result = repl.execute("corpus_count()")
+        finally:
+            stub.close()
+            repl._worker_sock = None
+
+        assert result.timed_out is True, result
+        assert result.hard_timeout is False, result
+        assert CELL_TIMEOUT_ERROR.format(timeout="0.3") in result.stderr, result.stderr
+        assert extensions == [], extensions
+        # The cell *was* working; a single limit still stops it, which is the
+        # pre-RO16 behaviour kept as a supported configuration.
+        assert repl.cell_activity == 1, repl.cell_activity
+
+    def test_a_worker_that_went_away_is_not_credited_with_slow_work(self):
+        """A closed socket is not a spent window.
+
+        Both arrive as "no message", and crediting the second one as progress would
+        hand a crashed worker's cell twenty minutes of a budget nothing is using.
+        This is the case that a clock comparison got wrong (~1 run in 4) before the
+        wait was made to say *why* it ended.
+        """
+        repl, stub, extensions = self._drive(
+            soft=0.3, hard=5.0,
+            script=[
+                ("request", {"type": "corpus_count"}),
+                ("close", None),
+            ],
+        )
+        try:
+            started = time.monotonic()
+            result = repl.execute("corpus_count()")
+            elapsed = time.monotonic() - started
+        finally:
+            stub.close()
+            repl._worker_sock = None
+
+        assert result.timed_out is True, result
+        assert result.hard_timeout is False, result
+        assert CELL_TIMEOUT_ERROR.format(timeout="0.3") in result.stderr, result.stderr
+        assert extensions == [], extensions
+        # The cell did ask for something, so only the closed socket kept the
+        # extension from being granted — and it must not have waited for the hard
+        # limit to find that out.
+        assert repl.cell_activity == 1, repl.cell_activity
+        assert elapsed < 1.0, elapsed

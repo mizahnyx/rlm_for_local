@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import select
 import socket
 import struct
 import subprocess
@@ -46,6 +47,7 @@ from rlm_local.context_store import Context, _InMemoryContext
 # harness served and what the model cites must be compared in one vocabulary.
 from rlm_kernel.textindex import ADDRESS_TOKEN_RE
 from rlm_local.templates import (
+    CELL_HARD_TIMEOUT_ERROR,
     CELL_STDERR_TRUNCATED,
     CELL_STDOUT_TRUNCATED,
     CELL_TIMEOUT_ERROR,
@@ -93,6 +95,10 @@ class REPLResult:
     the trajectory except as stderr prose, so "the model gave a bad answer" and
     "60 s was too little for `corpus_count` on a loaded host" looked the same.
     """
+
+    hard_timeout: bool = False
+    """Which limit stopped it: the *soft* one (a cell that was doing nothing) or the
+    *hard* one (a cell that was working and needed longer than the ceiling)."""
 
 
 # ── Wire protocol ─────────────────────────────────────────────────────────
@@ -806,10 +812,12 @@ class REPLSandbox:
     def __init__(
         self,
         cell_timeout: float = 60.0,
+        cell_timeout_hard: float = 1200.0,
         stdout_cap: int = 256 * 1024,
         restart_after_consecutive_timeouts: int = 2,
     ) -> None:
         self._cell_timeout = cell_timeout
+        self._cell_timeout_hard = cell_timeout_hard
         self._stdout_cap = stdout_cap
         self._restart_threshold = max(2, restart_after_consecutive_timeouts)
         self._proc: subprocess.Popen | None = None
@@ -855,6 +863,15 @@ class REPLSandbox:
         self._cell_seq = 0
         self._init_payload: dict | None = None
         self._consecutive_timeouts = 0
+        #: How many times the cell in flight asked the harness for something. The
+        #: second limit is granted only on *demonstrable progress*: a helper call is
+        #: a cell that is working, no request at all is a cell that is stuck, and
+        #: the harness can tell those apart without guessing from the code.
+        self._cell_activity = 0
+        #: Called with the elapsed seconds when a cell is granted its hard limit.
+        #: Injected by the root loop, so the extension is recorded and announced on
+        #: an operator-visible channel without the sandbox knowing about either.
+        self._extension_reporter: Any = None
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -979,17 +996,40 @@ class REPLSandbox:
             cell_id = self._cell_seq
             _send_msg(self._worker_sock, {"cmd": "exec", "code": code, "cell_id": cell_id})
 
-            deadline = time.monotonic() + self._cell_timeout
+            started = time.monotonic()
+            soft_deadline = started + self._cell_timeout
+            hard_deadline = started + self._cell_timeout_hard
+            extended = False
+            # Reset per cell: activity is what the *current* cell did, not what a
+            # previous one did.
+            self._cell_activity = 0
+            deadline = soft_deadline
 
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    msg = None
+                    msg, window_spent = None, True
                 else:
-                    msg = _recv_msg(self._worker_sock, timeout=remaining)
+                    msg, window_spent = self._wait_for_message(remaining)
 
                 if msg is None:
-                    return self._on_timeout(cell_id)
+                    # One decision site, because a real wait ends *here*: a cell
+                    # that asks for something rarely loops back exactly on its
+                    # deadline, so an extension branch at the top of the loop
+                    # would never fire. Two limits, two meanings — a cell that has
+                    # asked for something is working and is given the hard limit,
+                    # a cell that has asked for nothing is stuck and is stopped.
+                    # `hard > soft` is the off switch: a single limit means no
+                    # extension at all.
+                    if (window_spent
+                            and not extended
+                            and self._cell_timeout_hard > self._cell_timeout
+                            and self._cell_activity > 0):
+                        extended = True
+                        deadline = hard_deadline
+                        self._announce_extension(time.monotonic() - started)
+                        continue
+                    return self._on_timeout(cell_id, extended=extended)
 
                 msg_type = msg.get("type", msg.get("cmd", ""))
                 msg_cell = msg.get("cell_id")
@@ -1000,7 +1040,9 @@ class REPLSandbox:
                         # it and let the current cell have a full window — the
                         # worker only starts it once it has finished the old
                         # one.
-                        deadline = time.monotonic() + self._cell_timeout
+                        window = (self._cell_timeout_hard if extended
+                                  else self._cell_timeout)
+                        deadline = time.monotonic() + window
                         continue
                     return self._build_result(msg)
 
@@ -1008,10 +1050,37 @@ class REPLSandbox:
                     # Late request from a cell we already abandoned: answer it
                     # so the worker is not left blocked, then keep draining.
                     self._answer_stale_request(msg)
-                    deadline = time.monotonic() + self._cell_timeout
+                    # The window is re-armed for the stage this cell is in, not
+                    # for the soft one: re-arming the soft deadline on an already
+                    # extended cell would stop it early and *report the hard
+                    # limit* as what fired, which would be a false statement.
+                    window = (self._cell_timeout_hard if extended
+                              else self._cell_timeout)
+                    deadline = time.monotonic() + window
                     continue
 
                 self._handle_request(msg_type, msg)
+
+    def _wait_for_message(self, remaining: float) -> tuple[dict | None, bool]:
+        """Wait up to `remaining` seconds, and say whether the *window* was spent.
+
+        Two different facts arrive as a `None` from `_recv_msg`: the window closed
+        with nothing to read, or the worker closed the socket. Only the first may
+        buy an extension, and the clock cannot tell them apart — a socket timeout
+        fires a fraction of a millisecond early, which made "the deadline has been
+        reached" wrong in about one run in four when it was computed as
+        `time.monotonic() >= deadline` (measured, 2026-09-17). `select` answers the
+        question directly instead of inferring it: not-readable is a spent window,
+        readable is data or EOF. A closed socket is *not* a spent window — there is
+        nothing slow about a worker that went away.
+        """
+        try:
+            readable = select.select([self._worker_sock], [], [], remaining)[0]
+        except (OSError, ValueError):  # socket already closed
+            return None, False
+        if not readable:
+            return None, True
+        return _recv_msg(self._worker_sock, timeout=remaining), False
 
     def _build_result(self, msg: dict) -> REPLResult:
         stdout = msg.get("stdout", "")
@@ -1035,10 +1104,20 @@ class REPLSandbox:
             syntax_error=bool(msg.get("syntax_error")),
         )
 
-    def _on_timeout(self, cell_id: int) -> REPLResult:
-        """Handle a cell that exceeded `cell_timeout` (R4)."""
+    def _on_timeout(self, cell_id: int, *, extended: bool = False) -> REPLResult:
+        """Handle a cell that exceeded its time budget (R4, RO16).
+
+        `extended` says *which* budget: a cell that was granted the hard limit and
+        spent it is a different fact from a cell that was doing nothing at the soft
+        limit, and the message the model reads must name the one that fired.
+        """
         self._consecutive_timeouts += 1
-        message = CELL_TIMEOUT_ERROR.format(timeout=self._cell_timeout)
+        # The soft message keeps its original rendering (`60.0s`, not `60s`): it is
+        # what the recorded trajectories and the earlier tests quote, and this change
+        # is about *which* limit fired, not about re-spelling the number.
+        message = (CELL_HARD_TIMEOUT_ERROR.format(timeout=f"{self._cell_timeout_hard:g}")
+                   if extended else
+                   CELL_TIMEOUT_ERROR.format(timeout=self._cell_timeout))
 
         if self._consecutive_timeouts >= self._restart_threshold:
             # A stale result is still outstanding and we timed out again: the
@@ -1047,11 +1126,25 @@ class REPLSandbox:
                 self._restart_in_place()
             except Exception as e:  # pragma: no cover - environment failure
                 return REPLResult(stderr=f"{message}\n{REPL_WORKER_RESTARTED}\n{e}",
-                                  timed_out=True)
+                                  timed_out=True, hard_timeout=extended)
             return REPLResult(stderr=f"{message}\n{REPL_WORKER_RESTARTED}",
-                              timed_out=True)
+                              timed_out=True, hard_timeout=extended)
 
-        return REPLResult(stderr=message, timed_out=True)
+        return REPLResult(stderr=message, timed_out=True, hard_timeout=extended)
+
+    def _announce_extension(self, elapsed: float) -> None:
+        """Tell the injected reporter that this cell has been given the hard limit.
+
+        Telemetry must never be able to break a cell: a reporter that raises is
+        swallowed here rather than failing the run it was observing.
+        """
+        report = self._extension_reporter
+        if report is None:
+            return
+        try:
+            report(elapsed)
+        except Exception:  # pragma: no cover - telemetry must never break a cell
+            pass
 
     def _answer_stale_request(self, msg: dict) -> None:
         """Unblock a worker that is asking about a cell we already abandoned."""
@@ -1073,6 +1166,9 @@ class REPLSandbox:
 
     def _handle_request(self, msg_type: str, msg: dict) -> None:
         """Serve a sub-call / search / propose request from the running cell."""
+        # Any request from the cell is activity: it is what distinguishes a slow
+        # cell from a stuck one when the soft time limit is reached (RO16).
+        self._cell_activity += 1
         if msg_type == "subcall":
             prompt = msg.get("prompt", "")
             schema = msg.get("schema")
@@ -1299,6 +1395,21 @@ class REPLSandbox:
     @property
     def cell_timeout(self) -> float:
         return self._cell_timeout
+
+    @property
+    def cell_timeout_hard(self) -> float:
+        return self._cell_timeout_hard
+
+    @property
+    def cell_activity(self) -> int:
+        """Requests the cell in flight has made — the gate the extension reads.
+
+        Exposed because the root loop records it on a timeout event: an event that
+        says `limit=soft activity=0` is the whole diagnosis (a stuck cell), and one
+        that says `limit=hard activity=3` is a different one (a working cell that
+        needed longer than the ceiling).
+        """
+        return self._cell_activity
 
     @property
     def stdout_cap(self) -> int:

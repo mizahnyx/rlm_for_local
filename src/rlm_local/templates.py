@@ -220,6 +220,20 @@ FINALIZATION_FAILED = "(No answer produced — forced finalization failed)"
 # ---------------------------------------------------------------------------
 
 CELL_TIMEOUT_ERROR = "Error: cell exceeded the {timeout}s time limit."
+# The second, hard limit (owner, 2026-09-17). The soft limit above *signals*: a cell
+# that is demonstrably working is allowed to continue. This one stops it, and it
+# reads differently on purpose — "exceeded the 60.0s time limit" would blame the
+# wrong budget for a cell that was granted 1200 s and still did not finish.
+CELL_HARD_TIMEOUT_ERROR = (
+    "Error: cell exceeded the hard time limit of {timeout}s and was stopped."
+)
+# The operator line for an extension. A run that grants a cell twenty minutes must
+# say so while it happens, not only in the trajectory afterwards.
+CELL_EXTENDED_WARNING = (
+    "[rlm] a cell has been running for {elapsed:.0f}s (soft limit {soft:g}s) and is "
+    "doing work — {helper} — so it is allowed up to {hard:g}s. This is a "
+    "time-consuming operation on this host, not a hang."
+)
 CELL_STDOUT_TRUNCATED = "\n[... output truncated to {cap} characters ...]"
 # stderr keeps head and tail (the traceback ends in the useful line), so the
 # elision is reported in the middle.

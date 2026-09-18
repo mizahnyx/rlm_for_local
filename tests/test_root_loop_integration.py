@@ -1715,10 +1715,16 @@ class TestTheCellBudgetIsVisibleAndConfigurable:
         from rlm_local.config import load_config
         from rlm_local.logger import TrajectoryLogger
 
-        cfg = load_config("tiny", max_turns=2, cell_timeout=0.5)
+        # Since RO16 there are two limits, and this run walks both: the cell calls
+        # a helper (so the soft limit extends it) and then sleeps past the hard
+        # limit (so that is what stops it). The soft limit is generous on purpose —
+        # a short one measures the *worker's* startup rather than the cell, which is
+        # the measurement error that sank this feature's first attempt.
+        cfg = load_config("tiny", max_turns=2, cell_timeout=2.0,
+                          cell_timeout_hard=3.0)
         logger = TrajectoryLogger(tmp_path / "traj.jsonl")
         backend = StubBackend(responses=[
-            "```repl\ncorpus_coverage()\nimport time; time.sleep(5)\n```",
+            "```repl\ncorpus_coverage()\nimport time; time.sleep(8)\n```",
             "```repl\nanswer['content'] = 'done'\nanswer['ready'] = True\n```",
         ])
         loop = RootLoop(cfg, backend, logger=logger, kernel_bridge=None,
@@ -1732,16 +1738,56 @@ class TestTheCellBudgetIsVisibleAndConfigurable:
                   logger.path.read_text(encoding="utf-8").splitlines() if line.strip()]
         timeouts = [e for e in events if e.get("guardrail") == "cell_timeout"]
         assert timeouts, "a cell that died on its budget must be recorded as such"
-        assert "budget=0.5s" in timeouts[0]["detail"]
+        # Which limit fired, the budget behind it, and the gate's own input: a cell
+        # stopped at the soft limit having asked for nothing is stuck, one stopped
+        # at the hard limit having asked for something was working and too slow.
+        assert "limit=hard" in timeouts[0]["detail"], timeouts[0]
+        assert "budget=3s" in timeouts[0]["detail"], timeouts[0]
+        assert "activity=1" in timeouts[0]["detail"], timeouts[0]
         # The verb names *what the cell was doing* when it ran out, which is the
         # whole diagnosis: a budget that is too low for one helper is a different
         # problem from a model that asks for the wrong thing.
-        assert "last_helper=corpus_coverage" in timeouts[0]["detail"]
+        assert "last_helper=corpus_coverage" in timeouts[0]["detail"], timeouts[0]
+        # ...and the extension it was granted on the way is on the page too.
+        extended = [e for e in events if e.get("guardrail") == "cell_extended"]
+        assert len(extended) == 1, extended
         # `>= 1` rather than `== 1`: the late result of an abandoned cell can
         # surface as a second timeout when the sandbox reads it, so the counter
         # bounds the *failures*, not the number of distinct cells. The event's
         # `block=` is what identifies a cell.
         assert loop.cell_timeouts >= 1
+
+    def test_a_cell_stopped_having_asked_for_nothing_is_the_soft_limit(
+        self, tmp_path: Path,
+    ) -> None:
+        import json
+
+        from rlm_local.config import load_config
+        from rlm_local.logger import TrajectoryLogger
+
+        cfg = load_config("tiny", max_turns=2, cell_timeout=0.5,
+                          cell_timeout_hard=6.0)
+        logger = TrajectoryLogger(tmp_path / "traj.jsonl")
+        backend = StubBackend(responses=[
+            "```repl\nimport time; time.sleep(8)\n```",
+            "```repl\nanswer['content'] = 'done'\nanswer['ready'] = True\n```",
+        ])
+        loop = RootLoop(cfg, backend, logger=logger, kernel_bridge=None)
+        try:
+            loop.run("Question", "stub context")
+        finally:
+            loop.shutdown()
+
+        events = [json.loads(line) for line in
+                  logger.path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        timeouts = [e for e in events if e.get("guardrail") == "cell_timeout"]
+        assert timeouts, "the cell must have hit the soft limit"
+        assert "limit=soft" in timeouts[0]["detail"], timeouts[0]
+        assert "budget=0.5s" in timeouts[0]["detail"], timeouts[0]
+        assert "activity=0" in timeouts[0]["detail"], timeouts[0]
+        assert "last_helper=none" in timeouts[0]["detail"], timeouts[0]
+        # Nothing bought a second stage, so nothing was announced.
+        assert [e for e in events if e.get("guardrail") == "cell_extended"] == []
 
     def test_the_budget_is_a_cli_flag(self, tmp_path: Path) -> None:
         from rlm_local.cli import build_parser, ask_overrides
@@ -1751,6 +1797,21 @@ class TestTheCellBudgetIsVisibleAndConfigurable:
         args = build_parser().parse_args(
             ["ask", "q", "--context-file", str(context), "--cell-timeout", "240"])
         assert ask_overrides(args)["cell_timeout"] == 240.0
+
+    def test_the_hard_budget_is_a_cli_flag_too(self, tmp_path: Path) -> None:
+        from rlm_local.cli import build_parser, ask_overrides
+
+        context = tmp_path / "ctx.md"
+        context.write_text("ctx", encoding="utf-8")
+        args = build_parser().parse_args(
+            ["ask", "q", "--context-file", str(context),
+             "--cell-timeout", "240", "--cell-timeout-hard", "900"])
+        overrides = ask_overrides(args)
+        assert overrides["cell_timeout_hard"] == 900.0
+        # A limit that is not passed is not forced, so the profile's value stands.
+        solo = build_parser().parse_args(
+            ["ask", "q", "--context-file", str(context)])
+        assert "cell_timeout_hard" not in ask_overrides(solo)
 
     def test_the_budget_can_come_from_the_environment(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -1762,6 +1823,104 @@ class TestTheCellBudgetIsVisibleAndConfigurable:
         context.write_text("ctx", encoding="utf-8")
         args = build_parser().parse_args(["ask", "q", "--context-file", str(context)])
         assert ask_overrides(args)["cell_timeout"] == 90.0
+
+    def test_the_hard_budget_can_come_from_the_environment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from rlm_local.cli import build_parser, ask_overrides
+
+        monkeypatch.setenv("RLM_CELL_TIMEOUT_HARD", "1800")
+        context = tmp_path / "ctx.md"
+        context.write_text("ctx", encoding="utf-8")
+        args = build_parser().parse_args(["ask", "q", "--context-file", str(context)])
+        assert ask_overrides(args)["cell_timeout_hard"] == 1800.0
+
+
+class _ExtendingREPL:
+    """A sandbox whose first cell reports an extension (RO16, loop level).
+
+    The loop's half of this feature is *wiring*: that the reporter reaches
+    `_report_cell_extension`, that the event lands on the turn the cell belongs to,
+    and that the operator line goes to the injected sink. Measuring that through a
+    real worker would put process startup inside the first cell's window — the error
+    that made the first attempt look like a gate that never opened — so the
+    extension is reported here rather than timed. The gate itself is proved at the
+    sandbox level, in `tests/test_repl.py`.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.corpus_calls = 1
+        self._extension_reporter: Any = None
+        self._corpus_serve_logger: Any = None
+        self.cells: list[str] = []
+
+    def start(self, context, subcall_manager, definitions=None) -> None:
+        pass
+
+    def execute(self, code: str):
+        from rlm_local.repl import REPLResult
+
+        self.cells.append(code)
+        if len(self.cells) == 1:
+            # A helper served promptly, then the soft limit reached while the cell
+            # is still working: exactly the sequence the real sandbox reports.
+            self._corpus_serve_logger("corpus_count", "count the files", [], 12, True)
+            self._extension_reporter(61.0)
+            return REPLResult(stdout="chunk 1 of many\n")
+        return REPLResult(final_answer="the answer", answer_state={"ready": True})
+
+    def shutdown(self) -> None:
+        pass
+
+
+class TestACellGrantedItsHardLimitIsAnnounced:
+    """An extension is recorded and announced while the cell is still running.
+
+    A run that allows one cell twenty minutes must say so on screen, not only in a
+    trajectory someone reads afterwards (owner, 2026-09-17). The event is the
+    evidence; the warning line is the operator's copy of it.
+    """
+
+    def test_the_extension_is_recorded_and_announced(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import json
+
+        import rlm_local.root_loop as root_loop
+        from rlm_local.logger import TrajectoryLogger
+        from rlm_local.templates import CELL_EXTENDED_WARNING
+
+        monkeypatch.setattr(root_loop, "REPLSandbox", _ExtendingREPL)
+        warnings: list[str] = []
+        logger = TrajectoryLogger(tmp_path / "traj.jsonl")
+        cfg = load_config("tiny", max_turns=2, cell_timeout=60.0,
+                          cell_timeout_hard=1200.0)
+        backend = StubBackend(responses=[
+            "```repl\nprint('slow')\n```",
+            "```repl\nanswer['content'] = 'the answer'\nanswer['ready'] = True\n```",
+        ])
+        loop = RootLoop(cfg, backend, logger=logger, kernel_bridge=None,
+                        warning_sink=warnings.append)
+        try:
+            answer = loop.run("Question", "stub context")
+        finally:
+            loop.shutdown()
+
+        events = [json.loads(line) for line in
+                  logger.path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        extended = [e for e in events if e.get("guardrail") == "cell_extended"]
+        assert len(extended) == 1, extended
+        assert extended[0]["turn"] == 1, extended[0]
+        assert "elapsed=61s" in extended[0]["detail"], extended[0]
+        assert "soft=60s" in extended[0]["detail"], extended[0]
+        assert "hard=1200s" in extended[0]["detail"], extended[0]
+        assert "last_helper=corpus_count" in extended[0]["detail"], extended[0]
+        # The operator saw the same fact, in the frozen wording, while it happened.
+        assert warnings == [CELL_EXTENDED_WARNING.format(
+            elapsed=61.0, soft=60.0, hard=1200.0, helper="corpus_count")], warnings
+        # ...and being granted more time is not a failure: the run still answers.
+        assert answer == "the answer"
 
 
 class TestSearchQualityIsLogged:

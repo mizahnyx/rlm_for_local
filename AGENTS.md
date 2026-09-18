@@ -227,17 +227,24 @@ that forced this are in `docs/20260915-2305-corpus-search-cannot-count-its-own-i
 `search` 0.2 s against `COUNT(*) FROM text_chunks` 972 s, and a 120 s cell limit.
 
 **A harness limit is not a model failure, and must never read like one.** A cell
-that dies on `cell_timeout` writes its own `cell_timeout` event naming the budget and
-`last_helper=` (the verb it was running), the model is told it hit a budget rather
-than a bug, and the budget is per-invocation configurable (`--cell-timeout`,
-`RLM_CELL_TIMEOUT`, else the profile's 60 s / 120 s). Diagnose from the counts, not
+that dies on a time limit writes its own `cell_timeout` event naming the limit that
+fired, the budget behind it, `activity=` (the gate's own input) and `last_helper=`
+(the verb it was running); the model is told the budget it actually hit, rather than
+a bug. There are **two limits, both per-invocation configurable** (RO16): a *soft*
+one (`--cell-timeout`, `RLM_CELL_TIMEOUT`, else the profile's 60 s / 120 s) that
+**signals**, extending a cell which has asked the harness for something to the
+*hard* one (`--cell-timeout-hard`, `RLM_CELL_TIMEOUT_HARD`, default 1 200 s), which
+stops it. A granted extension is announced on the operator's warning sink while the
+cell runs and recorded as a `cell_extended` event; equal limits switch the second
+stage off. Diagnose from the counts, not
 from the answer: a cluster of `cell_timeout` on one helper is a harness problem (fix
 the helper, or raise the budget for that workload), a scatter is the model asking for
 too much, and a run whose cells died on the budget says nothing about the answer
 until it is re-run with a bigger one. A cell that does not *compile* is the third
 case: `syntax_retry` / `syntax_giveup` events, bounded by `max_syntax_retries`, and
 it costs neither a turn nor the error budget — the loop's turn counter deliberately
-stands still for it. `docs/20260917-1200-two-failures-that-were-not-the-models.md`.
+stands still for it. `docs/20260917-1200-two-failures-that-were-not-the-models.md`,
+`docs/20260918-0451-two-stage-cell-budget-landed.md`.
 
 `-k "not slow and not load"` is **wrong**: `-k` matches a substring of the node
 id, so it also drops ~20 tests that merely mention "load" in their name
