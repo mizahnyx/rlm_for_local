@@ -196,11 +196,11 @@ requirement alone produced 0 cited answers in 3 live runs of the 4B laptop model
 (`docs/20260915-0655-corpus-citation-compliance-measured.md`). Each accepted
 answer writes one `corpus_citation` guardrail event with
 `answers_with_address=True|False`, and each refusal a `corpus_uncited` event —
-read the counts with `grep -c` rather than reading the answers. **The escape hatch
-is still unverified**: the first attempt to test it (an unanswerable question)
-died before the model could submit, because the search counted the index it was
-searching (roadmap CL6). Re-run it now that the search path reads a published
-snapshot instead.
+read the counts with `grep -c` rather than reading the answers. **The escape hatch has now
+fired live, once** (2026-09-19): the first attempt to test it died before the model could
+submit, because the search counted the index it was searching (roadmap CL6); the first real
+question set then produced a *voluntary*, uncited answer that named the coverage line and was
+accepted for it — `docs/20260919-1318-owner-findings-first-question-set.md`.
 
 **A citation must also answer the question, not merely have been served.** Every
 search hit is labelled `covers n/m … (strong|partial|weak|none)`; the harness reads
