@@ -69,7 +69,8 @@ def conn(tmp_path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(str(tmp_path / "index.sqlite"))
     connection.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     connection.execute(
-        "CREATE TABLE classification (raw BLOB PRIMARY KEY, kind TEXT NOT NULL)"
+        "CREATE TABLE classification (raw BLOB PRIMARY KEY, kind TEXT NOT NULL,"
+        " encoding TEXT)"
     )
     connection.execute(
         "CREATE TABLE entries (raw BLOB PRIMARY KEY, name TEXT, kind TEXT, size INTEGER)"
@@ -539,6 +540,133 @@ class TestCoverageSnapshot:
                               "text_coverage": 0.05})
         assert "5 sources indexed" in note
         assert "ago" not in note
+
+
+class TestNonUtf8TextIsSearchable:
+    """Windows-Latin text must be findable, and its addresses must still name raw bytes.
+
+    Found by the owner reading the first live question set (2026-09-19): *"some files
+    have Windows Latin codepoint and thus words with tilded vowels are not found."*
+    The index decoded every source as UTF-8 with `errors="replace"`, so `canción` in
+    cp1252 became `canci` + U+FFFD + `n` — and FTS5's `remove_diacritics` never saw
+    the word it exists to fold. `classification.encoding` had recorded the right
+    answer for every file all along (46 107 cp1252, 628 latin-1).
+
+    The trap this class holds: **an address is a byte offset into the raw file.**
+    Decoding before chunking would move every offset and break `corpus_read(address)`
+    for exactly the files the fix is meant to help, so the decode belongs only where
+    bytes become tokens and where they are displayed.
+    """
+
+    BODY = "El comité aprobó la canción de María y el niño.\n"
+
+    def test_a_windows_latin_word_is_found_once_the_encoding_is_known(
+        self, index: TextIndex,
+    ) -> None:
+        body = self.BODY.encode("cp1252")
+        index.add_text(raw=b"docs/legacy.txt", display="docs/legacy.txt",
+                       source_hash="h-legacy", text=body, encoding="cp1252")
+        # The same bytes with no encoding known are the bug being fixed: indexed as
+        # UTF-8 with replacement characters, the word cannot be matched.
+        index.add_text(raw=b"docs/unlabelled.txt", display="docs/unlabelled.txt",
+                       source_hash="h-unlabelled", text=body)
+
+        found = [hit.source for hit in index.search("canción", k=8).hits]
+        assert found == ["docs/legacy.txt"], found
+        # Diacritic folding is not what was broken: FTS5 folds both sides already, so
+        # the unaccented spelling finds the fixed file too.
+        assert [h.source for h in index.search("cancion", k=8).hits] == ["docs/legacy.txt"]
+
+    def test_the_encoding_comes_from_the_classification_row(
+        self, index: TextIndex, conn: sqlite3.Connection,
+    ) -> None:
+        """The sniffer's answer is the index's answer: one lookup, no second guess."""
+        body = self.BODY.encode("cp1252")
+        conn.execute("INSERT INTO classification (raw, kind, encoding) VALUES (?, ?, ?)",
+                     (b"docs/legacy.txt", "text", "cp1252"))
+        conn.commit()
+
+        index.add_text(raw=b"docs/legacy.txt", display="docs/legacy.txt",
+                       source_hash="h-legacy", text=body)
+
+        hits = index.search("canción", k=8).hits
+        assert [h.source for h in hits] == ["docs/legacy.txt"]
+        assert hits[0].encoding == "cp1252", hits[0]
+
+    def test_an_address_still_names_the_raw_bytes(
+        self, index: TextIndex, corpus: Path,
+    ) -> None:
+        """The offset must land on the word in the *original* bytes, not in decoded text.
+
+        cp1252 encodes `ó` as one byte and UTF-8 as two, so a decode before chunking
+        would shift every address in the file after the first accented word — and
+        `corpus_read` seeks those offsets into the file on disk.
+        """
+        legacy = corpus / "docs" / "legacy.txt"
+        legacy.write_bytes(self.BODY.encode("cp1252"))
+
+        index.add_text(raw=b"docs/legacy.txt", display="docs/legacy.txt",
+                       source_hash="h-legacy", text=legacy.read_bytes(),
+                       encoding="cp1252")
+        hit = index.search("canción", k=8).hits[0]
+
+        raw_slice = legacy.read_bytes()[hit.byte_start:hit.byte_end]
+        assert "canción" in raw_slice.decode("cp1252"), raw_slice
+        # ...and the same slice is *not* valid UTF-8 text, which is the whole point.
+        assert "canción" not in raw_slice.decode("utf-8", "replace")
+
+        mount = LocalTreeMount(corpus)
+        text = index.read(hit, mount=mount)
+        assert "canción" in text, text
+        assert "comité" in text, text
+
+    def test_an_unusable_encoding_name_is_not_recorded_as_if_it_worked(
+        self, index: TextIndex,
+    ) -> None:
+        """A codec that does not exist falls back to UTF-8 — and says so.
+
+        Recording the *requested* name would make the row claim an encoding that was
+        never used, which is the same class of lie as a probe that cannot see the
+        truth and reports a default.
+        """
+        body = self.BODY.encode("utf-8")
+        assert index.add_text(raw=b"docs/odd.txt", display="docs/odd.txt",
+                              source_hash="h-odd", text=body,
+                              encoding="not-a-codec") >= 1
+        assert [h.encoding for h in index.search("comité", k=8).hits] == ["utf-8"]
+
+    def test_an_existing_index_gains_the_column_without_a_rewrite(
+        self, tmp_path: Path,
+    ) -> None:
+        """Migration path: the live index has 29M rows and is not rebuilt for a schema.
+
+        Rows written before this change read as `None` — *unknown*, not UTF-8 — which
+        is what lets the repair pass find exactly the sources that need re-indexing.
+        """
+        legacy = sqlite3.connect(str(tmp_path / "old.sqlite"))
+        legacy.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        legacy.execute(
+            "CREATE TABLE text_chunks (id INTEGER PRIMARY KEY, source BLOB NOT NULL,"
+            " display TEXT NOT NULL, source_hash TEXT NOT NULL, origin TEXT NOT NULL,"
+            " cache_task TEXT, cache_key TEXT, byte_start INTEGER NOT NULL,"
+            " byte_end INTEGER NOT NULL, derived INTEGER NOT NULL DEFAULT 0,"
+            " engine TEXT, vendored INTEGER NOT NULL DEFAULT 0)"
+        )
+        legacy.execute(
+            "INSERT INTO text_chunks (source, display, source_hash, origin, byte_start,"
+            " byte_end) VALUES (?, ?, ?, ?, ?, ?)",
+            (b"docs/old.txt", "docs/old.txt", "h", "file", 0, 10),
+        )
+        legacy.commit()
+
+        upgraded = TextIndex(legacy)
+        upgraded.ensure()
+
+        columns = {row[1] for row in legacy.execute("PRAGMA table_info(text_chunks)")}
+        assert "encoding" in columns, columns
+        row = legacy.execute("SELECT encoding FROM text_chunks").fetchone()
+        assert row[0] is None, "an old row's encoding is unknown, not utf-8"
+        legacy.close()
 
 
 class TestRandomPassages:

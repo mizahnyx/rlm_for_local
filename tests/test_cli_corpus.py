@@ -590,6 +590,101 @@ class TestCorpusSampleCommand:
         assert "no index at" in capsys.readouterr().err
 
 
+class TestReindexEncodingsCommand:
+    """`rlm corpus reindex-encodings` — the repair pass for RO19.
+
+    The forward fix (index a source with the encoding the sniffer recorded) does
+    nothing for a source indexed *before* it: those chunks carry NULL in the encoding
+    column, which is what "unknown" means here. This command is what makes the 46,735
+    files recorded as cp1252 or latin-1 searchable again — so the test builds exactly
+    that stale state by hand rather than pretending a fresh index is one.
+    """
+
+    WORD = "canción"
+    BODY = "El comité aprobó la canción de María y el niño.\n"
+
+    def _stale_index(self, corpus: Path, index_path: Path) -> bytes:
+        """A cp1252 file, classified, and indexed the way the old code did it."""
+        import sqlite3
+
+        from rlm_kernel.corpus import CorpusIndex
+
+        legacy = corpus / "papers" / "legacy.txt"
+        legacy.write_bytes(self.BODY.encode("cp1252"))
+        cli_main(["corpus", "index", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path)])
+        cli_main(["corpus", "classify", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path)])
+        # `index`/`classify` do not touch the text index — mining creates it — so the
+        # tables are made here, exactly as an old mine window left them.
+        owner = CorpusIndex(index_path)
+        try:
+            owner.text().ensure()
+        finally:
+            owner.close()
+        raw = b"papers/legacy.txt"
+        body = legacy.read_bytes()
+
+        conn = sqlite3.connect(str(index_path))
+        conn.execute(
+            "INSERT INTO text_chunks (source, display, source_hash, origin, byte_start,"
+            " byte_end, derived, vendored) VALUES (?, ?, ?, 'file', 0, ?, 0, 0)",
+            (raw, "papers/legacy.txt", "h-legacy", len(body)),
+        )
+        # The old decode: UTF-8 with replacement characters. This is the damage.
+        conn.execute("INSERT INTO text_fts (rowid, body) VALUES (?, ?)",
+                     (1, body.decode("utf-8", "replace")))
+        conn.commit()
+        stored = conn.execute(
+            "SELECT encoding FROM classification WHERE raw = ?", (raw,)
+        ).fetchone()
+        conn.close()
+        assert stored is not None and stored[0] == "cp1252", stored
+        return body
+
+    def test_a_stale_source_is_repaired_and_then_searchable(
+        self, corpus: Path, index_path: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        body = self._stale_index(corpus, index_path)
+
+        # Before: the word is not findable, because the tokens were destroyed.
+        cli_main(["corpus", "search", self.WORD, "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path)])
+        before = capsys.readouterr().out
+        assert "no matches" in before, before
+
+        rc = cli_main(["corpus", "reindex-encodings", "--corpus-root", str(corpus),
+                       "--corpus-index", str(index_path)])
+        report = capsys.readouterr().out
+        assert rc == 0
+        assert "re-indexed=1" in report, report
+
+        cli_main(["corpus", "search", self.WORD, "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path)])
+        after = capsys.readouterr().out
+        assert "legacy.txt#L" in after, after
+        # The address still names the raw bytes: cp1252 encodes the accented vowel in
+        # one byte, so a decode before chunking would have moved this offset.
+        address = after.split("legacy.txt#L", 1)[1].split()[0]
+        start, _, end = address.partition("-")
+        assert self.WORD in body[int(start):int(end)].decode("cp1252"), address
+
+    def test_a_second_run_skips_what_is_already_current(
+        self, corpus: Path, index_path: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        """Idempotent, and it does not re-read: a repair pass must be sliceable."""
+        self._stale_index(corpus, index_path)
+        cli_main(["corpus", "reindex-encodings", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path)])
+        capsys.readouterr()
+
+        cli_main(["corpus", "reindex-encodings", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path)])
+        second = capsys.readouterr().out
+        assert "re-indexed=0" in second, second
+        assert "already-current=1" in second, second
+
+
 class TestAskWithACorpus:
     def test_ask_with_only_a_corpus_uses_the_stub_context(
         self, corpus: Path, index_path: Path, monkeypatch: pytest.MonkeyPatch,

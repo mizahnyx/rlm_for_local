@@ -27,6 +27,7 @@ made the marker proof and the partial index honest).
 
 from __future__ import annotations
 
+import codecs
 import json
 import re
 import sqlite3
@@ -154,6 +155,14 @@ class Hit:
     score: float
     cache_task: str | None = None
     cache_key: str | None = None
+    encoding: str | None = None
+    """The codec the chunk's text was decoded with, or `None` when it is not recorded.
+
+    `None` means *unknown*, and that is load-bearing: sources indexed before
+    2026-09-19 were decoded as UTF-8 with `errors="replace"` whatever they held, so a
+    NULL here is exactly the marker a repair pass looks for (RO19). Reading a NULL as
+    "utf-8" would be true of most rows and a lie about the 46 735 that need fixing.
+    """
 
     @property
     def address(self) -> str:
@@ -177,7 +186,7 @@ class SearchResult:
 #: One definition on purpose: a second copy of this list is how two readers of the
 #: same table come to disagree about what a column means.
 _HIT_COLUMNS = ("id, source, display, source_hash, origin, byte_start, byte_end,"
-                " derived, engine, vendored, cache_task, cache_key")
+                " derived, engine, vendored, cache_task, cache_key, encoding")
 
 
 def _hit_from_row(row: Any, *, score: float = 0.0) -> Hit:
@@ -187,7 +196,24 @@ def _hit_from_row(row: Any, *, score: float = 0.0) -> Hit:
         source_hash=str(row[3]), byte_start=int(row[5]), byte_end=int(row[6]),
         derived=bool(row[7]), engine=row[8], vendored=bool(row[9]),
         score=score, cache_task=row[10], cache_key=row[11],
+        encoding=(str(row[12]) if len(row) > 12 and row[12] is not None else None),
     )
+
+
+def decode_text(data: bytes, encoding: str | None) -> str:
+    """Decode chunk bytes for the tokenizer and for the reader, never for an address.
+
+    The one place text becomes a string. `None` means UTF-8, which is what a source
+    with no recorded encoding gets — and `errors="replace"` is kept because a corpus
+    of 4.28M files contains bytes that are text in no encoding at all, and refusing to
+    index them would be worse than indexing them imperfectly. An encoding *name* that
+    does not exist falls back the same way; the caller records what was used, not what
+    was asked for.
+    """
+    try:
+        return data.decode(encoding or "utf-8", "replace")
+    except LookupError:
+        return data.decode("utf-8", "replace")
 
 
 class TextIndex:
@@ -211,7 +237,8 @@ class TextIndex:
                 byte_end    INTEGER NOT NULL,
                 derived     INTEGER NOT NULL DEFAULT 0,
                 engine      TEXT,
-                vendored    INTEGER NOT NULL DEFAULT 0
+                vendored    INTEGER NOT NULL DEFAULT 0,
+                encoding    TEXT
             );
             CREATE INDEX IF NOT EXISTS text_chunks_source
                 ON text_chunks(source);
@@ -222,6 +249,13 @@ class TextIndex:
             );
             """
         )
+        # Migration for an index built before RO19: `CREATE TABLE IF NOT EXISTS` above
+        # does nothing to a table that already exists, and the live index has 29M rows.
+        # ADD COLUMN is a metadata change in SQLite — no row is rewritten — and the
+        # existing rows get NULL, which means *unknown*, not utf-8.
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(text_chunks)")}
+        if "encoding" not in columns:
+            self._conn.execute("ALTER TABLE text_chunks ADD COLUMN encoding TEXT")
         self._conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
             ("textindex_version", TEXTINDEX_VERSION),
@@ -256,12 +290,21 @@ class TextIndex:
         derived: bool = False,
         engine: str | None = None,
         replace: bool = False,
+        encoding: str | None = None,
     ) -> int:
         """Index one source's text. Returns the number of chunks written.
 
         Idempotent by default: a source already present under the same origin is
         skipped, which is what makes re-running a batch free. `replace` drops the
         old chunks first (used when a derived artefact is regenerated).
+
+        `encoding` names the codec of `text`; when it is not given, a source file's
+        encoding is read from the `classification` row the sniffer already wrote
+        (`cp1252` for 46 107 text files here, `latin-1` for 628). **The bytes are
+        chunked as they are** — an address is a byte offset into the raw file, so
+        decoding before `chunk_ranges` would move every offset after the first
+        accented word and break `corpus_read(address)` for exactly the files this
+        helps. The decode happens only where bytes become tokens, in `decode_text`.
         """
         if replace:
             self.drop_source(raw, origin=origin)
@@ -270,22 +313,94 @@ class TextIndex:
         ranges = chunk_ranges(text)
         if not ranges:
             return 0
+        used = self._encoding_for(raw, origin=origin, requested=encoding)
         vendored = 1 if is_vendored(display) else 0
         cursor = self._conn.cursor()
         for start, end in ranges:
             cursor.execute(
                 "INSERT INTO text_chunks (source, display, source_hash, origin,"
                 " cache_task, cache_key, byte_start, byte_end, derived, engine,"
-                " vendored) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " vendored, encoding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (raw, display, source_hash, origin, cache_task, cache_key,
-                 start, end, 1 if derived else 0, engine, vendored),
+                 start, end, 1 if derived else 0, engine, vendored, used),
             )
             cursor.execute(
                 "INSERT INTO text_fts (rowid, body) VALUES (?, ?)",
-                (cursor.lastrowid, text[start:end].decode("utf-8", "replace")),
+                (cursor.lastrowid, decode_text(text[start:end], used)),
             )
         self._conn.commit()
         return len(ranges)
+
+    def _encoding_for(self, raw: bytes, *, origin: str, requested: str | None) -> str:
+        """Which codec this source's bytes are in, and which one was actually used.
+
+        The sniffer's answer is preferred over the caller's silence, and a *derived*
+        chunk is UTF-8 by construction — an extraction engine decodes a container and
+        returns a string, which the caller encodes as UTF-8. A name that is not a
+        codec, or a source with no classification row, resolves to UTF-8: the codec
+        that `decode_text` will actually apply, so the recorded value is never a
+        claim about a decode that did not happen.
+        """
+        candidate = requested
+        if candidate is None and origin == ORIGIN_FILE:
+            candidate = self.classification_encoding(raw)
+        candidate = candidate or "utf-8"
+        try:
+            codecs.lookup(candidate)
+        except LookupError:
+            return "utf-8"
+        return candidate
+
+    def classification_encoding(self, raw: bytes) -> str | None:
+        """The encoding the sniffer recorded for this path, or None.
+
+        `None` covers three different situations on purpose — no classification row,
+        a table this database does not have, and a file whose kind is not text — and
+        the caller treats all three the same way: UTF-8, the default the corpus is
+        overwhelmingly in.
+        """
+        try:
+            row = self._conn.execute(
+                "SELECT encoding FROM classification WHERE raw = ? LIMIT 1", (raw,)
+            ).fetchone()
+        except sqlite3.OperationalError:  # a database without the classification table
+            return None
+        if row is None or row[0] is None:
+            return None
+        return str(row[0])
+
+    def source_encoding(self, raw: bytes) -> str | None:
+        """The encoding this source's *chunks* were indexed with, or None if unknown.
+
+        The indexed counterpart of `classification_encoding`, and the only way to tell
+        a source that needs repairing from one that is already current: a row written
+        before the encoding column existed has NULL there. One indexed lookup
+        (`text_chunks_source`), so a repair pass can skip what it has already done.
+        """
+        try:
+            row = self._conn.execute(
+                "SELECT encoding FROM text_chunks WHERE source = ? AND encoding IS NOT"
+                " NULL LIMIT 1", (raw,)
+            ).fetchone()
+        except sqlite3.OperationalError:  # an index that predates the column
+            return None
+        if row is None or row[0] is None:
+            return None
+        return str(row[0])
+
+    def sources_needing_encoding_repair(self) -> list[tuple[bytes, str, str]]:
+        """`(raw, encoding, head_hash)` for every source the index decoded as UTF-8.
+
+        The population is the sniffer's: a text file whose encoding is recorded as
+        something other than UTF-8. This scans the classification table (4.28M rows, a
+        minute or so) because that is the only place the answer lives — the chunk rows
+        are exactly what cannot be trusted for this question.
+        """
+        rows = self._conn.execute(
+            "SELECT raw, encoding, head_hash FROM classification"
+            " WHERE encoding IS NOT NULL AND encoding <> 'utf-8'"
+        ).fetchall()
+        return [(row[0], str(row[1]), str(row[2])) for row in rows]
 
     def drop_source(self, raw: bytes, *, origin: str | None = None) -> int:
         """Remove a source's chunks. The FTS table is contentless, so its rows go
@@ -342,23 +457,13 @@ class TextIndex:
         if derived_only:
             clauses.append("c.derived = 1")
         sql = (
-            "SELECT c.id, c.source, c.display, c.source_hash, c.origin, c.byte_start,"
-            " c.byte_end, c.derived, c.engine, c.vendored, c.cache_task, c.cache_key,"
-            " bm25(text_fts) AS score"
+            f"SELECT {_HIT_COLUMNS}, bm25(text_fts) AS score"
             " FROM text_fts JOIN text_chunks c ON c.id = text_fts.rowid"
             f" WHERE {' AND '.join(clauses)}"
             " ORDER BY score LIMIT ?"
         )
         rows = self._conn.execute(sql, (*params, max(1, int(k)))).fetchall()
-        hits = [
-            Hit(
-                chunk_id=int(r[0]), source=str(r[2]), origin=str(r[4]),
-                source_hash=str(r[3]), byte_start=int(r[5]), byte_end=int(r[6]),
-                derived=bool(r[7]), engine=r[8], vendored=bool(r[9]),
-                score=float(r[12]), cache_task=r[10], cache_key=r[11],
-            )
-            for r in rows
-        ]
+        hits = [_hit_from_row(r[:-1], score=float(r[-1])) for r in rows]
         hidden = 0
         if not include_vendored:
             row = self._conn.execute(
@@ -402,7 +507,10 @@ class TextIndex:
             with mount.open_readonly(rel) as handle:
                 handle.seek(hit.byte_start)
                 data = handle.read(hit.byte_end - hit.byte_start)
-        return data.decode("utf-8", "replace")
+        # The same decode the tokenizer used, so what the model reads back is what the
+        # search matched — and a NULL encoding reads as UTF-8, which is what those
+        # rows were indexed with (`Hit.encoding` is where that distinction lives).
+        return decode_text(data, hit.encoding)
 
     def find_chunk(self, address: str, *, raw_source: bytes | None = None) -> Hit | None:
         """The chunk an address names, or None if it is not indexed.

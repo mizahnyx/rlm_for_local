@@ -2462,6 +2462,63 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_an_id_separated_by_spaces_is_refused_not_misread",
         ],
     ),
+    # ── The text index could not read the encodings it recorded (RO19) ────
+    (
+        "the tokenizer goes back to decoding every source as utf-8",
+        "src/rlm_kernel/textindex.py",
+        "                (cursor.lastrowid, decode_text(text[start:end], used)),",
+        "                (cursor.lastrowid,"
+        " text[start:end].decode(\"utf-8\", \"replace\")),",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestNonUtf8TextIsSearchable"
+            "::test_a_windows_latin_word_is_found_once_the_encoding_is_known",
+        ],
+    ),
+    (
+        "a chunk is recorded with the encoding that was asked for",
+        "src/rlm_kernel/textindex.py",
+        "        try:\n            codecs.lookup(candidate)\n"
+        "        except LookupError:\n            return \"utf-8\"\n        return candidate",
+        "        return candidate",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestNonUtf8TextIsSearchable"
+            "::test_an_unusable_encoding_name_is_not_recorded_as_if_it_worked",
+        ],
+    ),
+    (
+        "the read path goes back to decoding as utf-8",
+        "src/rlm_kernel/textindex.py",
+        "        return decode_text(data, hit.encoding)",
+        "        return data.decode(\"utf-8\", \"replace\")",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestNonUtf8TextIsSearchable"
+            "::test_an_address_still_names_the_raw_bytes",
+        ],
+    ),
+    (
+        "an existing index is left without the encoding column",
+        "src/rlm_kernel/textindex.py",
+        "        if \"encoding\" not in columns:\n"
+        "            self._conn.execute(\"ALTER TABLE text_chunks ADD COLUMN"
+        " encoding TEXT\")",
+        "        if False:\n"
+        "            self._conn.execute(\"ALTER TABLE text_chunks ADD COLUMN"
+        " encoding TEXT\")",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestNonUtf8TextIsSearchable"
+            "::test_an_existing_index_gains_the_column_without_a_rewrite",
+        ],
+    ),
+    (
+        "the repair pass cannot tell a stale source from a current one",
+        "src/rlm_local/cli.py",
+        "            if text_index.source_encoding(raw) is not None:",
+        "            if False:",
+        [
+            "tests/test_cli_corpus.py::TestReindexEncodingsCommand"
+            "::test_a_second_run_skips_what_is_already_current",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

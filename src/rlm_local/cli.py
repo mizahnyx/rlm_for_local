@@ -318,6 +318,26 @@ def build_parser() -> argparse.ArgumentParser:
                                 "slowly (RO11)")
     p_csample.add_argument("--cache-root", type=Path, default=None)
 
+    p_creindex = corpus_sub.add_parser(
+        "reindex-encodings",
+        help="Re-index the text files whose encoding is not UTF-8 (RO19)",
+        description=(
+            "Indexing used to decode every source as UTF-8 with replacement "
+            "characters, so words with accented vowels were unsearchable in the "
+            "46,735 files the sniffer recorded as cp1252 or latin-1. New indexing "
+            "uses the recorded encoding; this repairs the sources that were indexed "
+            "before it did. Addresses do not move: byte offsets still name the raw "
+            "file, and only the tokens change. Idempotent — a source whose chunks "
+            "already carry an encoding is skipped — so it can be run in slices with "
+            "--limit. Reads through the read-only mount; writes only the derived "
+            "index."
+        ),
+    )
+    _add_corpus_flags(p_creindex, require_root=True, require_index=True)
+    p_creindex.add_argument("--limit", type=int, default=0,
+                            help="Stop after this many sources (0 = all of them)")
+    p_creindex.add_argument("--progress-every", type=int, default=500)
+
     p_ccounters = corpus_sub.add_parser(
         "counters",
         help="Show or refresh the published coverage snapshot a search quotes",
@@ -1110,6 +1130,9 @@ def _cmd_corpus(args: argparse.Namespace) -> int:
     if sub == "sample":
         return _cmd_corpus_sample(args)
 
+    if sub == "reindex-encodings":
+        return _cmd_corpus_reindex_encodings(args)
+
     if sub == "counters":
         return _cmd_corpus_counters(args)
 
@@ -1320,6 +1343,80 @@ def _clip_passage(text: str, chars: int) -> str:
     if cap <= 0 or len(text) <= cap:
         return text
     return f"{text[:cap].rstrip()}\n[... clipped at {cap} characters ...]"
+
+
+def _cmd_corpus_reindex_encodings(args: argparse.Namespace) -> int:
+    """`rlm corpus reindex-encodings` — repair the files the old decode damaged (RO19).
+
+    A targeted pass rather than a rebuild: the text index holds 29M chunks over
+    2.88M sources and only 46,735 of those sources were indexed with the wrong
+    decode. The pass is idempotent, so a run cut short is resumed by running it
+    again, and `--limit` slices it for a window.
+    """
+    from rlm_kernel.corpus import CorpusIndex
+    from rlm_kernel.mine import MAX_INDEX_BYTES
+    from rlm_kernel.mounts import LocalTreeMount, ReadOnlyViolation
+
+    if not args.corpus_index:
+        print("Error: --corpus-index is required (env RLM_CORPUS_INDEX).",
+              file=sys.stderr)
+        return 2
+    if not Path(args.corpus_index).exists():
+        print(f"Error: no index at {args.corpus_index}.", file=sys.stderr)
+        return 2
+    if not args.corpus_root:
+        print("Error: --corpus-root is required to read the files.", file=sys.stderr)
+        return 2
+
+    index = CorpusIndex(args.corpus_index)
+    try:
+        text_index = index.text()
+        text_index.ensure()
+        try:
+            mount = LocalTreeMount(args.corpus_root)
+        except ReadOnlyViolation as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 2
+        print("Reading the classification table to find the affected sources "
+              "(one scan; ~1 min on the live index)…", flush=True)
+        todo = text_index.sources_needing_encoding_repair()
+        every = max(1, int(args.progress_every or 500))
+        limit = max(0, int(args.limit or 0))
+        done = current = failed = empty = 0
+        for position, (raw, encoding, source_hash) in enumerate(todo, 1):
+            if limit and done >= limit:
+                break
+            if text_index.source_encoding(raw) is not None:
+                # Already carries an encoding: this pass has been here, or the source
+                # was indexed after the fix. Nothing to repair, and no read performed.
+                current += 1
+                continue
+            rel = raw.decode("utf-8", "surrogateescape")
+            try:
+                with mount.open_readonly(rel, max_bytes=MAX_INDEX_BYTES) as handle:
+                    data = handle.read()
+            except (OSError, ReadOnlyViolation):
+                failed += 1
+                continue
+            written = text_index.add_text(
+                raw=raw, display=rel, source_hash=source_hash, text=data,
+                encoding=encoding, replace=True,
+            )
+            if written:
+                done += 1
+            else:
+                empty += 1
+            if position % every == 0:
+                print(f"  {position}/{len(todo)} considered: re-indexed={done} "
+                      f"already-current={current} empty={empty} failed={failed}",
+                      flush=True)
+        print(f"considered={len(todo)} re-indexed={done} already-current={current} "
+              f"empty={empty} failed={failed}")
+        print("Re-indexed sources now carry their encoding, so an accented word in "
+              "them is searchable. Verify with `rlm corpus search <word>`.")
+        return 0
+    finally:
+        index.close()
 
 
 def _cmd_corpus_classify(args: argparse.Namespace) -> int:

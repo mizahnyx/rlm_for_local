@@ -616,6 +616,37 @@ too, so a hand-written question set belongs beside the corpus
 (`~/rlm-derived/questions/mine.txt`) rather than in the repo — which is what
 `scripts/run_question_probe.py --questions` reads.
 
+### Accented words, and the encodings the corpus actually uses
+
+**A search that finds nothing for an accented word is not evidence of absence.** The
+corpus is Spanish and English, and the sniffer found **46 107 files in cp1252** and 628 in
+latin-1 among the 2 882 822 text files — legacy single-byte text from old media. Indexing
+used to decode *every* source as UTF-8 with replacement characters, so `canción` in cp1252
+was indexed as `canci` + `\ufffd` + `n` and no query could match it. Diacritic folding was
+never the problem (the tokenizer folds `canción` and `cancion` on both sides); the decode
+was, one step earlier.
+
+Indexing now decodes with the encoding the sniffer recorded, and reading a passage uses the
+same codec, so what the model reads back is what the search matched. Sources indexed before
+that change carry no encoding in the index (`NULL`, meaning *unknown*), and that is exactly
+what the repair pass looks for:
+
+```bash
+# Re-index the files whose encoding is not UTF-8. Idempotent; ~13 minutes on this corpus.
+python -m rlm_local.cli corpus reindex-encodings \
+    --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite
+#   considered=… re-indexed=… already-current=… empty=… failed=…
+# Slice it for a window, or simply re-run it after an interruption: it skips what it did.
+python -m rlm_local.cli corpus reindex-encodings \
+    --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite --limit 5000
+```
+
+**Addresses do not move.** An address is a byte offset into the raw file — cp1252 encodes
+`ó` in one byte, UTF-8 in two — so the decode happens only where bytes become *tokens* and
+where a passage is *displayed*, never before chunking. A repair that shifted offsets would
+break `corpus_read` for exactly the files it was meant to fix; the tests assert that the
+offset still names the raw bytes after the repair.
+
 ### `rlm corpus search` and the `corpus_search` helper
 
 ```bash

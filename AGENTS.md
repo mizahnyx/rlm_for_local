@@ -154,6 +154,10 @@ uv run python -m rlm_local.cli corpus sample --n 5 --seed 1234 \
     --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite
                                                     # random passages + addresses, to devise
                                                     # questions from; output is corpus text
+uv run python -m rlm_local.cli corpus reindex-encodings \
+    --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite
+                                                    # re-index the 46,735 cp1252/latin-1
+                                                    # files the old UTF-8 decode damaged
 uv run python -m rlm_local.cli corpus counters --corpus-index ~/rlm-derived/corpus.sqlite
 uv run python -m rlm_local.cli corpus counters --corpus-index ~/rlm-derived/corpus.sqlite \
     --refresh                                       # recompute the snapshot (~16 min; idle index)
