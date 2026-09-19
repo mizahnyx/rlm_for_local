@@ -632,7 +632,8 @@ that change carry no encoding in the index (`NULL`, meaning *unknown*), and that
 what the repair pass looks for:
 
 ```bash
-# Re-index the files whose encoding is not UTF-8. Idempotent; ~13 minutes on this corpus.
+# Re-index the files whose encoding is not UTF-8. Idempotent; measured at 33 minutes on
+# the live corpus (46,725 of 46,735 sources re-indexed, 7 failed on RO20 paths).
 python -m rlm_local.cli corpus reindex-encodings \
     --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite
 #   considered=… re-indexed=… already-current=… empty=… failed=…
