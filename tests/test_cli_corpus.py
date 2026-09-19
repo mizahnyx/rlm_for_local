@@ -684,6 +684,53 @@ class TestReindexEncodingsCommand:
         assert "re-indexed=0" in second, second
         assert "already-current=1" in second, second
 
+    def test_one_unstorable_source_does_not_end_the_pass(
+        self, corpus: Path, index_path: Path, capsys: pytest.CaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The first live run died six seconds in, on a path whose name is not UTF-8.
+
+        A surrogate cannot be stored as SQLite TEXT, so that source raises — and a
+        pass that stops there repairs nothing at all. The failure is counted by
+        exception type, and the other sources are still repaired.
+        """
+        from rlm_kernel.textindex import TextIndex
+
+        first = corpus / "papers" / "legacy.txt"
+        first.write_bytes(self.BODY.encode("cp1252"))
+        second = corpus / "papers" / "other.txt"
+        second.write_bytes(("Otra canción distinta.\n").encode("cp1252"))
+        cli_main(["corpus", "index", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path)])
+        cli_main(["corpus", "classify", "--corpus-root", str(corpus),
+                  "--corpus-index", str(index_path)])
+
+        from rlm_kernel.corpus import CorpusIndex
+
+        owner = CorpusIndex(index_path)
+        try:
+            owner.text().ensure()
+        finally:
+            owner.close()
+
+        original = TextIndex.add_text
+        exploding = (b"papers/legacy.txt",)
+
+        def sometimes(self, **kwargs):  # type: ignore[no-untyped-def]
+            if kwargs.get("raw") in exploding:
+                raise UnicodeEncodeError("utf-8", "", 0, 1, "surrogates not allowed")
+            return original(self, **kwargs)
+
+        monkeypatch.setattr(TextIndex, "add_text", sometimes)
+        rc = cli_main(["corpus", "reindex-encodings", "--corpus-root", str(corpus),
+                       "--corpus-index", str(index_path)])
+        report = capsys.readouterr().out
+
+        assert rc == 0, report
+        assert "re-indexed=1" in report, report
+        assert "failed=1" in report, report
+        assert "UnicodeEncodeError=1" in report, report
+
 
 class TestAskWithACorpus:
     def test_ask_with_only_a_corpus_uses_the_stub_context(

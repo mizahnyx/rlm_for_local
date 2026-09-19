@@ -1383,6 +1383,7 @@ def _cmd_corpus_reindex_encodings(args: argparse.Namespace) -> int:
         every = max(1, int(args.progress_every or 500))
         limit = max(0, int(args.limit or 0))
         done = current = failed = empty = 0
+        causes: dict[str, int] = {}
         for position, (raw, encoding, source_hash) in enumerate(todo, 1):
             if limit and done >= limit:
                 break
@@ -1395,13 +1396,18 @@ def _cmd_corpus_reindex_encodings(args: argparse.Namespace) -> int:
             try:
                 with mount.open_readonly(rel, max_bytes=MAX_INDEX_BYTES) as handle:
                     data = handle.read()
-            except (OSError, ReadOnlyViolation):
+                written = text_index.add_text(
+                    raw=raw, display=rel, source_hash=source_hash, text=data,
+                    encoding=encoding, replace=True,
+                )
+            except Exception as e:
+                # One unreadable or unstorable source must not end a 46,735-file pass.
+                # The first live run of this command died six seconds in, on a path
+                # whose name is not UTF-8: a surrogate cannot be stored as SQLite TEXT
+                # (roadmap RO20). The exception *type* is counted; the file never is.
                 failed += 1
+                causes[type(e).__name__] = causes.get(type(e).__name__, 0) + 1
                 continue
-            written = text_index.add_text(
-                raw=raw, display=rel, source_hash=source_hash, text=data,
-                encoding=encoding, replace=True,
-            )
             if written:
                 done += 1
             else:
@@ -1412,6 +1418,9 @@ def _cmd_corpus_reindex_encodings(args: argparse.Namespace) -> int:
                       flush=True)
         print(f"considered={len(todo)} re-indexed={done} already-current={current} "
               f"empty={empty} failed={failed}")
+        if causes:
+            print("failures by cause: " + ", ".join(
+                f"{name}={count}" for name, count in sorted(causes.items())))
         print("Re-indexed sources now carry their encoding, so an accented word in "
               "them is searchable. Verify with `rlm corpus search <word>`.")
         return 0

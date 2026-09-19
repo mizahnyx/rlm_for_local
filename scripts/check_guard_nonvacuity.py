@@ -2519,6 +2519,18 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_second_run_skips_what_is_already_current",
         ],
     ),
+    (
+        "one unstorable source ends the whole repair pass",
+        "src/rlm_local/cli.py",
+        "                failed += 1\n"
+        "                causes[type(e).__name__] = causes.get(type(e).__name__, 0) + 1\n"
+        "                continue",
+        "                raise",
+        [
+            "tests/test_cli_corpus.py::TestReindexEncodingsCommand"
+            "::test_one_unstorable_source_does_not_end_the_pass",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
