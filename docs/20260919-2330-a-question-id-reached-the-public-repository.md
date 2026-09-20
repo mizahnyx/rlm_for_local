@@ -99,6 +99,21 @@ The lesson doubles: the rule needed a check, **and** the check needed a list —
 leak had been in plain sight for five days because nothing was looking for that kind of
 name either.
 
+**Two corrections the rename itself needed**, both worth keeping because both were silent:
+
+1. **The replacement must be the same length.** The first attempt used a nine-character word
+   for a seven-character one and ten corpus-fixture tests failed: those fixtures build
+   addresses and byte offsets out of their own text (`#L0-21`, "the passage behind it"), so a
+   longer word moves every offset after it. A same-length word took the suite from 10 failures
+   back to 0 **without touching an assertion** — which is the evidence that length was the
+   cause rather than a guess about it.
+2. **The check matches case-insensitively, and the first pass did not.** Ten occurrences of the
+   lowercase form survived in fixture queries: `X` and `x` are the same leak to a
+   case-insensitive scan and were not the same string to a byte replacement.
+
+Both are the same shape as the incident itself: a mechanical fix that looks complete because
+the thing it checks is narrower than the thing that matters.
+
 ## The lesson, stated plainly
 
 

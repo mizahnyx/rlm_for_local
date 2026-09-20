@@ -76,6 +76,42 @@ transcript, the citation audit and the passage behind every cited or served addr
 first set's pages are in `~/rlm-derived/traces/questions/`, and the single after-repair run
 in `~/rlm-derived/traces/questions-after-repair/`.
 
+## The owner's reading of the pages (added 2026-09-20 00:20)
+
+Four findings, quoted as given:
+
+1. *"Question 1 that was answered correctly on isolation once, became unanswered in the last
+   run due to the model stumbling with the `corpus_search` non existing `limit` parameter
+   twice and trying to loop over the characters of the string returned by `corpus_find`."*
+   Both halves are in the trajectory: question 1 logged **exactly two `stderr` guardrails**,
+   which is what a call with a keyword the wrapper does not take produces
+   (`_harness_corpus_search(query, k=8, …)` raises Python's own `TypeError`), and its only
+   helper call was `corpus_find` — so no word search happened at all. **Two harness defects,
+   both mine to fix**: the wrappers raise a traceback where a teaching message belongs, and
+   `corpus_find` returns a string where its sibling `corpus_search` returns a list, which is
+   the same shape bug that record already documents for search.
+2. *"Question 2 is right, demonstrating correct reasoning and proper citation, despite the
+   `corpus_search` parameter stumbling."*
+3. *"Question 3 has the right answer, and it demonstrated dealing with Python syntax errors
+   with extra turns until getting the expression right."* The trajectory shows the mechanism
+   working as designed: `syntax_retry`, which costs neither a turn nor the error budget
+   (hence `turn_start` exceeding `turns_used`).
+4. *"In Question 4, the model totally drifted away from the original question, searching for
+   unrelated words in the corpus, thus getting no valid answer."*
+
+**Finding 4 corrects a reading in this record.** The section above says retrieval quality is
+the binding constraint (four of six questions served only `none`/`weak` bands). For question 4
+the cause is upstream of the index: *the model chose the wrong words*. Both are true — a wrong
+query produces a weak band — but they are different problems with different fixes, and only
+the owner could see it, because it required reading what the model asked for rather than what
+the search returned. So `OD2` (embeddings) is a live decision, not yet a verdict, and the model's
+query construction deserves its own measure before anything is built for recall.
+
+The two harness defects finding 1 names — the `corpus_search` keyword that raises a traceback
+instead of teaching, and `corpus_find` returning a string where its sibling returns a list —
+are queued as the next fixes. Both are cheap, both are testable without a model, and both
+cost turns in every run that hits them.
+
 ## What this says to do next
 
 The two levers the columns point at, in order:
