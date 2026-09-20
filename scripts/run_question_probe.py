@@ -54,6 +54,7 @@ from rlm_local.question_probe import (  # noqa: E402
     parse_questions,
     render_line,
     run_question,
+    select_questions,
     write_question_set,
 )
 
@@ -79,7 +80,9 @@ def main() -> int:
     ap.add_argument("--cell-timeout", type=float, default=60.0)
     ap.add_argument("--cell-timeout-hard", type=float, default=600.0)
     ap.add_argument("--only", default=None,
-                    help="Run only the question whose id contains this substring")
+                    help="Run only the questions whose id contains this substring, in "
+                         "the set selected by --questions (the built-in aggregate set "
+                         "unless you name your file)")
     args = ap.parse_args()
 
     if args.example is not None:
@@ -100,10 +103,13 @@ def main() -> int:
         questions = [Question(id=name, question=text)
                      for name, text in DEFAULT_QUESTIONS]
         source = "built-in (aggregate questions only)"
-    if args.only:
-        questions = [q for q in questions if args.only.lower() in q.id.lower()]
+    try:
+        questions = select_questions(questions, args.only, source=source)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
     if not questions:
-        print("No questions to run.", file=sys.stderr)
+        print(f"No questions to run: {source} is empty.", file=sys.stderr)
         return 2
 
     cfg = load_config(args.profile, max_turns=args.max_turns,

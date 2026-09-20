@@ -74,6 +74,35 @@ class QuestionRun:
     error: str | None = None
 
 
+def select_questions(
+    questions: list[Question], only: str | None, *, source: str,
+) -> list[Question]:
+    """The subset `--only` asks for, or a refusal that says what the set holds.
+
+    `--only` matching nothing is nearly always a *missing* `--questions` rather than a
+    typo: the built-in set is three questions about aggregates, so an operator who has
+    written their own set and forgotten the flag gets an empty result that looks like a
+    broken tool. (Measured 2026-09-19: the first attempt to re-run one of the owner's
+    questions did exactly that and printed `No questions to run.`)
+
+    So the refusal names the set it searched and, when the set is a file, the ids that
+    file holds. Those ids are the operator's own labels, printed on the machine that
+    holds the corpus, which is where they already live — and the alternative, a message
+    saying only "nothing matched", sends them looking for a bug in the filter.
+    """
+    if not only:
+        return list(questions)
+    wanted = only.lower()
+    matched = [q for q in questions if wanted in q.id.lower()]
+    if matched:
+        return matched
+    available = ", ".join(q.id for q in questions) or "(the set is empty)"
+    raise ValueError(
+        f"no question id in {source} matches {only!r}. Ids in this set: {available}. "
+        "If your own set is a file, pass it with --questions PATH."
+    )
+
+
 def _slug(name: str) -> str:
     """A file-name-safe version of an id, so a question can name its trajectory."""
     cleaned = "".join(

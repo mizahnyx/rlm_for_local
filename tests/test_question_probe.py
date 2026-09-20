@@ -112,6 +112,45 @@ class TestParsingAQuestionSet:
         assert parse_questions("# nothing here\n") == []
 
 
+class TestSelectingQuestions:
+    """`--only` must say what it searched, not just that it found nothing.
+
+    Measured 2026-09-19: the first attempt to re-run one of the owner's questions
+    without `--questions` printed `No questions to run.` and looked like a broken
+    filter. The set it had searched — the three built-in aggregate questions — was
+    never mentioned.
+    """
+
+    def test_a_filter_that_matches_nothing_names_what_the_set_holds(self) -> None:
+        from rlm_local.question_probe import select_questions
+
+        questions = [Question(id="how-many-entries", question="How many?")]
+        with pytest.raises(ValueError) as raised:
+            select_questions(questions, "froilan", source="the built-in set")
+        message = str(raised.value)
+        assert "froilan" in message
+        assert "the built-in set" in message, message
+        assert "how-many-entries" in message, "it must say what the set does hold"
+        assert "--questions" in message, "it must name the likely omission"
+
+    def test_a_filter_selects_every_matching_id_case_insensitively(self) -> None:
+        from rlm_local.question_probe import select_questions
+
+        questions = [Question(id="Sergio-Romero", question="a"),
+                     Question(id="elena-osornio", question="b"),
+                     Question(id="q3", question="c")]
+        assert [q.id for q in select_questions(questions, "ROMERO",
+                                               source="s")] == ["Sergio-Romero"]
+        assert [q.id for q in select_questions(questions, "o", source="s")] == [
+            "Sergio-Romero", "elena-osornio"]
+
+    def test_no_filter_runs_the_whole_set(self) -> None:
+        from rlm_local.question_probe import select_questions
+
+        questions = [Question(id="a", question="?"), Question(id="b", question="?")]
+        assert select_questions(questions, None, source="s") == questions
+
+
 class TestWhatTheProbePrints:
     def test_the_line_carries_the_run_and_not_the_answer(self, tmp_path: Path) -> None:
         """The guard that keeps corpus text out of the terminal that reads the probe.

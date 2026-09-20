@@ -2462,6 +2462,16 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_an_id_separated_by_spaces_is_refused_not_misread",
         ],
     ),
+    (
+        "a filter that matches nothing says nothing about the set again",
+        "src/rlm_local/question_probe.py",
+        "    if matched:\n        return matched\n    available",
+        "    if matched:\n        return matched\n    return []\n    available",
+        [
+            "tests/test_question_probe.py::TestSelectingQuestions"
+            "::test_a_filter_that_matches_nothing_names_what_the_set_holds",
+        ],
+    ),
     # ── The text index could not read the encodings it recorded (RO19) ────
     (
         "the tokenizer goes back to decoding every source as utf-8",

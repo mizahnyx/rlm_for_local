@@ -940,12 +940,17 @@ Two rules earn their place because breaking either one loses evidence quietly:
   message naming the fix, rather than being read as a question and filed under an
   automatic id, where the mistake would surface only as a trajectory called `q7`.
 
+`--only SUBSTRING` runs a subset — and it filters **the set `--questions` selected**, which
+is the three built-in aggregate questions unless you name your file. A filter that matches
+nothing says so *and* lists the ids the set actually holds, because the alternative (a bare
+"nothing to run") looks like a broken filter: measured 2026-09-19, the first attempt to
+re-run one of the owner's questions omitted `--questions` and got exactly that.
+
 **It prints aggregates and nothing else**: one line per question — turns, timeouts,
 extensions, helper calls, citations, refusals, wall clock — never an answer, a passage
 or an address. Those stay in the trajectories beside the corpus, and the same
 `render_summary` line powers `rlm trace summary`, so the operator reads one vocabulary
 everywhere. Read the pages a human can audit with:
-
 ```bash
 rlm trace render ~/rlm-derived/questions --out-dir ~/rlm-derived/traces \
     --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite
