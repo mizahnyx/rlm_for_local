@@ -99,7 +99,16 @@ exist, written down in one place so they stop being re-derived per session.
      provider), not in the repository (it is public), not in a commit message.
    - **A record that needs names stays on the laptop.** The repository gets the
      aggregate summary and a pointer to the local record; the full record lives
-     beside the data.
+     beside the data. **A question id is one of those names** — an id like
+     `<person>-<place>` is derived from the prose the harness read, so it belongs in
+     `~/rlm-derived/`, never in a document, a test, or a commit message. This is
+     checked, not intended: `python scripts/check_privacy.py --tokens
+     ~/rlm-derived/private-tokens.txt` (add `--history` to scan commit messages),
+     where the *list* stays beside the corpus and the failure message names a file,
+     a line and a position rather than the identifier. Measured 2026-09-19: a
+     question id reached this public repository in a record, a test and a commit
+     message because the rule had nothing checking it —
+     `docs/20260919-2330-a-question-id-reached-the-public-repository.md`.
    - **Artifacts are locked down after use**: `chmod 600` the census TSVs, and
      decide deliberately whether to keep the walk (it contains every path in the
      backup) or delete it once the aggregates are computed. Keeping it saves a

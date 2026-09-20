@@ -126,9 +126,9 @@ class TestSelectingQuestions:
 
         questions = [Question(id="how-many-entries", question="How many?")]
         with pytest.raises(ValueError) as raised:
-            select_questions(questions, "froilan", source="the built-in set")
+            select_questions(questions, "no-such-topic", source="the built-in set")
         message = str(raised.value)
-        assert "froilan" in message
+        assert "no-such-topic" in message
         assert "the built-in set" in message, message
         assert "how-many-entries" in message, "it must say what the set does hold"
         assert "--questions" in message, "it must name the likely omission"
@@ -136,13 +136,15 @@ class TestSelectingQuestions:
     def test_a_filter_selects_every_matching_id_case_insensitively(self) -> None:
         from rlm_local.question_probe import select_questions
 
-        questions = [Question(id="Sergio-Romero", question="a"),
-                     Question(id="elena-osornio", question="b"),
+        # Ids here are invented on purpose: a test that used a real question's id
+        # would put a corpus-derived name in a public repository (AGENTS.md §1.9).
+        questions = [Question(id="Gamma-Topic", question="a"),
+                     Question(id="delta-topic", question="b"),
                      Question(id="q3", question="c")]
-        assert [q.id for q in select_questions(questions, "ROMERO",
-                                               source="s")] == ["Sergio-Romero"]
-        assert [q.id for q in select_questions(questions, "o", source="s")] == [
-            "Sergio-Romero", "elena-osornio"]
+        assert [q.id for q in select_questions(questions, "GAMMA",
+                                               source="s")] == ["Gamma-Topic"]
+        assert [q.id for q in select_questions(questions, "topic", source="s")] == [
+            "Gamma-Topic", "delta-topic"]
 
     def test_no_filter_runs_the_whole_set(self) -> None:
         from rlm_local.question_probe import select_questions

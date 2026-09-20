@@ -2483,6 +2483,16 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         ],
     ),
     (
+        "the privacy check silently finds nothing",
+        "scripts/check_privacy.py",
+        "            if token.lower() not in lowered:\n                continue",
+        "            if True:\n                continue",
+        [
+            "tests/test_check_privacy.py::TestFindingAToken"
+            "::test_a_planted_token_in_the_tree_is_found",
+        ],
+    ),
+    (
         "a run that never asked the corpus reports turn zero",
         "src/rlm_local/traceview.py",
         "        return min(turns) if turns else None",

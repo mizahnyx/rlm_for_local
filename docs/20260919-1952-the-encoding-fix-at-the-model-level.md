@@ -5,11 +5,18 @@
 Windows-Latin files — is now verified fixed twice over: in the index
 (`docs/20260919-1708-the-encoding-repair-measured.md`) and here, in what a model does with
 it.
+**Redacted 2026-09-19 23:05**: this document originally named the owner's question by its
+id. A question id is an identifier derived from the corpus — a name out of the prose the
+harness read — so putting it in a public repository breaks `AGENTS.md` §1.9. The id is
+replaced by "question 1", and `scripts/check_privacy.py` now fails the build if a token
+from the local list reappears. The redaction, and the fact that the pushed history still
+contains it, are recorded in `docs/20260919-2305-a-question-id-reached-the-public-repository.md`.
+
 **Supersedes nothing.** It is the model-side half of the RO19 fix.
 
 ## The runs
 
-The owner's question 1 (`froilan-esquinca`) of the first question set, re-run on the
+The owner's question 1 of the first question set, re-run on the
 repaired index. Same model (`Qwen3.5-4B-Abliterated`), same profile (`laptop`), same
 question, same corpus — **but not the same limits**, and that matters for reading it:
 
@@ -57,15 +64,15 @@ original question about question 1.
   citation is genuine (it was served, and it answers the question) but the run did not
   submit it voluntarily within its six turns.
 - **Nothing here says the answer is *right*.** Whether the cited passage actually answers
-  the owner's question is exactly the judgement the pages exist for: the page is
-  `~/rlm-derived/traces/questions-after-repair/20260919-1909-froilan-esquinca.md`, and the
+  the owner's question is exactly the judgement the pages exist for: the page is in
+  `~/rlm-derived/traces/questions-after-repair/`, named after the question's id, and the
   passage behind the cited address is on it.
 - One structural thing is unchanged: the first helper call still comes on turn 4, so the
   orientation cost the owner identified is untouched by this fix.
 
 ## A tool defect this run exposed, fixed in the same commit
 
-The first attempt to re-run this question was given as `--only froilan-esquinca` without
+The first attempt to re-run this question was given as `--only <the question's id>` without
 `--questions`, and printed `No questions to run.` — `--only` filters *the set that
 `--questions` selected*, which is the three built-in aggregate questions unless a file is
 named. Nothing in that message said so.
@@ -73,7 +80,7 @@ named. Nothing in that message said so.
 `select_questions` now refuses with the set it searched and the ids that set holds:
 
 ```
-Error: no question id in built-in (aggregate questions only) matches 'froilan-esquinca'.
+Error: no question id in built-in (aggregate questions only) matches '<the id you asked for>'.
 Ids in this set: how-many-entries, how-much-is-indexed, what-kinds-of-material.
 If your own set is a file, pass it with --questions PATH.
 ```
