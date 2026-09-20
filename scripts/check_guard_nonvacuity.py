@@ -2472,6 +2472,26 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_filter_that_matches_nothing_names_what_the_set_holds",
         ],
     ),
+    (
+        "the orientation metric reports the last helper call instead of the first",
+        "src/rlm_local/traceview.py",
+        "        return min(turns) if turns else None",
+        "        return max(turns) if turns else None",
+        [
+            "tests/test_traceview.py::TestTheOrientationCost"
+            "::test_the_first_helper_call_is_what_is_reported",
+        ],
+    ),
+    (
+        "a run that never asked the corpus reports turn zero",
+        "src/rlm_local/traceview.py",
+        "        return min(turns) if turns else None",
+        "        return min(turns) if turns else 0",
+        [
+            "tests/test_traceview.py::TestTheOrientationCost"
+            "::test_a_run_that_never_asked_says_none_rather_than_zero",
+        ],
+    ),
     # ── The text index could not read the encodings it recorded (RO19) ────
     (
         "the tokenizer goes back to decoding every source as utf-8",

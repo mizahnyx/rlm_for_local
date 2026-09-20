@@ -413,6 +413,56 @@ def test_the_summary_carries_no_question_no_address_and_no_quote(
     assert "Cuicani sang it first" not in summary
 
 
+class TestTheOrientationCost:
+    """How many turns pass before the run asks the corpus anything (owner, 2026-09-19).
+
+    The owner read the first real question set and reported the model wasting turns
+    "realising that the search has to be done in the corpus"; measured afterwards, the
+    first helper call landed on turn 3, 3, 3, 4, 4 and 6 of a six-turn budget. A metric
+    that is not on the summary line is a metric nobody improves, so it is rendered —
+    and it must be the *first* call, not any call, or it measures nothing.
+    """
+
+    def _run(self, tmp_path: Path, helper_turns: list[int]) -> object:
+        from rlm_local.traceview import read_trajectory
+
+        events = [{"event": "start", "timestamp": T0, "query": "q", "context_len": 0,
+                   "config": {}}]
+        for turn in helper_turns:
+            events.append(_served(turn, "cuicani", ("notes/song.txt#L0-21", "strong")))
+        events.append({"event": "end", "timestamp": T0 + 5, "elapsed_s": 5.0,
+                       "final_answer": "done", "turns_used": 6, "subcalls_used": 0,
+                       "forced": True})
+        return read_trajectory(_write_trajectory(tmp_path / "orient.jsonl", events))
+
+    def test_the_first_helper_call_is_what_is_reported(self, tmp_path: Path) -> None:
+        from rlm_local.traceview import render_summary
+
+        run = self._run(tmp_path, [4, 5, 6])
+        assert run.first_helper_turn == 4
+        assert "first_helper_turn=4" in render_summary(run)
+
+    def test_a_run_that_never_asked_says_none_rather_than_zero(
+        self, tmp_path: Path,
+    ) -> None:
+        """`0` would read as "the first turn", which is the opposite of the truth."""
+        from rlm_local.traceview import render_summary
+
+        run = self._run(tmp_path, [])
+        assert run.first_helper_turn is None
+        assert "first_helper_turn=none" in render_summary(run)
+
+    def test_a_helper_call_with_no_turn_is_unknown_not_first(
+        self, tmp_path: Path,
+    ) -> None:
+        """Turn 0 is what the harness writes when it has no turn in hand."""
+        from rlm_local.traceview import render_summary
+
+        run = self._run(tmp_path, [0, 5])
+        assert run.first_helper_turn == 5
+        assert "first_helper_turn=5" in render_summary(run)
+
+
 def test_the_index_lists_every_run(tmp_path: Path, simple_trajectory: Path) -> None:
     from rlm_local.traceview import render_traces
 

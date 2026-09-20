@@ -879,6 +879,13 @@ Two things to know before reading a budget event:
   timeout usually costs two cells, and why a cluster of `limit=soft activity=0` events can
   be the *previous* cell's work rather than the model spinning — `block=` in the event
   says which cell each one belongs to.
+- **`first_helper_turn=` is on every summary line**, and it is the metric for the other
+  waste the owner found: how many turns pass before the run asks the corpus anything.
+  `first_helper_turn=4` means three turns went by without a helper call, out of a budget of
+  six; `none` means the run never called one (for a corpus run that is a forced answer, not
+  a clean one). Measured on the first real question set: 3, 3, 3, 4, 4, 6 — two to five
+  turns of orientation. Raise it by making the model's first move a corpus call, not by
+  raising the budget.
 
 **A run whose cells died on the budget is not evidence about the answer.** Raise the
 budget and re-run before judging the model — and note the host state, because the

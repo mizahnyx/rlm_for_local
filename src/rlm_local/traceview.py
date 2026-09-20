@@ -233,6 +233,26 @@ class RunTrace:
     def stem(self) -> str:
         return self.path.stem
 
+    @property
+    def first_helper_turn(self) -> int | None:
+        """The turn in which this run first asked a corpus helper for anything.
+
+        The owner's finding (2026-09-19), read off the first real question set: *"the
+        model wastes turns realising that the search has to be done in the corpus"* —
+        measured at 2 to 5 turns of a 5–6 turn budget before the corpus is touched. A
+        metric nobody renders is a metric nobody improves, so it is on every summary
+        line: `first_helper_turn=4` means the run spent three turns without asking the
+        corpus anything.
+
+        `None` means no helper call was recorded at all — which for a corpus run is a
+        fact about a forced answer rather than a clean one, because a submission from a
+        run that called nothing is refused. A call recorded on turn 0 is treated the
+        same way: turn 0 is what the harness writes when it has no turn in hand, so it
+        is *unknown* rather than first.
+        """
+        turns = [call.turn for call in self.served if call.turn > 0]
+        return min(turns) if turns else None
+
     def guardrail_count(self, name: str) -> int:
         return sum(1 for _, guardrail, _ in self.guardrails if guardrail == name)
 
@@ -698,6 +718,8 @@ def render_summary(run: RunTrace) -> str:
         f"{run.path.name}: turns={run.turns_used if run.turns_used is not None else '?'}"
         f"/{run.max_turns if run.max_turns is not None else '?'}"
         f" forced={run.forced} elapsed={elapsed}"
+        f" first_helper_turn="
+        f"{run.first_helper_turn if run.first_helper_turn is not None else 'none'}"
         f" answers={run.guardrail_count('corpus_citation')}"
         f" cited_answering={len(audit.cited_answering)}"
         f" cited_non_answering={len(audit.cited_non_answering)}"
