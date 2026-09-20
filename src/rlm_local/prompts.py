@@ -141,6 +141,14 @@ def build_system_prompt(prompt_vars: dict) -> str:
 CORPUS_SECTION_HEADER = "The corpus (read-only)"
 CORPUS_SECTION_LINES = (
     "- A large read-only file tree is available: {root}.",
+    "- **Two return shapes, and they are not interchangeable.** An *enumeration*"
+    " — corpus_search and corpus_find, and corpus_list — returns a LIST:"
+    " `len(hits)`, `hits[0]` and iteration work, and iterating one gives hits rather"
+    " than characters. Every other helper (corpus_stat, corpus_read, corpus_count,"
+    " corpus_coverage) returns one block of TEXT. If a helper is called with a"
+    " parameter it does not take, the answer is a message naming the parameters it"
+    " does take — read it and call again, in the same cell if you can; it costs no"
+    " turn.",
     "- corpus_search(query, k=8) — search the WORDS inside the corpus's files and"
     " documents, and the only helper that reaches text rather than names. It"
     " returns a LIST of hits: use len(hits), hits[0], or iterate. Each element is"
@@ -167,12 +175,13 @@ CORPUS_SECTION_LINES = (
     "- corpus_coverage() — one line saying how much of the corpus is indexed. Call"
     " it before concluding that something is absent.",
     "- corpus_find(query, limit=20, kind=None, under=\"\") — search paths by name."
-    " It also searches inside archives that have been listed, and reports those"
-    " hits as `container!member`.",
-    "- corpus_list(rel=\"\", limit=50) — one directory level (not the subtree).",
-    "- corpus_stat(rel) — kind, size and mtime of one path.",
-    "- corpus_read(rel, max_bytes=20000) — read one file, bounded. Long files are"
-    " truncated and say so.",
+    " It returns a LIST of matching paths. It also searches inside archives that"
+    " have been listed, and reports those hits as `container!member`.",
+    "- corpus_list(rel=\"\", limit=50) — a LIST of entries, one directory level (not"
+    " the subtree).",
+    "- corpus_stat(rel) — kind, size and mtime of one path, as text.",
+    "- corpus_read(rel, max_bytes=20000) — read one file, bounded, as text. Long"
+    " files are truncated and say so.",
     "- corpus_count(kind=None, under=\"\") — counts and byte totals without"
     " listing anything.",
     "- Never walk the corpus from a cell, and never build a list of every path:"

@@ -276,6 +276,15 @@ WORKER_CORPUS_NOT_FOUND = "Error: no such path in the corpus: {rel}"
 WORKER_CORPUS_READ_FAILED = "Error: corpus read failed: {rel}"
 WORKER_CORPUS_COUNT_FAILED = "Error: corpus count failed"
 WORKER_CORPUS_SEARCH_FAILED = "Error: corpus text search failed"
+# A call with a keyword the helper does not take used to raise Python's own TypeError
+# into the cell's stderr, where a small model can do nothing with it. Measured
+# 2026-09-20 on the second question set: question 1 spent two of its six turns on
+# `corpus_search(..., limit=5)` — the helper takes `k=` — and the traceback named the
+# internal wrapper, not the helper the model had called.
+WORKER_CORPUS_BAD_ARGUMENTS = (
+    "Error: {helper}() does not take those arguments ({error}). It takes: {takes}. "
+    "Nothing was run; call it again with the parameters above."
+)
 
 # ---------------------------------------------------------------------------
 # Corpus runs (RO4)
@@ -303,5 +312,6 @@ WORKER_MESSAGES: dict[str, str] = {
     "corpus_read_failed": WORKER_CORPUS_READ_FAILED,
     "corpus_count_failed": WORKER_CORPUS_COUNT_FAILED,
     "corpus_search_failed": WORKER_CORPUS_SEARCH_FAILED,
+    "corpus_bad_arguments": WORKER_CORPUS_BAD_ARGUMENTS,
 }
 

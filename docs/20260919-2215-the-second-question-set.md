@@ -110,7 +110,11 @@ query construction deserves its own measure before anything is built for recall.
 The two harness defects finding 1 names — the `corpus_search` keyword that raises a traceback
 instead of teaching, and `corpus_find` returning a string where its sibling returns a list —
 are queued as the next fixes. Both are cheap, both are testable without a model, and both
-cost turns in every run that hits them.
+cost turns in every run that hits them. **Landed 2026-09-20**: the enumeration verbs
+(`corpus_search`, `corpus_find`, `corpus_list`) all return a list, and a call with a parameter
+a helper does not take comes back as a tool result naming the parameters that exist
+(`_as_hits` and `_teaching` in the worker, `WORKER_CORPUS_BAD_ARGUMENTS` in `templates.py`),
+with three mutation entries red and the two shapes now stated in the system prompt.
 
 ## What this says to do next
 

@@ -366,33 +366,72 @@ def _harness_propose(kind, name, body, rationale=""):
 # RO4: corpus access. The worker asks the harness; it never opens a corpus file
 # itself, so the read-only mount, the containment check and the byte caps all
 # live in one process that a cell cannot reach around.
+#
+# Two properties are the model's contract, and both were learned from a live run:
+# an *enumeration* verb returns a list (`len(hits)`, `hits[0]`, iteration), and a
+# call with a keyword the helper does not take is answered with the parameters it
+# does take, as the tool result, instead of raising into the cell's stderr.
+def _as_hits(result, fallback):
+    # The bridge formats find/list as one multi-line string; the model gets a list,
+    # because that is the shape corpus_search taught it to reach for (2026-09-20:
+    # it looped over the characters of the string instead of the hits).
+    if isinstance(result, list):
+        return result
+    text = str(result if result is not None else fallback).strip()
+    if not text:
+        return [fallback]
+    return [line for line in text.splitlines() if line.strip()]
+
+def _teaching(helper, takes, as_list=False):
+    # A cell that mistypes a parameter should lose one tool call, not a turn: the
+    # traceback a raw TypeError produces tells a small model nothing it can act on.
+    # `takes` is the signature, quoted from the definition below, so the message and
+    # the code cannot drift apart into two different promises.
+    def decorate(function):
+        def wrapper(*args, **kwargs):
+            try:
+                return function(*args, **kwargs)
+            except TypeError as error:
+                message = _MSG['corpus_bad_arguments'].format(
+                    helper=helper, takes=takes, error=error)
+                return [message] if as_list else message
+        wrapper.__name__ = helper
+        return wrapper
+    return decorate
+
+@_teaching("corpus_find", "query, limit=20, kind=None, under=''", as_list=True)
 def _harness_corpus_find(query, limit=20, kind=None, under=""):
     _send({"cmd": "corpus_find", "query": query, "limit": limit, "kind": kind,
            "under": under, "cell_id": _cell_id})
     resp = _recv()
-    return resp.get('result', _MSG['corpus_no_matches'])
+    return _as_hits(resp.get('result'), _MSG['corpus_no_matches'])
 
+@_teaching("corpus_list", "rel='', limit=50", as_list=True)
 def _harness_corpus_list(rel="", limit=50):
     _send({"cmd": "corpus_list", "rel": rel, "limit": limit, "cell_id": _cell_id})
     resp = _recv()
-    return resp.get('result', _MSG['corpus_no_entries'])
+    return _as_hits(resp.get('result'), _MSG['corpus_no_entries'])
 
+@_teaching("corpus_stat", "rel")
 def _harness_corpus_stat(rel):
     _send({"cmd": "corpus_stat", "rel": rel, "cell_id": _cell_id})
     resp = _recv()
     return resp.get('result', _MSG['corpus_not_found'].format(rel=rel))
 
+@_teaching("corpus_read", "rel, max_bytes=20000")
 def _harness_corpus_read(rel, max_bytes=20000):
     _send({"cmd": "corpus_read", "rel": rel, "max_bytes": max_bytes,
            "cell_id": _cell_id})
     resp = _recv()
     return resp.get('result', _MSG['corpus_read_failed'].format(rel=rel))
 
+@_teaching("corpus_count", "kind=None, under=''")
 def _harness_corpus_count(kind=None, under=""):
     _send({"cmd": "corpus_count", "kind": kind, "under": under, "cell_id": _cell_id})
     resp = _recv()
     return resp.get('result', _MSG['corpus_count_failed'])
 
+@_teaching("corpus_search", "query, k=8, include_vendored=False", as_list=True)
 def _harness_corpus_search(query, k=8, include_vendored=False):
     # Returns a LIST of hit strings, not one blob. The first live run had the model
     # write len(hits), hits[0] and hits[:3] against a returned string, and get the
@@ -405,6 +444,7 @@ def _harness_corpus_search(query, k=8, include_vendored=False):
         return result
     return [_MSG['corpus_search_failed']]
 
+@_teaching("corpus_coverage", "no arguments")
 def _harness_corpus_coverage():
     _send({"cmd": "corpus_coverage", "cell_id": _cell_id})
     resp = _recv()

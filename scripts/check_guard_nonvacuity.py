@@ -2492,6 +2492,37 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_planted_token_in_the_tree_is_found",
         ],
     ),
+    # ── The corpus helpers' shape and their answer to a mistyped parameter ──
+    (
+        "corpus_find goes back to returning one blob",
+        "src/rlm_local/repl.py",
+        "    return _as_hits(resp.get('result'), _MSG['corpus_no_matches'])",
+        "    return resp.get('result', _MSG['corpus_no_matches'])",
+        [
+            "tests/test_corpus_repl.py::TestCorpusHelpersInALiveCell"
+            "::test_corpus_find_returns_a_list_the_model_can_iterate",
+        ],
+    ),
+    (
+        "a mistyped parameter raises into the cell again",
+        "src/rlm_local/repl.py",
+        "            except TypeError as error:",
+        "            except ZeroDivisionError as error:",
+        [
+            "tests/test_corpus_repl.py::TestCorpusHelpersInALiveCell"
+            "::test_a_wrong_keyword_is_answered_instead_of_raising",
+        ],
+    ),
+    (
+        "the teaching message stops naming the parameters",
+        "src/rlm_local/repl.py",
+        "                    helper=helper, takes=takes, error=error)",
+        "                    helper=helper, takes=\"the usual ones\", error=error)",
+        [
+            "tests/test_corpus_repl.py::TestCorpusHelpersInALiveCell"
+            "::test_a_wrong_keyword_is_answered_instead_of_raising",
+        ],
+    ),
     (
         "a run that never asked the corpus reports turn zero",
         "src/rlm_local/traceview.py",

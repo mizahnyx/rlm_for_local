@@ -693,6 +693,18 @@ hard way — the first version returned one formatted string, and the first live
 saw the model write `len(hits)` and `hits[0]` against it, get a character count and
 the letter `A`, then report "malformed data" and give up.
 
+**The shape is a contract for every enumeration verb, and a mistyped parameter is
+answered rather than raised.** `corpus_search`, `corpus_find` and `corpus_list` all
+return a **list** — one element per hit, path or entry — and `corpus_stat`,
+`corpus_read`, `corpus_count` and `corpus_coverage` return one block of text. A call
+with a parameter the helper does not take (`corpus_search('x', limit=5)`, where it
+takes `k=`) comes back as a tool result naming the parameters that exist, so the model
+retries in the same cell. Both halves were paid for by live runs: a model that had
+learned "hits are a list" from `corpus_search` iterated the *string* `corpus_find`
+returned, character by character, and another run spent two of its six turns on a
+traceback that named the internal wrapper instead of the parameter
+(`docs/20260919-2215-the-second-question-set.md`).
+
 **A corpus run that never calls a helper is nudged, not accepted.** The parent
 process serves every `corpus_*` request, so it *knows* whether the model looked:
 `rlm ask --corpus-index …` refuses the first submission from a run with zero

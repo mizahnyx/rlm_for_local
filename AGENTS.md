@@ -198,7 +198,14 @@ uv run python -m rlm_local.cli corpus digest --corpus-root /srv/corpus \
 them** — see `docs/20260914-2135-corpus-live-runs-and-the-unsearched-nudge.md`.
 That guard is evidence-based (the parent serves every helper request), so a live
 run whose answer looks ungrounded is checked against `corpus_calls`, not against
-the model's prose.
+the model's prose. **The helpers' shapes are part of that contract**: the
+enumeration verbs (`corpus_search`, `corpus_find`, `corpus_list`) return a *list*
+and the rest return text, and a call with a parameter a helper does not take is
+answered with the parameters it does take rather than a traceback — a worker-side
+`_teaching` wrapper and `_as_hits`, with `WORKER_CORPUS_BAD_ARGUMENTS` in
+`templates.py`. Both were learned the hard way: a model iterated a returned string
+character by character, and another spent two of six turns on `limit=` where the
+helper takes `k=` (`docs/20260919-2215-the-second-question-set.md`).
 
 The same run's answer must cite its evidence — a final `Citations:` line of
 addresses — and an answer that cites nothing and names no coverage is **refused

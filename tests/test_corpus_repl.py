@@ -559,6 +559,63 @@ class TestCorpusHelpersInALiveCell:
             repl.shutdown()
         assert snapshot() == before
 
+    def test_corpus_find_returns_a_list_the_model_can_iterate(
+        self, corpus: Path, bridge,
+    ) -> None:
+        """`len(hits)`, `hits[0]` and iteration must work: the shape *is* the contract.
+
+        The owner's finding (2026-09-20), reading the second question set: the model
+        "tried to loop over the characters of the string returned by `corpus_find`" —
+        because `corpus_search` had taught it that a list of hits is a list. One verb
+        returning a list and its sibling returning a blob is a trap, not a contract,
+        and the model paid a whole turn for it.
+        """
+        repl = REPLSandbox(cell_timeout=30.0)
+        repl._corpus_bridge = bridge
+        repl.start("no context needed", MockSubcallMgr())
+        try:
+            shape = repl.execute(
+                "hits = corpus_find('budget')\n"
+                "print(type(hits).__name__, len(hits))\n"
+                "print(hits[0][:20])"
+            )
+            assert shape.stderr == "", shape.stderr
+            assert shape.stdout.splitlines()[0].startswith("list "), shape.stdout
+            assert "notes/budget.md" in shape.stdout
+            # A miss is still a list: one element carrying the reason, as a search does.
+            empty = repl.execute("print(type(corpus_find('nothing-like-this')).__name__)")
+            assert empty.stdout.strip() == "list", empty.stdout
+        finally:
+            repl.shutdown()
+
+    def test_a_wrong_keyword_is_answered_instead_of_raising(
+        self, corpus: Path, bridge,
+    ) -> None:
+        """A mistyped parameter costs one tool result, not a turn and a traceback.
+
+        Measured on the second question set: question 1 logged exactly two `stderr`
+        guardrails, which is what `corpus_search('…', limit=5)` produces when the
+        wrapper takes `k=`. The traceback told the model nothing it could use; the
+        message must name the helper and the parameters it does take.
+        """
+        repl = REPLSandbox(cell_timeout=30.0)
+        repl._corpus_bridge = bridge
+        repl.start("no context needed", MockSubcallMgr())
+        try:
+            result = repl.execute("print(corpus_search('budget', limit=5))")
+            assert result.stderr == "", result.stderr
+            assert "corpus_search" in result.stdout, result.stdout
+            assert "k=" in result.stdout, result.stdout
+            assert "Traceback" not in result.stdout
+            # …and for a verb whose arguments are entirely different, so the message
+            # is built from the signature rather than hard-coded for one case.
+            other = repl.execute("print(corpus_count(limit=5))")
+            assert other.stderr == "", other.stderr
+            assert "corpus_count" in other.stdout, other.stdout
+            assert "Traceback" not in other.stdout
+        finally:
+            repl.shutdown()
+
     def test_a_cell_without_a_corpus_gets_an_honest_answer(self) -> None:
         repl = REPLSandbox(cell_timeout=30.0)
         repl.start("no context", MockSubcallMgr())
