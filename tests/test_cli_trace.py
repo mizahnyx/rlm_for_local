@@ -29,7 +29,7 @@ def _trajectory(path: Path, *, with_served: bool = True) -> Path:
         {"event": "turn_start", "timestamp": T0 + 1, "turn": 1, "max_turns": 1},
         {"event": "root_message", "timestamp": T0 + 2, "turn": 1,
          "role": "assistant",
-         "content": "```repl\nprint(corpus_search('cuicani'))\n```"},
+         "content": "```repl\nprint(corpus_search('vantrel'))\n```"},
         {"event": "repl_result", "timestamp": T0 + 3, "turn": 1,
          "stdout": f"{ADDRESS}  [raw, covers 1/1 (strong)]", "stderr": "",
          "final_answer": None, "warnings": []},
@@ -40,7 +40,7 @@ def _trajectory(path: Path, *, with_served: bool = True) -> Path:
     if with_served:
         events.insert(3, {
             "event": "corpus_served", "timestamp": T0 + 2, "turn": 1,
-            "verb": "corpus_search", "query": "cuicani",
+            "verb": "corpus_search", "query": "vantrel",
             "addresses": [{"address": ADDRESS, "band": "strong"}],
             "chars": 120, "ok": True,
         })

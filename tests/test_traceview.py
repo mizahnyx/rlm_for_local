@@ -69,14 +69,14 @@ def simple_trajectory(tmp_path: Path) -> Path:
         {"event": "turn_start", "timestamp": T0 + 1, "turn": 1, "max_turns": 2},
         {"event": "root_message", "timestamp": T0 + 1, "turn": 1, "role": "user",
          "content": TURN_HEADER.format(turn=1, max_turns=2) + "\nprobe"},
-        _served(1, "cuicani", ("notes/song.txt#L0-21", "strong"),
+        _served(1, "vantrel", ("notes/song.txt#L0-21", "strong"),
                 ("notes/kettle.txt#L0-21", "none")),
         {"event": "guardrail", "timestamp": T0 + 2, "turn": 1,
          "guardrail": "corpus_search_quality",
          "detail": "served strong=1 none=1 chars=120"},
         {"event": "root_message", "timestamp": T0 + 3, "turn": 1,
          "role": "assistant",
-         "content": "```repl\nhits = corpus_search('cuicani')\nprint(hits)\n```"},
+         "content": "```repl\nhits = corpus_search('vantrel')\nprint(hits)\n```"},
         {"event": "repl_result", "timestamp": T0 + 4, "turn": 1,
          "stdout": "notes/song.txt#L0-21  [raw, covers 1/1 (strong)]",
          "stderr": "", "final_answer": None, "warnings": [],
@@ -158,7 +158,7 @@ def test_the_run_reads_turn_by_turn_with_what_it_ran(
     run = read_trajectory(simple_trajectory)
     assert [t.index for t in run.turns] == [1, 2]
     first = run.turns[0]
-    assert "corpus_search('cuicani')" in (first.model_said or "")
+    assert "corpus_search('vantrel')" in (first.model_said or "")
     assert first.cells[0]["stdout"].startswith("notes/song.txt#L0-21")
     # The one harness intervention in this run is the uncited refusal, and it is
     # attached to the turn it happened in.
@@ -171,7 +171,7 @@ def test_the_run_reads_turn_by_turn_with_what_it_ran(
     page = render_run_markdown(run)
     assert "# Trace" in page
     assert "Who is Vantrel?" in page
-    assert "corpus_search('cuicani')" in page
+    assert "corpus_search('vantrel')" in page
     assert "covers 1/1" in page
     assert "corpus_uncited" in page
     assert "answers_with_address=True" in page
@@ -274,7 +274,7 @@ def test_a_citation_no_helper_served_is_a_fabrication_when_serves_were_recorded(
         {"event": "start", "timestamp": T0, "query": "q", "context_len": 0,
          "config": {}},
         {"event": "turn_start", "timestamp": T0, "turn": 1, "max_turns": 1},
-        _served(1, "cuicani", ("notes/song.txt#L0-21", "strong")),
+        _served(1, "vantrel", ("notes/song.txt#L0-21", "strong")),
         {"event": "end", "timestamp": T0 + 2, "elapsed_s": 2.0,
          "final_answer": "See notes/kettle.txt#L4000-4100", "turns_used": 1,
          "subcalls_used": 0, "forced": True},
@@ -305,7 +305,7 @@ class TestHowBadlyTheModelCorruptsAddresses:
             {"event": "start", "timestamp": T0, "query": "q", "context_len": 0,
              "config": {}},
             {"event": "turn_start", "timestamp": T0, "turn": 1, "max_turns": 1},
-            _served(1, "cuicani", ("notes/song.txt#L0-21", "strong"),
+            _served(1, "vantrel", ("notes/song.txt#L0-21", "strong"),
                     ("notes/kettle.txt#L0-21", "none")),
             {"event": "end", "timestamp": T0 + 2, "elapsed_s": 2.0,
              "final_answer": f"See {cited}", "turns_used": 1,
@@ -364,7 +364,7 @@ class TestHowBadlyTheModelCorruptsAddresses:
             {"event": "start", "timestamp": T0, "query": "q", "context_len": 0,
              "config": {}},
             {"event": "turn_start", "timestamp": T0, "turn": 1, "max_turns": 1},
-            _served(1, "cuicani", ("notes/song.txt#L0-21", "strong"),
+            _served(1, "vantrel", ("notes/song.txt#L0-21", "strong"),
                     ("notes/song.txt#L0-22", "partial")),
             {"event": "end", "timestamp": T0 + 2, "elapsed_s": 2.0,
              "final_answer": "See notes/song.txt#L0-23", "turns_used": 1,
@@ -429,7 +429,7 @@ class TestTheOrientationCost:
         events = [{"event": "start", "timestamp": T0, "query": "q", "context_len": 0,
                    "config": {}}]
         for turn in helper_turns:
-            events.append(_served(turn, "cuicani", ("notes/song.txt#L0-21", "strong")))
+            events.append(_served(turn, "vantrel", ("notes/song.txt#L0-21", "strong")))
         events.append({"event": "end", "timestamp": T0 + 5, "elapsed_s": 5.0,
                        "final_answer": "done", "turns_used": 6, "subcalls_used": 0,
                        "forced": True})
