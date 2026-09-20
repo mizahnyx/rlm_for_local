@@ -380,7 +380,7 @@ class TestCorpusSearchCommand:
     def mined(self, corpus: Path, index_path: Path,
               capsys: pytest.CaptureFixture) -> Path:
         (corpus / "papers" / "needle.md").write_text(
-            "The engine was Godot, and Cuicani sang.\n", encoding="utf-8"
+            "The engine was Godot, and Vantrel sang.\n", encoding="utf-8"
         )
         cli_main(["corpus", "index", "--corpus-root", str(corpus),
                   "--corpus-index", str(index_path)])
@@ -508,7 +508,7 @@ class TestCorpusSampleCommand:
     def sampled(self, corpus: Path, index_path: Path,
                 capsys: pytest.CaptureFixture) -> Path:
         (corpus / "papers" / "long.md").write_text(
-            ("The engine was Godot, and Cuicani sang the archive awake. " * 14) + "\n",
+            ("The engine was Godot, and Vantrel sang the archive awake. " * 14) + "\n",
             encoding="utf-8",
         )
         cli_main(["corpus", "index", "--corpus-root", str(corpus),
@@ -537,7 +537,7 @@ class TestCorpusSampleCommand:
         assert addresses, out
         assert all("#L" in address for address in addresses)
         # The text really is the text: this command's job is to show it.
-        assert "Cuicani" in out
+        assert "Vantrel" in out
 
     def test_the_same_seed_hands_back_the_same_passages(
         self, corpus: Path, sampled: Path, capsys: pytest.CaptureFixture,

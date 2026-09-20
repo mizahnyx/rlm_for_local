@@ -607,7 +607,7 @@ class TestCorpusHelpersInALiveCell:
         text_index = bridge.index.text()
         text_index.ensure()
         (corpus / "notes" / "song.txt").write_text(
-            "Cuicani sang it first.\n", encoding="utf-8"
+            "Vantrel sang it first.\n", encoding="utf-8"
         )
         text_index.add_text(
             raw=b"notes/song.txt", display="notes/song.txt", source_hash="h",
@@ -618,12 +618,12 @@ class TestCorpusHelpersInALiveCell:
         repl.start("no context", MockSubcallMgr())
         try:
             result = repl.execute(
-                "hits = corpus_search('Cuicani')\n"
+                "hits = corpus_search('Vantrel')\n"
                 "print(len(hits))\n"
                 "print(corpus_read(hits[0]))\n"
             )
             assert "notes/song.txt#L" in result.stdout
-            assert "Cuicani sang it first." in result.stdout
+            assert "Vantrel sang it first." in result.stdout
         finally:
             repl.shutdown()
 

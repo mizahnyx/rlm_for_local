@@ -68,7 +68,39 @@ My recommendation is the first two together if the names matter, and fix-forward
 not — but that judgement needs to know whose names they are, which is exactly the information
 that does not belong in this session.
 
+## Resolution (added 2026-09-20 00:05, after the owner's decision)
+
+The check was run against the tree and the history with a local token list, and it
+separated two problems:
+
+- **The question ids are gone from the tree** (the redaction and the test change above),
+  and remain in exactly two lines of one commit message — history, which the owner has
+  chosen to leave as it is.
+- **A second, older leak was hiding behind them**: the fixture word this project has used
+  since 2026-09-14 as invented test data appears **80 times in the working tree** (eight
+  test files, the operator guide and one dated record) and in four older commit messages,
+  in one case beside another name with match counts that look like real search output.
+
+**The owner's two decisions:**
+
+1. **Rename the fixture word everywhere** to an invented one (`Vantrel`), safe whether
+   or not it came from the corpus. Done byte-for-byte — 80 occurrences across those files,
+   reading and writing *bytes* so that no line ending, non-ASCII character or BOM could
+   change (the project's own trap list forbids PowerShell text substitution on source
+   files for exactly that reason).
+2. **Fix forward only.** No history rewrite, no force-push: the identifiers stay readable
+   in the public history, the tree is clean, and the guard prevents recurrence.
+
+So a `scripts/check_privacy.py --tokens … --history` run still exits 1 — by decision, not
+by oversight. The tree-only run is the one that belongs in the working loop; the history
+run is for the owner to repeat when they want to see what is still out there.
+
+The lesson doubles: the rule needed a check, **and** the check needed a list — the older
+leak had been in plain sight for five days because nothing was looking for that kind of
+name either.
+
 ## The lesson, stated plainly
+
 
 The rule was already written down and it was not enough. `AGENTS.md` §1.9 said "identifiers
 may not travel — not in this conversation, not in the repository, not in a commit message" —

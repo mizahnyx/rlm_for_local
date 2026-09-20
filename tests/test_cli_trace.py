@@ -19,7 +19,7 @@ T0 = 1_760_000_000.0
 
 QUESTION = "Who ratified the Zxqvarn protocol?"
 ADDRESS = "notes/song.txt#L0-21"
-PASSAGE = "Cuicani sang it first"
+PASSAGE = "Vantrel sang it first"
 
 
 def _trajectory(path: Path, *, with_served: bool = True) -> Path:

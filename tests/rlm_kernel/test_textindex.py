@@ -95,7 +95,7 @@ def corpus(tmp_path: Path) -> Path:
     root = tmp_path / "corpus"
     (root / "docs").mkdir(parents=True)
     (root / "docs" / "story.txt").write_text(
-        "Cuicani was a singer.\n\nThe demo used the Godot engine.\n", encoding="utf-8"
+        "Vantrel was a singer.\n\nThe demo used the Godot engine.\n", encoding="utf-8"
     )
     (root / "docs" / "acentos.txt").write_text(
         "La canción de María y el niño.\n", encoding="utf-8"
@@ -192,10 +192,10 @@ class TestSearchAndRead:
         self, index: TextIndex, corpus: Path,
     ) -> None:
         self._indexed(index, corpus)
-        hit = index.search("Cuicani").hits[0]
+        hit = index.search("Vantrel").hits[0]
         assert hit.address.startswith("docs/story.txt#L0-")
         text = index.read(hit, mount=LocalTreeMount(corpus))
-        assert "Cuicani" in text
+        assert "Vantrel" in text
         # The address is the chunk: the same bytes, byte for byte.
         data = (corpus / hit.source).read_bytes()
         assert data[hit.byte_start:hit.byte_end] == text.encode("utf-8", "replace")
@@ -209,8 +209,8 @@ class TestSearchAndRead:
 
     def test_all_terms_must_appear(self, index: TextIndex, corpus: Path) -> None:
         self._indexed(index, corpus)
-        assert index.search("Cuicani singer").hits
-        assert index.search("Cuicani helicopter").hits == []
+        assert index.search("Vantrel singer").hits
+        assert index.search("Vantrel helicopter").hits == []
 
     def test_fts_syntax_cannot_be_injected(
         self, index: TextIndex, corpus: Path,
@@ -229,7 +229,7 @@ class TestSearchAndRead:
         self, index: TextIndex, corpus: Path,
     ) -> None:
         self._indexed(index, corpus)
-        hit = index.search("Cuicani").hits[0]
+        hit = index.search("Vantrel").hits[0]
         from rlm_kernel.mounts import ReadOnlyViolation
 
         with pytest.raises(ReadOnlyViolation):

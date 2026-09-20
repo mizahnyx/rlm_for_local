@@ -23,7 +23,7 @@ def corpus(tmp_path: Path) -> Path:
     root = tmp_path / "corpus"
     (root / "notes").mkdir(parents=True)
     (root / "notes" / "story.txt").write_text(
-        "Cuicani sang at the festival in 1998.\n", encoding="utf-8"
+        "Vantrel sang at the festival in 1998.\n", encoding="utf-8"
     )
     return root
 
@@ -64,7 +64,7 @@ class TestAddressParsing:
         return hits[0].split()[0]
 
     def test_an_address_round_trips_through_the_index(self, wired: CorpusBridge) -> None:
-        address = self._first_address(wired, "Cuicani")
+        address = self._first_address(wired, "Vantrel")
         assert "#L" in address
         chunk = wired.index.text().find_chunk(address)
         assert chunk is not None
@@ -72,16 +72,16 @@ class TestAddressParsing:
 
     def test_a_file_address_reads_verbatim(self, wired: CorpusBridge) -> None:
         """The exact string a search printed is what corpus_read is given."""
-        address = self._first_address(wired, "Cuicani")
+        address = self._first_address(wired, "Vantrel")
         out = wired.handle_read(address)
-        assert "Cuicani sang at the festival" in out
+        assert "Vantrel sang at the festival" in out
         assert address in out, "the read must say which address it answered"
 
     def test_a_whole_hit_line_also_reads(self, wired: CorpusBridge) -> None:
         """A model hands back the whole element, labels and snippet included."""
-        hit = wired.handle_search("Cuicani")[0]
+        hit = wired.handle_search("Vantrel")[0]
         out = wired.handle_read(hit)
-        assert "Cuicani sang at the festival" in out
+        assert "Vantrel sang at the festival" in out
 
     def test_a_derived_address_reads_from_the_cache(self, wired: CorpusBridge) -> None:
         address = self._first_address(wired, "Godot")
@@ -97,7 +97,7 @@ class TestAddressParsing:
         assert "no such path" in out
 
     def test_a_plain_path_still_reads(self, wired: CorpusBridge) -> None:
-        assert "Cuicani" in wired.handle_read("notes/story.txt")
+        assert "Vantrel" in wired.handle_read("notes/story.txt")
 
     def test_a_missing_file_still_reports_not_found(self, wired: CorpusBridge) -> None:
         assert "no such path" in wired.handle_read("notes/absent.txt")

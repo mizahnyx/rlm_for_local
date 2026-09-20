@@ -651,9 +651,9 @@ offset still names the raw bytes after the repair.
 ### `rlm corpus search` and the `corpus_search` helper
 
 ```bash
-rlm corpus search "Cuicani" --corpus-root /srv/corpus \
+rlm corpus search "Vantrel" --corpus-root /srv/corpus \
     --corpus-index ~/rlm-derived/corpus.sqlite
-rlm corpus search "Cuicani" --corpus-index ~/rlm-derived/corpus.sqlite --count-only
+rlm corpus search "Vantrel" --corpus-index ~/rlm-derived/corpus.sqlite --count-only
 rlm corpus search x --corpus-index ~/rlm-derived/corpus.sqlite --coverage
 ```
 

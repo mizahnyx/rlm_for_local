@@ -398,7 +398,7 @@ def corpus_bridge(tmp_path: Path):
     # `notes/song.txt#L0-21`, which is the address the tests below cite — and
     # under the served-citation rule a fixture whose served address and cited
     # address differ would test the refusal instead of the acceptance.
-    (root / "notes" / "song.txt").write_text("Cuicani sang it first",
+    (root / "notes" / "song.txt").write_text("Vantrel sang it first",
                                              encoding="utf-8")
     # A second searchable file holding none of the graded question's words: the
     # fixture for the absence-band rule, which needs a *real* hit that the search
@@ -461,7 +461,7 @@ class TestCorpusUnsearchedNudge:
             # measuring the other guard.
             "\n".join([
                 "```repl",
-                "hits = corpus_search('Cuicani')",
+                "hits = corpus_search('Vantrel')",
                 "print(hits)",
                 "answer['content'] = 'found it\\nCitations: notes/song.txt#L0-21'",
                 "answer['ready'] = True",
@@ -471,7 +471,7 @@ class TestCorpusUnsearchedNudge:
         loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
                         corpus_bridge=corpus_bridge)
         try:
-            answer = loop.run("Who is Cuicani?", "stub context")
+            answer = loop.run("Who is Vantrel?", "stub context")
         finally:
             loop.shutdown()
 
@@ -495,7 +495,7 @@ class TestCorpusUnsearchedNudge:
         ])
         searched = "\n".join([
             "```repl",
-            "hits = corpus_search('Cuicani')",
+            "hits = corpus_search('Vantrel')",
             "print(hits)",
             "answer['content'] = ('the searched answer\\nCitations: '"
             " + hits[0].split()[0])",
@@ -506,7 +506,7 @@ class TestCorpusUnsearchedNudge:
         loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
                         corpus_bridge=corpus_bridge)
         try:
-            answer = loop.run("Who is Cuicani?", "stub context")
+            answer = loop.run("Who is Vantrel?", "stub context")
         finally:
             loop.shutdown()
         assert answer.startswith("the searched answer")
@@ -623,7 +623,7 @@ class TestCorpusCitationTelemetry:
         backend = StubBackend(responses=[
             "\n".join([
                 "```repl",
-                "print(corpus_search('Cuicani'))",
+                "print(corpus_search('Vantrel'))",
                 "answer['content'] = ('It is mentioned without quoting anything.\\n"
                 "[coverage: 999 sources indexed (0.0% of the text files)]')",
                 "answer['ready'] = True",
@@ -634,7 +634,7 @@ class TestCorpusCitationTelemetry:
         loop = RootLoop(tiny_cfg, backend, logger=logger, kernel_bridge=None,
                         corpus_bridge=corpus_bridge)
         try:
-            loop.run("Who is Cuicani?", "stub context")
+            loop.run("Who is Vantrel?", "stub context")
         finally:
             loop.shutdown()
 
@@ -651,7 +651,7 @@ class TestCorpusCitationTelemetry:
         backend = StubBackend(responses=[
             "\n".join([
                 "```repl",
-                "print(corpus_search('Cuicani'))",
+                "print(corpus_search('Vantrel'))",
                 "answer['content'] = ('It is in the notes.\\n"
                 "Citations: notes/song.txt#L0-21')",
                 "answer['ready'] = True",
@@ -662,7 +662,7 @@ class TestCorpusCitationTelemetry:
         loop = RootLoop(tiny_cfg, backend, logger=logger, kernel_bridge=None,
                         corpus_bridge=corpus_bridge)
         try:
-            answer = loop.run("Who is Cuicani?", "stub context")
+            answer = loop.run("Who is Vantrel?", "stub context")
         finally:
             loop.shutdown()
 
@@ -728,7 +728,7 @@ class TestCorpusCitationGuard:
         """A cell that searches first (so the unsearched guard stays quiet)."""
         return "\n".join([
             "```repl",
-            "print(corpus_search('Cuicani'))",
+            "print(corpus_search('Vantrel'))",
             content,
             "```",
         ])
@@ -748,7 +748,7 @@ class TestCorpusCitationGuard:
         loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
                         corpus_bridge=corpus_bridge)
         try:
-            answer = loop.run("Who is Cuicani?", "stub context")
+            answer = loop.run("Who is Vantrel?", "stub context")
         finally:
             loop.shutdown()
 
@@ -773,7 +773,7 @@ class TestCorpusCitationGuard:
         loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
                         corpus_bridge=corpus_bridge)
         try:
-            answer = loop.run("Who is Cuicani?", "stub context")
+            answer = loop.run("Who is Vantrel?", "stub context")
         finally:
             loop.shutdown()
 
@@ -803,7 +803,7 @@ class TestCorpusCitationGuard:
         loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
                         corpus_bridge=corpus_bridge)
         try:
-            answer = loop.run("Who is Cuicani?", "stub context")
+            answer = loop.run("Who is Vantrel?", "stub context")
         finally:
             loop.shutdown()
 
@@ -826,7 +826,7 @@ class TestCorpusCitationGuard:
         loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
                         corpus_bridge=corpus_bridge)
         try:
-            answer = loop.run("Who is Cuicani?", "stub context")
+            answer = loop.run("Who is Vantrel?", "stub context")
         finally:
             loop.shutdown()
 
@@ -898,7 +898,7 @@ class TestForcedFinalizationCarriesProvenance:
         loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
                         corpus_bridge=corpus_bridge)
         try:
-            loop.run("Who is Cuicani?", "stub context")
+            loop.run("Who is Vantrel?", "stub context")
         finally:
             loop.shutdown()
 
@@ -951,14 +951,14 @@ class TestCorpusLastTurnNudge:
     ) -> None:
         from rlm_local.templates import NUDGE_CORPUS_LAST_TURN
 
-        probing = "```repl\nprint(corpus_search('Cuicani'))\n```"
+        probing = "```repl\nprint(corpus_search('Vantrel'))\n```"
         answering = ("```repl\nanswer['content'] = 'Not in the corpus.\\n"
                      "Citations: notes/song.txt#L0-21'\nanswer['ready'] = True\n```")
         cfg, backend = self._stuck_until([probing, probing, answering])
         loop = RootLoop(cfg, backend, kernel_bridge=None,
                         corpus_bridge=corpus_bridge)
         try:
-            answer = loop.run("Who is Cuicani?", "stub context")
+            answer = loop.run("Who is Vantrel?", "stub context")
         finally:
             loop.shutdown()
 
@@ -981,14 +981,14 @@ class TestCorpusLastTurnNudge:
         from rlm_local.templates import NUDGE_CORPUS_LAST_TURN
 
         cfg, backend = self._stuck_until([
-            "```repl\nprint(corpus_search('Cuicani'))\n"
+            "```repl\nprint(corpus_search('Vantrel'))\n"
             "answer['content'] = 'early.\\nCitations: notes/song.txt#L0-21'\n"
             "answer['ready'] = True\n```",
         ])
         loop = RootLoop(cfg, backend, kernel_bridge=None,
                         corpus_bridge=corpus_bridge)
         try:
-            answer = loop.run("Who is Cuicani?", "stub context")
+            answer = loop.run("Who is Vantrel?", "stub context")
         finally:
             loop.shutdown()
 
@@ -1027,7 +1027,7 @@ class TestCorpusLastTurnNudge:
         loop = RootLoop(cfg, backend, kernel_bridge=None,
                         corpus_bridge=corpus_bridge)
         try:
-            loop.run("Who is Cuicani?", "stub context")
+            loop.run("Who is Vantrel?", "stub context")
         finally:
             loop.shutdown()
 
@@ -1049,7 +1049,7 @@ class TestCitationsMustBeServed:
     #: Cites the address the search actually returned — the realistic path.
     _CITE_WHAT_WAS_SERVED = "\n".join([
         "```repl",
-        "hits = corpus_search('Cuicani')",
+        "hits = corpus_search('Vantrel')",
         "print(hits)",
         "answer['content'] = 'It is in the notes.\\nCitations: ' + hits[0].split()[0]",
         "answer['ready'] = True",
@@ -1059,7 +1059,7 @@ class TestCitationsMustBeServed:
     #: Cites a well-formed address that no helper ever returned.
     _CITE_AN_INVENTION = "\n".join([
         "```repl",
-        "print(corpus_search('Cuicani'))",
+        "print(corpus_search('Vantrel'))",
         "answer['content'] = ('It is in the notes.\\n"
         "Citations: notes/song.txt#L4000-4100')",
         "answer['ready'] = True",
@@ -1078,7 +1078,7 @@ class TestCitationsMustBeServed:
         loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
                         corpus_bridge=corpus_bridge)
         try:
-            answer = loop.run("Who is Cuicani?", "stub context")
+            answer = loop.run("Who is Vantrel?", "stub context")
         finally:
             loop.shutdown()
 
@@ -1096,7 +1096,7 @@ class TestCitationsMustBeServed:
         loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
                         corpus_bridge=corpus_bridge)
         try:
-            answer = loop.run("Who is Cuicani?", "stub context")
+            answer = loop.run("Who is Vantrel?", "stub context")
         finally:
             loop.shutdown()
 
@@ -1113,7 +1113,7 @@ class TestCitationsMustBeServed:
 
         invented_with_coverage = "\n".join([
             "```repl",
-            "print(corpus_search('Cuicani'))",
+            "print(corpus_search('Vantrel'))",
             "answer['content'] = ('The corpus does not contain this.\\n"
             "[coverage: 999 sources indexed (0.0% of the text files)]\\n"
             "Citations: notes/song.txt#L4000-4100')",
@@ -1127,7 +1127,7 @@ class TestCitationsMustBeServed:
         loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
                         corpus_bridge=corpus_bridge)
         try:
-            answer = loop.run("Who is Cuicani?", "stub context")
+            answer = loop.run("Who is Vantrel?", "stub context")
         finally:
             loop.shutdown()
 
@@ -1149,7 +1149,7 @@ class TestCitationsMustBeServed:
         loop = RootLoop(tiny_cfg, backend, logger=logger, kernel_bridge=None,
                         corpus_bridge=corpus_bridge)
         try:
-            loop.run("Who is Cuicani?", "stub context")
+            loop.run("Who is Vantrel?", "stub context")
         finally:
             loop.shutdown()
 
@@ -1266,7 +1266,7 @@ class TestAnAnswerMustRestOnAnAnsweringMatch:
         two_citations = "\n".join([
             "```repl",
             "near_misses = corpus_search('kettle')",
-            "hits = corpus_search('Cuicani')",
+            "hits = corpus_search('Vantrel')",
             "answer['content'] = ('It is in the notes.\\nCitations: ' + "
             "hits[0].split()[0] + '; ' + near_misses[0].split()[0])",
             "answer['ready'] = True",
@@ -1276,7 +1276,7 @@ class TestAnAnswerMustRestOnAnAnsweringMatch:
         loop = RootLoop(tiny_cfg, backend, kernel_bridge=None,
                         corpus_bridge=corpus_bridge)
         try:
-            answer = loop.run("Who is Cuicani?", "stub context")
+            answer = loop.run("Who is Vantrel?", "stub context")
         finally:
             loop.shutdown()
 
@@ -1377,14 +1377,14 @@ class TestARunRecordsWhatEachHelperServed:
 
         logger = TrajectoryLogger(tmp_path / "traj.jsonl")
         backend = StubBackend(responses=[
-            "```repl\nprint(corpus_search('Cuicani'))\n```",
+            "```repl\nprint(corpus_search('Vantrel'))\n```",
             "```repl\nanswer['content'] = ('in the notes\\n"
             "Citations: notes/song.txt#L0-21')\nanswer['ready'] = True\n```",
         ])
         loop = RootLoop(tiny_cfg, backend, logger=logger, kernel_bridge=None,
                         corpus_bridge=corpus_bridge)
         try:
-            loop.run("Who is Cuicani?", "stub context")
+            loop.run("Who is Vantrel?", "stub context")
         finally:
             loop.shutdown()
 
@@ -1393,7 +1393,7 @@ class TestARunRecordsWhatEachHelperServed:
         served = [e for e in events if e.get("event") == "corpus_served"]
         searches = [e for e in served if e["verb"] == "corpus_search"]
         assert searches, "a search must leave a structured record of what it served"
-        assert searches[0]["query"] == "Cuicani"
+        assert searches[0]["query"] == "Vantrel"
         assert searches[0]["ok"] is True
         assert [a["address"] for a in searches[0]["addresses"]] == ["notes/song.txt#L0-21"]
         assert searches[0]["addresses"][0]["band"] == "strong"
@@ -1421,14 +1421,14 @@ class TestATraceOfARealRunIsAuditable:
 
         logger = TrajectoryLogger(tmp_path / "traj.jsonl")
         backend = StubBackend(responses=[
-            "```repl\nprint(corpus_search('Cuicani'))\n```",
+            "```repl\nprint(corpus_search('Vantrel'))\n```",
             "```repl\nanswer['content'] = ('It is in the notes.\\n"
             "Citations: notes/song.txt#L0-21')\nanswer['ready'] = True\n```",
         ])
         loop = RootLoop(tiny_cfg, backend, logger=logger, kernel_bridge=None,
                         corpus_bridge=corpus_bridge)
         try:
-            answer = loop.run("Who is Cuicani?", "stub context")
+            answer = loop.run("Who is Vantrel?", "stub context")
         finally:
             loop.shutdown()
         assert "notes/song.txt#L0-21" in answer
@@ -1441,7 +1441,7 @@ class TestATraceOfARealRunIsAuditable:
 
         page = render_run_markdown(run, collect_passages(run, corpus_bridge))
         assert "**strong**" in page
-        assert "Cuicani sang it first" in page
+        assert "Vantrel sang it first" in page
         assert "corpus_search" in page
 
         # The summary is the form that may travel: counts, no question, no address.
@@ -1449,7 +1449,7 @@ class TestATraceOfARealRunIsAuditable:
         assert "audit=complete" in summary
         assert "answers=1" in summary
         assert "notes/song.txt" not in summary
-        assert "Cuicani" not in summary
+        assert "Vantrel" not in summary
 
 
 class TestInvalidPythonIsRetriedWithoutPenalty:
@@ -1942,14 +1942,14 @@ class TestSearchQualityIsLogged:
 
         logger = TrajectoryLogger(tmp_path / "traj.jsonl")
         backend = StubBackend(responses=[
-            "```repl\nprint(corpus_search('Cuicani'))\n```",
+            "```repl\nprint(corpus_search('Vantrel'))\n```",
             "```repl\nanswer['content'] = ('not in the corpus\\n"
             "[coverage: unknown]')\nanswer['ready'] = True\n```",
         ])
         loop = RootLoop(tiny_cfg, backend, logger=logger, kernel_bridge=None,
                         corpus_bridge=corpus_bridge)
         try:
-            loop.run("Who is Cuicani?", "stub context")
+            loop.run("Who is Vantrel?", "stub context")
         finally:
             loop.shutdown()
 

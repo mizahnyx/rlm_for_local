@@ -64,7 +64,7 @@ def _served(turn: int, query: str, *pairs: tuple[str, str | None],
 def simple_trajectory(tmp_path: Path) -> Path:
     """One 2-turn corpus run: a search, a refusal, a cited answer, forced=False."""
     events = [
-        {"event": "start", "timestamp": T0, "query": "Who is Cuicani?",
+        {"event": "start", "timestamp": T0, "query": "Who is Vantrel?",
          "context_len": 12, "config": {"profile": "tiny", "model": "stub-4b"}},
         {"event": "turn_start", "timestamp": T0 + 1, "turn": 1, "max_turns": 2},
         {"event": "root_message", "timestamp": T0 + 1, "turn": 1, "role": "user",
@@ -143,7 +143,7 @@ def test_the_header_carries_the_question_the_model_and_the_outcome(
     from rlm_local.traceview import read_trajectory
 
     run = read_trajectory(simple_trajectory)
-    assert run.query == "Who is Cuicani?"
+    assert run.query == "Who is Vantrel?"
     assert run.forced is False
     assert run.turns_used == 2
     assert run.elapsed_s == pytest.approx(12.5)
@@ -170,7 +170,7 @@ def test_the_run_reads_turn_by_turn_with_what_it_ran(
 
     page = render_run_markdown(run)
     assert "# Trace" in page
-    assert "Who is Cuicani?" in page
+    assert "Who is Vantrel?" in page
     assert "corpus_search('cuicani')" in page
     assert "covers 1/1" in page
     assert "corpus_uncited" in page
@@ -185,11 +185,11 @@ def test_a_hit_is_shown_with_its_band_and_the_passage_behind_it(
 
     run = read_trajectory(simple_trajectory)
     page = render_run_markdown(run, passages={
-        "notes/song.txt#L0-21": "Cuicani sang it first",
+        "notes/song.txt#L0-21": "Vantrel sang it first",
         "notes/kettle.txt#L0-21": "The kettle boiled dry",
     })
     assert "notes/song.txt#L0-21" in page
-    assert "Cuicani sang it first" in page
+    assert "Vantrel sang it first" in page
     assert "The kettle boiled dry" in page
     assert "**strong**" in page
     assert "**none**" in page
@@ -408,9 +408,9 @@ def test_the_summary_carries_no_question_no_address_and_no_quote(
     run = read_trajectory(simple_trajectory)
     summary = render_summary(run)
     assert "answers=" in summary and "searches=" in summary
-    assert "Who is Cuicani?" not in summary
+    assert "Who is Vantrel?" not in summary
     assert "notes/song.txt" not in summary
-    assert "Cuicani sang it first" not in summary
+    assert "Vantrel sang it first" not in summary
 
 
 class TestTheOrientationCost:
@@ -480,7 +480,7 @@ def test_the_index_lists_every_run(tmp_path: Path, simple_trajectory: Path) -> N
     assert index.exists()
     assert index in written
     text = index.read_text(encoding="utf-8")
-    assert "Who is Cuicani?" in text
+    assert "Who is Vantrel?" in text
     assert "Another question" in text
     # One page per run, and the index links to each of them.
     pages = sorted(p.name for p in out.glob("*.md") if p.name != "index.md")

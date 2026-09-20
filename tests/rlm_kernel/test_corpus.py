@@ -845,7 +845,7 @@ class TestBridgeContentSearch:
     def searched(self, corpus: Path, index: CorpusIndex,
                  mount: LocalTreeMount, tmp_path: Path) -> CorpusBridge:
         (corpus / "sub" / "story.txt").write_text(
-            "Cuicani sang at the festival.\n", encoding="utf-8"
+            "Vantrel sang at the festival.\n", encoding="utf-8"
         )
         index.build(mount)
         table = index.classifications()
@@ -871,15 +871,15 @@ class TestBridgeContentSearch:
         return CorpusBridge(mount=mount, index=index, cache_root=cache_root)
 
     def test_a_word_is_found_with_its_address(self, searched: CorpusBridge) -> None:
-        hits = searched.handle_search("Cuicani")
+        hits = searched.handle_search("Vantrel")
         assert isinstance(hits, list), "a list of hits must be a list"
         assert len(hits) == 1
         assert "sub/story.txt#L" in hits[0]
-        assert "Cuicani sang" in hits[0]
+        assert "Vantrel sang" in hits[0]
 
     def test_the_result_is_indexable_like_a_list(self, searched: CorpusBridge) -> None:
         """The shape the first live run assumed and the interface denied it."""
-        hits = searched.handle_search("Cuicani")
+        hits = searched.handle_search("Vantrel")
         assert len(hits) >= 1
         assert hits[0].startswith("sub/story.txt#L")
         assert hits[:1] == [hits[0]]
@@ -1113,7 +1113,7 @@ class TestSearchCoverageIsPublishedNotCounted:
     def searched_index(self, corpus: Path, index: CorpusIndex,
                        mount: LocalTreeMount) -> CorpusBridge:
         (corpus / "sub" / "story.txt").write_text(
-            "Cuicani sang at the festival.\n", encoding="utf-8")
+            "Vantrel sang at the festival.\n", encoding="utf-8")
         index.build(mount)
         text_index = index.text()
         text_index.ensure()
@@ -1221,7 +1221,7 @@ class TestReadingOneAddressDoesNotScanEveryChunk:
     def read_bridge(self, corpus: Path, index: CorpusIndex,
                     mount: LocalTreeMount) -> CorpusBridge:
         (corpus / "sub" / "story.txt").write_text(
-            "Cuicani sang at the festival.\n", encoding="utf-8")
+            "Vantrel sang at the festival.\n", encoding="utf-8")
         index.build(mount)
         text_index = index.text()
         text_index.ensure()
@@ -1237,7 +1237,7 @@ class TestReadingOneAddressDoesNotScanEveryChunk:
         # The address comes from a search, not from arithmetic on the file's size:
         # a chunk's stored range is the index's business, and a hard-coded guess
         # tests the guess rather than the read.
-        address = read_bridge.handle_search("Cuicani", k=1)[0].split()[0]
+        address = read_bridge.handle_search("Vantrel", k=1)[0].split()[0]
         conn = read_bridge.index._conn  # noqa: SLF001 - the bridge's own connection
         statements: list[str] = []
         conn.set_trace_callback(statements.append)
@@ -1256,7 +1256,7 @@ class TestReadingOneAddressDoesNotScanEveryChunk:
             "on `display`, which has no index and costs a full scan"
         )
         assert not any("WHERE display" in s for s in lookups)
-        assert text and "Cuicani" in text
+        assert text and "Vantrel" in text
 
     def test_a_display_that_is_not_a_path_in_the_index_still_resolves(
         self, read_bridge: CorpusBridge,

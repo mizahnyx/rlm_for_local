@@ -75,7 +75,7 @@ in `REPLSandbox`:
 - **One existing test had its question changed, and that is evidence.**
   `TestCorpusUnsearchedNudge::test_an_unsupported_claim_is_not_accepted_the_first_time`
   ran on the question `"Question"` while citing a hit from
-  `corpus_search('Cuicani')`; those two share no content word, so the search had
+  `corpus_search('Vantrel')`; those two share no content word, so the search had
   labelled that hit `none` — and the new rule refused it. The test's premise was
   incidental (it is about the *unsearched* nudge), so its question is now the one
   the cited passage answers. Recorded because a guard that quietly changes what
