@@ -859,7 +859,23 @@ def publish_coverage_snapshot(conn: sqlite3.Connection) -> bool:
 
         text = TextIndex(conn)
         text.ensure()
-        text.publish_coverage(text.coverage())
+        coverage = text.coverage()
+        text.publish_coverage(coverage)
+        # RO15: the snapshot is the moment the text index's numbers are known, so this is
+        # also the moment to fingerprint the caches derived from it. `freshness.capture`
+        # is best effort and never raises: a window that cannot record a fingerprint still
+        # finishes its work, and the cache then honestly reports `unknown`.
+        from rlm_kernel.freshness import capture
+
+        capture(conn, "coverage", {
+            "sources_indexed": coverage.get("sources_indexed"),
+            "chunks": coverage.get("chunks"),
+        })
+        counts = {task: int(conn.execute(
+            "SELECT COUNT(*) FROM mine_queue WHERE task = ? AND state = 'done'",
+            (task,)).fetchone()[0]) for task in (LIST_ARCHIVE, EXTRACT_TEXT)}
+        capture(conn, "archive_listings", {"listings_done": counts[LIST_ARCHIVE]})
+        capture(conn, "extraction", {"extracted_done": counts[EXTRACT_TEXT]})
         return True
     except Exception:  # pragma: no cover - defensive
         return False

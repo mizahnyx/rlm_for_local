@@ -2879,6 +2879,39 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::TestWhatItWrites::test_an_output_dir_inside_the_corpus_is_refused",
         ],
     ),
+    # ── RO15: the cache freshness ledger (2026-09-21) ──────────────────────
+    # Both entries remove the module's central promise: that it never vouches for a cache
+    # it cannot see.
+    (
+        "RO15 a cache with no fingerprint is called current",
+        "src/rlm_kernel/freshness.py",
+        "        return Currency(\n"
+        "            spec, UNKNOWN,\n"
+        "            detail=(f\"no fingerprint recorded, so nothing vouches for it being current \"\n"
+        "                    f\"({spec.derived_from})\"),\n"
+        "        )",
+        "        return Currency(\n"
+        "            spec, CURRENT,\n"
+        "            detail=\"(mutation: no fingerprint, assumed current)\",\n"
+        "        )",
+        [
+            "tests/rlm_kernel/test_freshness.py::TestAnUnvouchedCacheIsUnknown"
+            "::test_no_fingerprint_is_unknown_not_current",
+        ],
+    ),
+    (
+        "RO15 an artefact with no staleness check is called current",
+        "src/rlm_kernel/freshness.py",
+        "    return Currency(spec, UNKNOWN,\n"
+        "                    detail=f\"no staleness check is implemented for {spec.name!r}\",\n"
+        "                    recorded_at=recorded_at, markers=stored)",
+        "    return Currency(spec, CURRENT, detail=\"(mutation: unchecked)\",\n"
+        "                    recorded_at=recorded_at, markers=stored)",
+        [
+            "tests/rlm_kernel/test_freshness.py::TestAnUnvouchedCacheIsUnknown"
+            "::test_an_artefact_with_no_check_is_unknown_never_current",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

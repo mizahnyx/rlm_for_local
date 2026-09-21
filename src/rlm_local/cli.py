@@ -355,6 +355,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_ccounters.add_argument("--refresh", action="store_true",
                              help="Recompute the snapshot now (reads the whole index)")
 
+    p_cfresh = corpus_sub.add_parser(
+        "freshness",
+        help="Is each derived cache current against the corpus?",
+        description=(
+            "The cache freshness ledger (RO15): for every derived artefact — the "
+            "coverage snapshot, the archive listings, the extraction cache — what it is "
+            "derived from, whether it is *current* (its inputs have not moved since it "
+            "was built, which is not the same as being recent), the operation that would "
+            "make it current, and how much work that is. A cache with no recorded "
+            "fingerprint reports UNKNOWN, never current: nothing can vouch for it. "
+            "Read-only, and deliberately cheap — it never counts the chunk table."
+        ),
+    )
+    _add_corpus_flags(p_cfresh, require_root=False, require_index=True)
+
     # ── trace ────────────────────────────────────────────────────────────
     p_trace = sub.add_parser(
         "trace",
@@ -1136,8 +1151,37 @@ def _cmd_corpus(args: argparse.Namespace) -> int:
     if sub == "counters":
         return _cmd_corpus_counters(args)
 
+    if sub == "freshness":
+        return _cmd_corpus_freshness(args)
+
     print(f"Error: unknown corpus subcommand {sub!r}", file=sys.stderr)
     return 2
+
+
+def _cmd_corpus_freshness(args: argparse.Namespace) -> int:
+    """`rlm corpus freshness` — the ledger: is each derived cache current? (RO15).
+
+    Read-only, and cheap by construction: every marker it compares is an indexed count or
+    a value already stored in the coverage snapshot, so the diagnosis never becomes the
+    expensive operation (which is what CL6 was, and what a `COUNT(*) FROM text_chunks`
+    here would be again).
+    """
+    from rlm_kernel.corpus import CorpusIndex
+    from rlm_kernel.freshness import render, report
+
+    if not args.corpus_index:
+        print("Error: --corpus-index is required (env RLM_CORPUS_INDEX).", file=sys.stderr)
+        return 2
+    if not Path(args.corpus_index).exists():
+        print(f"Error: no index at {args.corpus_index}.", file=sys.stderr)
+        return 2
+
+    index = CorpusIndex(args.corpus_index)
+    try:
+        print(render(report(index._conn)))  # noqa: SLF001 - the index owns the connection
+    finally:
+        index.close()
+    return 0
 
 
 def _cmd_corpus_counters(args: argparse.Namespace) -> int:
@@ -1164,11 +1208,12 @@ def _cmd_corpus_counters(args: argparse.Namespace) -> int:
         if args.refresh:
             print("Recomputing coverage (reads the whole index; can take minutes)…",
                   flush=True)
-            # `ensure` first: coverage counts the chunk table, which does not exist
-            # until something has created it. On a fresh index that is an empty
-            # table and the honest answer is "0 sources indexed".
-            text_index.ensure()
-            text_index.publish_coverage(text_index.coverage())
+            # Through the mining helper, which publishes the snapshot *and* fingerprints
+            # the caches derived from it (RO15) — so one command both refreshes and records
+            # that it did, which is what makes the freshness ledger able to say `current`.
+            from rlm_kernel.mine import publish_coverage_snapshot
+
+            publish_coverage_snapshot(index._conn)  # noqa: SLF001 - the index's connection
         snapshot = text_index.published_coverage()
     finally:
         index.close()

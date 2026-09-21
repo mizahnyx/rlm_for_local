@@ -829,6 +829,43 @@ bounds the cost of a bad answer; a clean corpus costs a full walk, which is the
 price of saying "nothing changed" honestly. The report never contains a path (see
 `AGENTS.md` §1.9).
 
+### `rlm corpus freshness` — is each derived cache current? (RO15)
+
+Every derived thing here is a cache over the corpus: the path index, the classification,
+the text index, the published counts, the archive listings, the extraction cache. Until now
+each one was found to be behind by the operation that tripped over it. This is the ledger
+that answers it in one place:
+
+```bash
+rlm corpus freshness --corpus-index ~/rlm-derived/corpus.sqlite
+```
+
+```
+cache freshness (derived state against the corpus)
+  coverage           current   as of 12 min ago
+  archive_listings   stale     mining moved: listings_done 15123→15480  — rlm mine run --task list_archive
+  extraction         unknown   no fingerprint recorded …
+```
+
+Three things to read it by:
+
+- **`current` means the inputs have not moved**, not "recent". A snapshot from two hours
+  ago over a corpus nothing has touched is current; one from a minute ago taken before a
+  mining window wrote is stale. That is the owner's distinction, and the reason age is
+  reported but never treated as staleness.
+- **`unknown` is not `current`.** A cache built before fingerprints existed, or by a writer
+  that did not record one, says `unknown` — nothing can vouch for it. It is the
+  `AGENTS.md` §1.8 corollary: a check that cannot see the truth says so.
+- **The remedy is on the line**, so "stale" is actionable rather than alarming.
+
+The fingerprints are recorded by the writers — the end of every mining window, and
+`rlm corpus counters --refresh` — which is the moment a cache is known to be current. The
+report itself is read-only and deliberately cheap: every marker it compares is an indexed
+count over `mine_queue` or a value already in the coverage snapshot, so the diagnosis can
+never become the expensive operation (counting the 29M-chunk table here would be the CL6
+defect wearing a new hat, and a test asserts which statements the ledger is allowed to
+issue).
+
 ### Reading a run back: `rlm trace`
 
 A trajectory JSONL is written for machines. `rlm trace` turns it into Markdown a
