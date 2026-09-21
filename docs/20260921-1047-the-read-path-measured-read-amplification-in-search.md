@@ -115,3 +115,46 @@ RO15 (cache freshness) is still about staleness and still not this. The next ite
 one — **bound the per-hit read in `corpus_search`** — and it should be scoped by the
 measurement above rather than by the RO11/RO14 line of work, because it is a different
 resource: not a missing index but a read amplification the search performs on purpose.
+
+---
+
+## Result: the bound was implemented, and the A/B refutes the hypothesis (added 2026-09-21 12:05)
+
+The bound above was built (ledger RO21) and then measured on the same host with the same
+index, alternating the pre-change and post-change code in one driver so the page cache
+treated them alike:
+
+| round | variant | `información` | `trabajo` | `familia` | bytes asked for |
+|---|---|---|---|---|---|
+| 1 | pre-change | 4.68 s | 1.18 s | 0.40 s | 10 000 / 43 601 / 10 208 |
+| 1 | post-change | 0.38 s | 0.06 s | 0.02 s | 10 000 / 24 081 / 10 208 |
+| 2 | pre-change | 0.15 s | 0.06 s | 0.02 s | same as round 1 |
+| 2 | post-change | 0.14 s | 0.06 s | 0.02 s | same as round 1 |
+
+**Read the warm round, not the cold one.** In round 2 the two variants are
+indistinguishable — 0.06 s against 0.06 s on the word whose cap the change actually bites
+(8 000 → 4 096 bytes) — and the difference in round 1 is the *cache* warming between the
+first and second variant, not the change. So:
+
+* **The hypothesis this record was built on is refuted.** Read amplification by *bytes* is
+  not what makes a search expensive: 43 601 bytes of reads took 1.18 s cold and 0.06 s warm,
+  and cutting them to 24 081 changed the warm number by nothing measurable.
+* **The dominant variable is page-cache warmth, by more than three orders of magnitude.**
+  The same query, same variant, same host: **0.02 s warm against 101.24 s cold** (measured on
+  `información` in an earlier round of the same driver). A 38 GB index on a 15.9 GB box with
+  ~6 GB of cache cannot hold itself resident, so every cold region costs a random read, and
+  the tail of that distribution is what a live run meets.
+* **The change is kept, with its scope restated.** It is a strict cap, it is tested, the
+  label's meaning is unchanged, and it does reduce bytes read. It is **not** a performance
+  fix, and the ledger and the commit say so: what it removes is the search asking for more
+  bytes than the snippet can use, not the cost of being cold.
+
+**What the evidence now points at instead**, in the order its effect size ranks: make the
+index fit or be advised (`WAL`, `mmap_size`, a warm pass before a run, or a smaller
+`snippet`-only projection that never opens the file at all — the FTS row could carry the
+opening, at the cost of the "words live once" invariant); or precompute the snippet at
+index time and store only the opening; or accept that a live run on this host needs the
+index warmed first, and make that an operator step with a measurement behind it. The first
+of those is the one that could actually remove the cold read, and none of them is a
+one-line change — which is where the next decision gate is.
+
