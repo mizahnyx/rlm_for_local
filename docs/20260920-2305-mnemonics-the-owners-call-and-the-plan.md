@@ -4,7 +4,10 @@
 **Status:** point-in-time. It records the owner's finding on the prompt experiment's page, the
 decision that follows from it, and an implementation-ready plan for RO13 — the mnemonic alias
 table. **The feature is not built.** This document exists so the next unit starts from the
-design and the evidence instead of re-deriving both.
+design and the evidence instead of re-deriving both. **The execution handoff is
+`docs/20260920-2325-handoff-mnemonics.md`** — exact code shapes, the wiring points by name, the
+traps this session paid for, the verification state, and one ambiguity in the design that has to
+be resolved before the first line is written.
 **Supersedes nothing**; it activates `docs/20260917-1215-mnemonic-addresses-design.md`, whose
 gates the owner has now closed.
 
