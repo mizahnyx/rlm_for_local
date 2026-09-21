@@ -632,13 +632,41 @@ def task_extract_text(ctx: TaskContext, rel: str, size: int, source_hash: str) -
     # the container, because the container cannot be read without extracting it
     # again.
     if ctx.text_index is not None:
-        ctx.text_index.add_text(
-            raw=_bytes_of(rel), display=rel, source_hash=source_hash,
-            text=text.encode("utf-8"), origin=ORIGIN_CACHE,
-            cache_task=EXTRACT_TEXT, cache_key=key, derived=True,
-            engine=str(meta.get("engine", "")), replace=True,
-        )
+        try:
+            ctx.text_index.add_text(
+                raw=_bytes_of(rel), display=_index_display(rel), source_hash=source_hash,
+                text=text.encode("utf-8"), origin=ORIGIN_CACHE,
+                cache_task=EXTRACT_TEXT, cache_key=key, derived=True,
+                engine=str(meta.get("engine", "")), replace=True,
+            )
+        except (UnicodeEncodeError, sqlite3.Error) as e:
+            # The extraction is cached and useful; only the index row failed. Reported so
+            # the item is counted rather than silently half-done.
+            return TaskOutcome(FAILED, type(e).__name__, key, len(text))
     return TaskOutcome(DONE, None, key, len(text))
+
+
+def _index_display(rel: str) -> str:
+    """The display a text chunk stores for a path, in a form SQLite can hold (RO20).
+
+    `text_chunks.display` is TEXT, and SQLite encodes TEXT as UTF-8 and refuses a lone
+    surrogate outright — which is how the first repair pass died six seconds in, and how
+    `mine_queue` came to hold a handful of `UnicodeEncodeError` rows for names that are not
+    valid UTF-8 (Python hands those back from `scandir` with surrogate escapes).
+
+    The path index already solved this: `CorpusIndex` stores a path twice, exactly as bytes
+    in `raw` and as this surrogate-free text in `path`, and `raw_for(display)` recovers the
+    bytes. Using the same rendering here means a chunk's display is the *same string*
+    `entries.path` holds for that file, which is what keeps `raw_for` resolving it. A
+    rendering of its own — `backslashreplace`, say — would be unique but would not match
+    `entries.path`, and a display the path index does not recognise resolves to `None`, so
+    the read path would answer "no such path" for a file that is sitting right there.
+    """
+    # Imported here rather than at module scope: `corpus.py` imports this module lazily
+    # for the same reason, and the two must not become a cycle.
+    from rlm_kernel.corpus import path_text
+
+    return path_text(rel)
 
 
 def task_index_text(ctx: TaskContext, rel: str, size: int, source_hash: str) -> TaskOutcome:
@@ -659,9 +687,15 @@ def task_index_text(ctx: TaskContext, rel: str, size: int, source_hash: str) -> 
             data = handle.read()
     except (OSError, ReadOnlyViolation) as e:
         return TaskOutcome(FAILED, type(e).__name__)
-    chunks = ctx.text_index.add_text(
-        raw=raw, display=rel, source_hash=source_hash, text=data,
-    )
+    try:
+        chunks = ctx.text_index.add_text(
+            raw=raw, display=_index_display(rel), source_hash=source_hash, text=data,
+        )
+    except (UnicodeEncodeError, sqlite3.Error) as e:
+        # One unstorable item is a recorded failure, never the end of a pass (RO19's
+        # repair pass learned the same lesson, and RO20's `index_text 11 failed` is what
+        # the old behaviour left behind: a truncated run with no tail to count).
+        return TaskOutcome(FAILED, type(e).__name__)
     if not chunks:
         return TaskOutcome(SKIPPED, "no_text")
     note = "truncated" if size > len(data) else None

@@ -2841,6 +2841,44 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::TestTheIndexReadHonoursTheBound::test_read_max_bytes_truncates_a_source_chunk",
         ],
     ),
+    # ── RO20: a name that is not valid UTF-8 (2026-09-21) ──────────────────
+    (
+        "RO20 the chunk display goes back to the raw name",
+        "src/rlm_kernel/mine.py",
+        "    return path_text(rel)",
+        "    return rel",
+        [
+            "tests/rlm_kernel/test_index_encoding_wall.py"
+            "::TestANonUtf8NameIsIndexable::"
+            "test_indexing_such_a_file_succeeds_and_is_searchable",
+        ],
+    ),
+    (
+        "RO20 one unstorable item ends the pass again",
+        "src/rlm_kernel/mine.py",
+        "    except (UnicodeEncodeError, sqlite3.Error) as e:\n"
+        "        # One unstorable item is a recorded failure, never the end of a pass (RO19's\n"
+        "        # repair pass learned the same lesson, and RO20's `index_text 11 failed` is what\n"
+        "        # the old behaviour left behind: a truncated run with no tail to count).\n"
+        "        return TaskOutcome(FAILED, type(e).__name__)",
+        "    except UnicodeEncodeError:\n"
+        "        raise",
+        [
+            "tests/rlm_kernel/test_index_encoding_wall.py"
+            "::TestOneBadItemNeverEndsAPass::"
+            "test_an_unstorable_item_is_a_recorded_failure_not_an_abort",
+        ],
+    ),
+    (
+        "RO20 the sample tool writes wherever it is told",
+        "scripts/sample_encoding_wall.py",
+        "        assert_derived_outside_corpus(Path(args.corpus_root).expanduser(), out_dir)",
+        "        pass",
+        [
+            "tests/rlm_kernel/test_sample_encoding_wall.py"
+            "::TestWhatItWrites::test_an_output_dir_inside_the_corpus_is_refused",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
