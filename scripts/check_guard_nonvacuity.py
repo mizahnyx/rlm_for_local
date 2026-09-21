@@ -2524,6 +2524,16 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         ],
     ),
     (
+        "the prompt stops telling the model to search the question's own words",
+        "src/rlm_local/prompts.py",
+        "    \"- **Search the question's own words first.** Put the question's content nouns\"",
+        "    \"- Put the question's content nouns\"",
+        [
+            "tests/test_corpus_repl.py::TestWorkerDefinesTheCorpusVerbs"
+            "::test_the_section_says_to_search_the_questions_own_words",
+        ],
+    ),
+    (
         "a run that never asked the corpus reports turn zero",
         "src/rlm_local/traceview.py",
         "        return min(turns) if turns else None",

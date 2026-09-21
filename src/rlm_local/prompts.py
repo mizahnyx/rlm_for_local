@@ -141,6 +141,19 @@ def build_system_prompt(prompt_vars: dict) -> str:
 CORPUS_SECTION_HEADER = "The corpus (read-only)"
 CORPUS_SECTION_LINES = (
     "- A large read-only file tree is available: {root}.",
+    "- **Your first cell calls the corpus.** `context` in a corpus run is a"
+    " placeholder, not the material, and there is no file to grep: a helper is the"
+    " only way to the corpus. Do not spend a turn working out where the data is —"
+    " search it with the question's own words before printing or reasoning about"
+    " anything else. (Measured: two to three turns of a six-turn budget are lost to"
+    " this orientation in almost every run, which is why it comes first here.)",
+    "- **Search the question's own words first.** Put the question's content nouns"
+    " and phrases into corpus_search before trying synonyms, translations, spellings"
+    " or guesses: across thirteen recorded runs, a query sharing no word with the"
+    " question was served hits where none of the question's words were present — no"
+    " evidence at all — while a query using the question's own words was served"
+    " labelled hits every time. Read the `covers n/m` label on what comes back"
+    " before searching again; searching more does not create evidence.",
     "- **Two return shapes, and they are not interchangeable.** An *enumeration*"
     " — corpus_search and corpus_find, and corpus_list — returns a LIST:"
     " `len(hits)`, `hits[0]` and iteration work, and iterating one gives hits rather"

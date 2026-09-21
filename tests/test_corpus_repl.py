@@ -161,6 +161,30 @@ class TestWorkerDefinesTheCorpusVerbs:
         assert "weak" in section and "strong" in section
         assert "does not contain the answer" in section
 
+    def test_the_section_says_the_first_move_is_a_corpus_call(self) -> None:
+        """Orientation cost: 2–3 of a six-turn budget before the corpus is touched.
+
+        Measured across both question sets (first helper turn 4, 4, 3, 3, 4, 3 and
+        4, 4, 3, 3, 4, 3), and it is the most stable thing in those traces: the model
+        spends turns working out that the material is behind a helper rather than in
+        `context`. The prompt has to say so before the run starts.
+        """
+        section = corpus_helpers_section("/srv/corpus", has_index=True)
+        assert "first cell calls the corpus" in section
+        assert "placeholder" in section
+
+    def test_the_section_says_to_search_the_questions_own_words(self) -> None:
+        """Query drift is measurable, and it is the difference between nothing and evidence.
+
+        Thirteen recorded runs: an off-question query was served `none` **40 times out
+        of 40**, while an on-question one was served `strong`/`weak` every time. The
+        prompt has to tell the model to try the question's own words before it starts
+        guessing synonyms.
+        """
+        section = corpus_helpers_section("/srv/corpus", has_index=True)
+        assert "question's own words first" in section
+        assert "synonyms" in section
+
     def test_the_section_requires_the_answer_to_cite_its_evidence(self) -> None:
         """RO4, owner call 2026-09-14: the answer must carry the addresses it used.
 
