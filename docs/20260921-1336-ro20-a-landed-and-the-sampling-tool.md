@@ -86,3 +86,48 @@ Given the composition, the plausible answers are:
    being permanently unsearchable while `corpus_find` happily lists it.
 
 The samples exist to settle whether the 38 extensionless files change any of that.
+
+---
+
+## Result: the 11 text files are indexed, and "index them all" turned out to be 11 of 98
+
+The owner's call was to index them all. Before doing anything, the queue was measured, and
+it changed what the instruction could mean: **none of the 98 was pending.** They were 11
+`index_text/failed (UnicodeEncodeError)` — the writer defect (a) fixed — 28
+`list_archive/skipped (no_listing_engine)`, and **59 with no queue row at all**. Grouped by
+what the classifier calls them:
+
+| classification | count | suffix mix | queued for `index_text`? |
+|---|---|---|---|
+| **text** | **11** | `.js` 4, `.log` 3, `.htm` 2, `.csv` 1, `.ini` 1 | yes — and failed |
+| media | 27 | `.jpg` 13, `.mp3` 8, `.gif` 3, `.png` 1, none 2 | no: media is not text-indexed by design |
+| binary | 23 | `.mp3` 21, `.png` 1, `.mpg` 1 | no, same |
+| archive | 28 | no extension | `list_archive` skipped: no listing engine |
+| document | 1 | `.xls` | no queue row |
+| not classified | 8 | no extension | no queue row (never sniffed) |
+
+So "index them all" is **11 files** in the sense of text indexing, and the other 87 are
+media, binary, archives and unclassified — none of which a text index has content for.
+Retrying the 11 and running a bounded `index_text` window took them all the way:
+
+```
+re-queued 11 failed item(s) for index_text
+… window …
+already in the text index: 11        # was 0
+queue states: index_text/done: 11    # was index_text/failed: 11
+corpus-wide failed: (no index_text rows at all)
+```
+
+`index_text` now has **zero failures corpus-wide**. That is RO20's wall removed on the task
+it actually blocked, verified on the live index rather than on a fixture.
+
+### A sibling of the same defect, found by the same measurement
+
+The window leaves three rows: `list_archive/failed/UnicodeEncodeError`, all `.gz`/`.tgz`.
+The same *class* of defect — a name that is not valid UTF-8 reaching a TEXT column — in a
+different task, and not the one (a) fixed: the chunk display is now surrogate-free, and
+`entries.path` always was, so whatever these three write must be another place a raw name
+goes. **Not investigated further and not fixed**; recorded here so it is a known open item
+rather than a surprise, and because fixing it is another owner-neutral writer change of the
+same shape if you want it.
+
