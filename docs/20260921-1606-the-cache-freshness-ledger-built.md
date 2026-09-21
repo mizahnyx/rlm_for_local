@@ -92,3 +92,20 @@ one.
 * Not measured against the live index yet: the report has not been run on `lunacode`, so
   every cache there currently reports `unknown` until a window or a refresh records a
   fingerprint. That is the correct behaviour and also the first thing to check on the host.
+
+## Addendum: the live index reports `unknown` for all three, which is the right answer
+
+Run against `lunacode`/`~/rlm-derived/corpus.sqlite`, the first reading was:
+
+```
+coverage           unknown  no fingerprint recorded, so nothing vouches for it being current
+archive_listings   unknown  no fingerprint recorded, …
+extraction         unknown  no fingerprint recorded, …
+```
+
+Every cache there was built before fingerprints existed, so nothing can vouch for any of
+them. This is the module's central promise demonstrated on real state rather than asserted:
+the alternative — grandfathering a pre-existing cache as `current` — is precisely the
+confident default that would have made the ledger a source of false assurance on its first
+day. The first real `current`/`stale` reading needs one window or one refresh on the host.
+
