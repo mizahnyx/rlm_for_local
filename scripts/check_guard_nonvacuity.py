@@ -2764,6 +2764,62 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_an_alias_in_the_answer_becomes_its_address",
         ],
     ),
+    # ── RO14: a container member reads through the extraction cache (2026-09-21) ──
+    # Each entry removes one thing that keeps a member read cheap and honest: the
+    # index winning over the `!` shape, the cache-key derivation, the bounded read,
+    # and the routing itself.
+    (
+        "RO14 a container that is not in the index is called a container",
+        "src/rlm_kernel/corpus.py",
+        "        return container if self.stat(container) is not None else None",
+        "        return container",
+        [
+            "tests/rlm_kernel/test_container_read.py"
+            "::TestTheMemberNameIsSplitOffTheContainer::"
+            "test_a_container_that_is_not_in_the_index_has_no_key",
+        ],
+    ),
+    (
+        "RO14 the extraction cache is looked up by the wrong key",
+        "src/rlm_kernel/corpus.py",
+        "        key = cache.key(source_hash)",
+        "        key = source_hash",
+        [
+            "tests/rlm_kernel/test_container_read.py"
+            "::TestTheCacheKeyComesFromTheClassification::"
+            "test_the_container_text_is_found_by_the_key_the_classifier_recorded",
+        ],
+    ),
+    (
+        "RO14 a member read stops applying the byte cap",
+        "src/rlm_kernel/corpus.py",
+        "        body = text[:cap]",
+        "        body = text",
+        [
+            "tests/rlm_kernel/test_container_read.py"
+            "::TestReadingThroughTheExtractionCache::"
+            "test_a_large_extraction_is_capped_like_any_other_read",
+        ],
+    ),
+    (
+        "RO14 a member read goes back to the unindexed display fallback",
+        "src/rlm_kernel/corpus.py",
+        "        member = self._read_member(rel, cap)\n"
+        "        if member is not None:\n"
+        "            return member\n"
+        "\n"
+        "        via_address = self._read_address(rel)",
+        "        member = None\n"
+        "        if member is not None:\n"
+        "            return member\n"
+        "\n"
+        "        via_address = self._read_address(rel)",
+        [
+            "tests/rlm_kernel/test_container_read.py"
+            "::TestAMemberReadDoesNotScan::"
+            "test_a_member_address_reads_from_the_cache_without_a_scan",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

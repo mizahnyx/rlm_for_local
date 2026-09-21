@@ -670,7 +670,11 @@ indexed lookup: on the complete index a search takes ~43 s, and reading one addr
 takes seconds, where it used to scan all 29M chunk rows and never return inside the
 120 s cell limit (`docs/20260917-1040-corpus-a-read-that-scanned-every-chunk.md`).
 The exception is an address inside an archive (`container!member`), which names no
-file on disk and still falls back to the slow filter (roadmap RO11). Text that came from
+file on disk: `corpus_read` serves the **container's extracted text** with a header
+saying so, or — if that container has never been mined — answers
+`CORPUS_CONTAINER_NEEDS_MINING`, naming the operation that would mine it. It never
+falls back to the unindexed chunk scan, which cost over 150 s to find nothing (RO14;
+`docs/20260921-0550-a-container-member-reads-through-the-cache.md`). Text that came from
 an extraction is labelled (`derived:pdftotext`), vendored matches are counted and
 can be included with `include_vendored=True`, and `corpus_coverage()` reports how
 much of the corpus is indexed at all. Its output on 2026-09-14 — a live number,

@@ -275,6 +275,23 @@ at 93 750 it does not. Two live aliases one glyph apart would make such a slip
 refuses another session's aliases, so an old trace's handle cannot silently mean a
 new passage.
 
+**A member of a container is read through the container's extraction cache.** Since RO14
+(2026-09-21) `corpus_read("arch.zip!member.txt")` resolves the container through the
+indexed path column and serves its extracted text with a header naming the substitution —
+the text is the *container's*, not the member's, and a reader who is not told cannot judge
+it. A container with no cached extraction is answered with
+`CORPUS_CONTAINER_NEEDS_MINING`, which names the operation that would mine it and says
+"the corpus does not contain this" is an acceptable answer. **Two shapes, and the cheap-
+looking one was the worse failure**: a *bare* member name never reached the chunk lookup at
+all (no `#L` fragment, so the mount check answered `no such path` — unreadable rather than
+slow), while the **address** form `…!member#L0-9` took `find_chunk`'s `display` fallback: a
+scan of 29 015 791 rows, over 150 s against a 120 s cell limit, finding nothing. The guards
+are therefore **trace-based** — a member read must issue no statement filtering
+`text_chunks` on `display` — because the cost is invisible in the answer. A path that
+legitimately contains `!` still reads as a file: the whole name being a stored path settles
+it, and `pack.zip!notes.txt` beside a real `pack.zip` has its own test.
+`docs/20260921-0550-a-container-member-reads-through-the-cache.md`.
+
 **Read a run back as Markdown, and keep it where the corpus is.** `rlm trace
 render` turns a trajectory into one page per run — question, outcome, citation
 audit, turn-by-turn transcript, and the passage behind every cited or served

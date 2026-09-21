@@ -415,6 +415,34 @@ class CorpusIndex:
             return None
         return bytes(rows[0][0])
 
+    def container_of_member(self, rel: str) -> str | None:
+        """The container a `container!member` reference names, if there is one (RO14).
+
+        The whole string is not consulted for membership, and it does not need to be: a
+        file whose name legitimately contains `!` is a path, the index already decided
+        that, and the ordinary file read is what answers for it — this returns `None`
+        for such a name unless the part *before* the `!` happens itself to be a stored
+        file, which is the case the member form actually describes
+        (`test_a_real_path_with_a_bang_still_reads_as_a_file` pins both halves).
+
+        What this adds is the container check: the container must be a stored path, so
+        `absent.zip!m.txt` names a container that does not exist and is a plain "no such
+        path" rather than a member of anything.
+
+        One indexed lookup (`entries_path`), so asking costs nothing when the answer is
+        no — which is the common case, since most reads are not member references.
+        """
+        text = (rel or "").strip()
+        container, separator, _member = text.partition("!")
+        if not separator or not container:
+            return None
+        # The whole name being a stored path settles it: `pack.zip!notes.txt` written
+        # on disk, beside a real `pack.zip`, is the one shape the container check alone
+        # would misread as a member.
+        if self.stat(text) is not None:
+            return None
+        return container if self.stat(container) is not None else None
+
     def list_dir(self, rel: str = "", *, limit: int = DEFAULT_LIST_LIMIT) -> list[Entry]:
         """One directory level, from the index. Never a walk."""
         parent = rel.strip("/")
@@ -533,6 +561,29 @@ CORPUS_SUMMARY_LINE = (
     "{bytes} bytes in files)"
 )
 
+# ── Container members (RO14, owner's rule 2026-09-17) ──────────────────────
+# `corpus_find` reports a match inside an archive as `container!member`, and that
+# address names no file on disk. The member is not individually indexed either — the
+# only text the harness holds for it is what an extraction of the *container* produced.
+# So a read of a member address resolves the container through the path index, then
+# asks the derivation cache for the container's extracted text. The first line says
+# what was served, because a substitution the reader cannot see is a silent one.
+CORPUS_MEMBER_FROM_CONTAINER = (
+    "[reading {container}: {member} is a member inside it, so this is the text "
+    "extracted from the container, not a separately indexed passage]\n"
+)
+#: The cache miss. It is a *work item*, not a dead end: the container has to be mined
+#: before anything inside it can be read, and the message names the operation so the
+#: model can say "the corpus does not contain this yet" rather than searching blindly
+#: for a member that will never appear.
+CORPUS_CONTAINER_NEEDS_MINING = (
+    "Error: {member} is inside {container}, and that container has not been mined "
+    "for text yet — so there is nothing to read inside it. The words of its members "
+    "are not in the search index and no extraction is cached. An operator makes it "
+    "readable with `rlm mine plan` then `rlm mine run --task extract_text`; until "
+    "then, answer from other passages or say the corpus does not contain this."
+)
+
 
 @dataclass
 class CorpusBridge:
@@ -588,6 +639,88 @@ class CorpusBridge:
     def close(self) -> None:
         if self.index is not None:
             self.index.close()
+
+    # ── Container members (RO14) ──────────────────────────────────────────
+
+    def container_of(self, rel: str) -> str | None:
+        """The container a `container!member` reference names, or `None` (RO14).
+
+        A thin pass-through to the index, which owns the lookup — and it is a *lookup*,
+        not a guess: the member shape is only believed for a path the index does not
+        know, so a file whose name contains `!` is read as the file it is.
+        """
+        if self.index is None:
+            return None
+        try:
+            return self.index.container_of_member(rel)
+        except Exception:  # pragma: no cover - defensive; a corpus without the table
+            return None
+
+    def _read_member(self, rel: str, cap: int) -> str | None:
+        """Serve a container member from the container's extraction cache (RO14).
+
+        Returns `None` when `rel` is not a member reference at all, so the caller falls
+        through to the ordinary paths. When it *is* one, the answer is always a string:
+        either the container's extracted text with a header naming the substitution, or
+        the "needs mining" message — never a scan of the chunk table.
+
+        `None` from `MineStore.derivation_cache` means the index holds no
+        `classification` row for the container, which is the same situation as a cache
+        miss from the model's side: no text is held for it.
+        """
+        container = self.container_of(rel)
+        if container is None:
+            return None
+        member = rel.split("!", 1)[1]
+        if self.index is None:  # pragma: no cover - container_of already refused
+            return CORPUS_CONTAINER_NEEDS_MINING.format(member=member, container=container)
+        text = self._container_extraction(container)
+        if text is None:
+            return CORPUS_CONTAINER_NEEDS_MINING.format(member=member, container=container)
+        header = CORPUS_MEMBER_FROM_CONTAINER.format(member=member, container=container)
+        body = text[:cap]
+        if len(text) > cap:
+            body += CORPUS_READ_TRUNCATED.format(shown=len(body), total=len(text))
+        return header + body
+
+    def _container_extraction(self, container: str) -> str | None:
+        """The container's cached extracted text, or `None` if nothing holds it.
+
+        Three lookups, all indexed: the container's bytes from the path index, its
+        `head_hash` from the classification table, and the derivation cache entry keyed
+        by that hash. The key is *derived* through `DerivationCache.key`, the same call
+        mining used to write it — a copy of the formula here is how the writer and the
+        reader would come to disagree, and the cache is keyed by `key(head_hash)`, not
+        by the hash itself.
+
+        No broad `except` around this: an earlier version had one and it swallowed a
+        wrong-key bug into a bland "needs mining" answer, which is exactly the
+        confident-wrong-answer shape this project ranks below silence. A corpus whose
+        tables are missing is a case to see fail, not to paper over.
+        """
+        from rlm_kernel.mine import EXTRACT_TEXT, DerivationCache, source_hash_for
+
+        if self.index is None or self.cache_root is None:
+            return None
+        raw = self.index.raw_for(container)
+        if not raw:
+            return None
+        try:
+            source_hash = source_hash_for(self.index._conn, raw)
+        except sqlite3.OperationalError:
+            # No `classification` table: the corpus has never been classified, so no
+            # container carries a key. That is a *miss*, and it is the one exception
+            # this path catches — a missing table is a state, not a bug, and the model
+            # is told "not mined yet" rather than handed a traceback.
+            return None
+        if not source_hash:
+            return None
+        cache = DerivationCache(Path(self.cache_root), EXTRACT_TEXT)
+        key = cache.key(source_hash)
+        if not cache.has(key):
+            return None
+        text, _meta = cache.get(key) or ("", {})
+        return text or None
 
     # ── Handlers (called by REPLSandbox._handle_request) ──────────────────
 
@@ -901,6 +1034,15 @@ class CorpusBridge:
         refusal = self._refusal(rel)
         if refusal is not None:
             return refusal
+
+        # RO14: a `container!member` reference is resolved *before* the address lookup,
+        # because that lookup would otherwise take its `display` fallback — filtering
+        # `text_chunks` on the one column with no index (29 015 791 rows, over 150 s
+        # against a 120 s cell limit) — and a member is never indexed under that
+        # display, so the scan could not have found anything anyway.
+        member = self._read_member(rel, cap)
+        if member is not None:
+            return member
 
         via_address = self._read_address(rel)
         if via_address is not None:

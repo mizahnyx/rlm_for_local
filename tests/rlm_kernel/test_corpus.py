@@ -1261,14 +1261,17 @@ class TestReadingOneAddressDoesNotScanEveryChunk:
     def test_a_display_that_is_not_a_path_in_the_index_still_resolves(
         self, read_bridge: CorpusBridge,
     ) -> None:
-        """A container member has no `entries` row, so the fallback must still find it.
+        """A chunk whose display names no file must still resolve by that display.
 
-        `arch.zip!member.txt` is a real address shape for text extracted out of an
-        archive, and it names no file on disk. There are no exact bytes to resolve,
-        so the lookup falls back to the display filter — slow, bounded to the
-        derivations that need it, and *correct*, which is the part that matters
-        here. (Reading such a chunk goes on through the derivation cache, which
-        needs a cache entry this fixture does not create; the lookup is the claim.)
+        The fallback is the correctness backstop for any chunk the path index cannot
+        resolve — a derived document, a container member. It stays, slow as it is,
+        because the alternative is an address that cannot be read at all.
+
+        What changed with RO14 (2026-09-21) is that a **member reference** no longer
+        reaches it: `corpus_read("arch.zip!member.txt")` is served from the container's
+        extraction cache, because no member is ever indexed under such a display, so the
+        fallback would have scanned 29 015 791 rows and found nothing. This test asks
+        `find_chunk` directly, which is the layer that still needs the fallback.
         """
         read_bridge.index.text().add_text(
             raw=b"arch.zip", display="arch.zip!member.txt", source_hash="h2",
@@ -1278,3 +1281,33 @@ class TestReadingOneAddressDoesNotScanEveryChunk:
         assert address.startswith("arch.zip!member.txt#L"), address
         hit = read_bridge.index.text().find_chunk(address)
         assert hit is not None, "the display fallback must still resolve the chunk"
+
+    def test_a_member_reference_does_not_reach_the_display_fallback(
+        self, read_bridge: CorpusBridge,
+    ) -> None:
+        """…and a read of a member reference must not take it either (RO14).
+
+        This fixture's `arch.zip` was never written to disk — the chunk above is a
+        synthetic row. So the read stops at the containment check with "no such path",
+        which is right: a reference to a container that is not there is a miss.
+
+        The claim worth pinning here is the *cost*: no statement filters `text_chunks`
+        on `display`. Before RO14 a member reference reached that fallback and paid a
+        full scan of 29 015 791 rows to learn nothing. `test_container_read.py` covers
+        the same property for a container that really exists, where the extraction cache
+        is what answers.
+        """
+        read_bridge.index.text().add_text(
+            raw=b"arch.zip", display="arch.zip!member.txt", source_hash="h2",
+            text=b"derived body text here",
+        )
+        conn = read_bridge.index._conn  # noqa: SLF001 - the bridge's own connection
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+        try:
+            read_bridge.handle_read("arch.zip!member.txt")
+        finally:
+            conn.set_trace_callback(None)
+        assert not any("WHERE display" in s for s in statements if "text_chunks" in s), (
+            statements
+        )
