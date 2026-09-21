@@ -498,7 +498,7 @@ class TestCorpusUnsearchedNudge:
             "hits = corpus_search('Vantrel')",
             "print(hits)",
             "answer['content'] = ('the searched answer\\nCitations: '"
-            " + hits[0].split()[0])",
+            " + hits[0]['address'])",
             "answer['ready'] = True",
             "```",
         ])
@@ -1051,7 +1051,7 @@ class TestCitationsMustBeServed:
         "```repl",
         "hits = corpus_search('Vantrel')",
         "print(hits)",
-        "answer['content'] = 'It is in the notes.\\nCitations: ' + hits[0].split()[0]",
+        "answer['content'] = 'It is in the notes.\\nCitations: ' + hits[0]['address']",
         "answer['ready'] = True",
         "```",
     ])
@@ -1190,7 +1190,7 @@ class TestAnAnswerMustRestOnAnAnsweringMatch:
         "hits = corpus_search('kettle')",
         "print(hits)",
         "answer['content'] = ('The corpus says the kettle boiled dry.\\n"
-        "Citations: ' + hits[0].split()[0])",
+        "Citations: ' + hits[0]['address'])",
         "answer['ready'] = True",
         "```",
     ])
@@ -1241,7 +1241,7 @@ class TestAnAnswerMustRestOnAnAnsweringMatch:
             "```repl",
             "hits = corpus_search('kettle')",
             "answer['content'] = ('The corpus does not contain this; the closest "
-            "passage is not an answer.\\nCitations: ' + hits[0].split()[0] + "
+            "passage is not an answer.\\nCitations: ' + hits[0]['address'] + "
             "'\\n' + corpus_coverage())",
             "answer['ready'] = True",
             "```",
@@ -1268,7 +1268,7 @@ class TestAnAnswerMustRestOnAnAnsweringMatch:
             "near_misses = corpus_search('kettle')",
             "hits = corpus_search('Vantrel')",
             "answer['content'] = ('It is in the notes.\\nCitations: ' + "
-            "hits[0].split()[0] + '; ' + near_misses[0].split()[0])",
+            "hits[0]['address'] + '; ' + near_misses[0]['address'])",
             "answer['ready'] = True",
             "```",
         ])
@@ -1293,7 +1293,7 @@ class TestAnAnswerMustRestOnAnAnsweringMatch:
         cite_an_unlabelled_hit = "\n".join([
             "```repl",
             "hits = corpus_search('kettle')",
-            "answer['content'] = ('Cited.\\nCitations: ' + hits[0].split()[0])",
+            "answer['content'] = ('Cited.\\nCitations: ' + hits[0]['address'])",
             "answer['ready'] = True",
             "```",
         ])

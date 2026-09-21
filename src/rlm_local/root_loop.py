@@ -14,12 +14,14 @@ from rlm_local.config import Config
 from rlm_local.context_store import ContextStore
 from rlm_local.logger import TrajectoryLogger
 from rlm_local.model_backend import ModelBackend
+from rlm_local.mnemonics import ALIAS_TOKEN_RE, AliasTable, substitute_addresses
 from rlm_local.parser import FINAL_LINE_RE, Parser
 from rlm_local.prompts import build_messages
 from rlm_local.repl import BAND_ORDER, REPLSandbox
 from rlm_local.subcall_manager import SubcallManager
 from rlm_local.templates import (
     CELL_EXTENDED_WARNING,
+    CITATION_REPAIRED_DETAIL,
     FINALIZATION_FAILED,
     FORCED_FINALIZATION_CORPUS_PROMPT,
     FORCED_FINALIZATION_PROMPT,
@@ -69,6 +71,7 @@ class RootLoop:
         kernel_bridge: Any = None,
         corpus_bridge: Any = None,
         warning_sink: Any = None,
+        alias_table: Any = None,
     ) -> None:
         self._config = config
         self._backend = backend
@@ -82,6 +85,12 @@ class RootLoop:
         # separate from the kernel bridge because a corpus run needs no vault:
         # "answer questions about a file tree" is its own capability.
         self._corpus_bridge = corpus_bridge
+        #: RO13: the mnemonic aliases for this **chat session**. A chat session passes
+        #: the same table to every run, so a handle the model saw in one run still means
+        #: the same passage in the next; an `ask` run is a session of length one and gets
+        #: a fresh table. It is created in `run()` when a corpus is configured, because
+        #: only a corpus run needs one.
+        self._alias_table = alias_table
         # RO4 provenance telemetry: how many answers a corpus run produced, and
         # how many of them carried no address. Measured, never enforced — see
         # `_record_citations` for why the owner's call was to measure first.
@@ -101,6 +110,10 @@ class RootLoop:
         self._repl: REPLSandbox | None = None
         self._subcall_mgr: SubcallManager | None = None
         self._context_store: ContextStore | None = None
+        #: RO13: citations that had to be *repaired* to be mapped back to an address —
+        #: the aliases the model mistyped. Drained into `citation_repaired` events by
+        #: `_log_citation_repairs`, which is what makes the error rate countable.
+        self._citation_repairs: list[Any] = []
         #: Cells the harness stopped on their time budget, and the last corpus
         #: helper that was running — the two facts that separate "the budget was too
         #: low" from "the model asked for something impossible" (2026-09-17).
@@ -168,10 +181,20 @@ class RootLoop:
         # R10: the cap passed here is exactly the `{repl_cap}` the prompt
         # promises — both come from the same Config attribute, so template text
         # and behaviour cannot drift apart.
+        #
+        # RO13: a corpus run gets a mnemonic alias table, and it is created *here*
+        # rather than lazily in the sandbox so a chat session can pass the same one to
+        # every run it makes — aliases span the runs of one session, and an `ask` run is
+        # a session of length one. A run with no corpus gets none: there is nothing to
+        # alias, and a table that mints nothing is cheaper than one that must be
+        # explained to the model.
+        if self._alias_table is None and self._corpus_bridge is not None:
+            self._alias_table = AliasTable()
         self._repl = REPLSandbox(
             cell_timeout=cfg.cell_timeout,
             cell_timeout_hard=cfg.cell_timeout_hard,
             stdout_cap=cfg.repl_output_char_cap,
+            alias_table=self._alias_table,
         )
 
         # K1: Get helper definitions and core-memory from kernel bridge
@@ -405,8 +428,7 @@ class RootLoop:
                         self._logger.log_root_message("user", nudge)
                     turn += 1
                     continue
-                final_answer = result.final_answer
-                self._record_citations(display_turn, final_answer)
+                final_answer = self._finalize_answer(display_turn, result.final_answer)
                 break
 
             # ── Execute blocks in REPL ────────────────────────────────────
@@ -563,8 +585,8 @@ class RootLoop:
                                           answer=repl_result.final_answer, block=bi,
                                           reason=refusal)
                         break
-                    final_answer = repl_result.final_answer
-                    self._record_citations(display_turn, final_answer)
+                    final_answer = self._finalize_answer(display_turn,
+                                                         repl_result.final_answer)
                     break
 
                 # Build templated REPL output message
@@ -700,8 +722,10 @@ class RootLoop:
                 final_answer = FINALIZATION_FAILED
 
             # RO4: a forced answer is still an answer, and a corpus run's forced
-            # answer is exactly the one most likely to be uncited.
-            self._record_citations(turn + 1, final_answer)
+            # answer is exactly the one most likely to be uncited. RO13: the raw text
+            # stays in the trajectory, and the addresses are substituted in the delivered
+            # answer only.
+            final_answer = self._finalize_answer(turn + 1, final_answer)
 
             if self._logger:
                 self._logger.log_end(
@@ -723,6 +747,82 @@ class RootLoop:
             return NO_ANSWER_PRODUCED
         return final_answer
 
+    def _map_citations(self, answer: str | None) -> str:
+        """Replace every alias in an answer with the address it means (RO13).
+
+        The citation audit must compare addresses, and the model may write either — it is
+        handed aliases and told to cite them. So every alias-shaped token in the answer is
+        resolved *before* the served-set check, and each resolution that was not an exact
+        match is recorded: the owner's decision (2026-09-17) is that every repair is an
+        event, which is what turns "the model garbles addresses" from an anecdote into
+        `citation_repaired` counts.
+
+        A token that does not resolve is left exactly as written. Rewriting it would mean
+        inventing an address, and the audit must see the string the model actually
+        produced so an unserved citation still fails.
+        """
+        text = answer or ""
+        table = getattr(self._repl, "_alias_table", None)
+        if table is None or not text:
+            return text
+        self._citation_repairs = []
+        # One call does both jobs, so the delivered answer and the events cannot disagree
+        # about which citations were clean — see `mnemonics.substitute_addresses`.
+        mapped = substitute_addresses(text, table, repairs=self._citation_repairs)
+        return mapped
+
+    def _log_citation_repairs(self) -> None:
+        """Record one event per repaired citation — the mnemonic layer's own measurement.
+
+        The owner's decision (2026-09-17): every repair is an event, so the model's real
+        error rate on addresses becomes a number instead of an anecdote. This is the
+        number RO13 exists to make measurable, and it has no baseline before it lands.
+        """
+        repairs = self._citation_repairs
+        self._citation_repairs = []
+        if not self._logger:
+            return
+        table = getattr(self._repl, "_alias_table", None)
+        for written, resolution in repairs:
+            self._logger.log_guardrail(
+                getattr(self, "_current_turn", 0), "citation_repaired",
+                CITATION_REPAIRED_DETAIL.format(
+                    where="", written=written, status=resolution.status,
+                    address=resolution.address, alias=resolution.alias,
+                    minted=len(table) if table is not None else 0,
+                ),
+            )
+
+    def _finalize_answer(self, turn: int, answer: str | None) -> str | None:
+        """Keep the raw answer in the trajectory, deliver the true addresses (RO13).
+
+        The owner's call (2026-09-17): *"the trajectory keeps the model's raw output, and
+        the harness substitutes the true address inline"* in what the reader gets. So the
+        raw text is logged here, before any rewriting, and the substitution is applied to
+        the returned value only — which is what makes the trace a record of what the model
+        actually said while the answer the owner reads names real passages.
+        """
+        self._record_citations(turn, answer)
+        if answer is None:
+            return None
+        mapped = self._map_citations(answer)
+        self._log_citation_repairs()
+        return mapped
+
+    def _audit_text(self, answer: str | None) -> str:
+        """The answer as the citation audit sees it: aliases mapped to addresses (RO13).
+
+        The model may cite either form — it is handed aliases and told to cite what it
+        read — so the served-set check and the band check must run on the *addresses*,
+        which is what `substitute_addresses` produces. Side-effect free on purpose: a
+        refused answer is submitted again, and repair events are written once, by
+        `_finalize_answer`, when an answer is actually delivered.
+        """
+        table = getattr(self._repl, "_alias_table", None)
+        if table is None:
+            return answer or ""
+        return substitute_addresses(answer or "", table)
+
     def _unserved_citations(self, answer: str | None) -> set[str]:
         """Addresses the answer cites that no helper ever handed over (RO4).
 
@@ -733,7 +833,7 @@ class RootLoop:
         pattern match accepted. A citation that points at nothing is a confident
         wrong answer wearing a receipt, and this project ranks those below silence.
         """
-        addresses = set(ADDRESS_TOKEN_RE.findall(answer or ""))
+        addresses = set(ADDRESS_TOKEN_RE.findall(self._audit_text(answer)))
         if not addresses:
             return set()
         served = set(getattr(self._repl, "corpus_addresses_served", set()) or set())
@@ -785,8 +885,11 @@ class RootLoop:
         """
         if self._corpus_bridge is None:
             return None
-        text = answer or ""
-        if self._unserved_citations(text):
+        # RO13: the audit runs on the *addresses*, so an alias the model cited is
+        # translated before it is compared with what was served. A repair is written when
+        # the answer is delivered, not here: a refused answer is submitted again.
+        text = self._audit_text(answer)
+        if self._unserved_citations(answer):
             return "unserved"
         addresses = set(ADDRESS_TOKEN_RE.findall(text))
         if not addresses:
@@ -805,7 +908,7 @@ class RootLoop:
         unserved = len(self._unserved_citations(answer))
         if reason == "weak":
             bands = getattr(self._repl, "corpus_address_bands", None) or {}
-            addresses = set(ADDRESS_TOKEN_RE.findall(answer or ""))
+            addresses = set(ADDRESS_TOKEN_RE.findall(self._audit_text(answer)))
             best = min((bands.get(a, "unknown") for a in addresses),
                        key=lambda b: BAND_ORDER.index(b) if b in BAND_ORDER else 99,
                        default="unknown")
@@ -938,7 +1041,7 @@ class RootLoop:
         """
         if self._corpus_bridge is None:
             return
-        text = answer or ""
+        text = self._audit_text(answer)
         cited = bool(ADDRESS_TOKEN_RE.search(text))
         self.corpus_answers += 1
         if not cited:

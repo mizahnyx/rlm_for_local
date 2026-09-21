@@ -15,6 +15,7 @@ on, and this project has paid for that class of mistake before.
 from __future__ import annotations
 
 import json
+import random
 import re
 import struct
 from pathlib import Path
@@ -23,6 +24,7 @@ import pytest
 
 from rlm_kernel.corpus import CorpusBridge, CorpusIndex
 from rlm_kernel.mounts import LocalTreeMount
+from rlm_local.mnemonics import AliasTable
 from rlm_local.prompts import CORPUS_SECTION_LINES, corpus_helpers_section
 from rlm_local.repl import REPLSandbox, _WORKER_SCRIPT
 
@@ -186,21 +188,22 @@ class TestWorkerDefinesTheCorpusVerbs:
         assert "synonyms" in section
 
     def test_the_section_requires_the_answer_to_cite_its_evidence(self) -> None:
-        """RO4, owner call 2026-09-14: the answer must carry the addresses it used.
+        """RO4, owner call 2026-09-14: the answer must carry the evidence it used.
 
         The requirement is stated as a standing rule of the run, not as a clause
         inside a helper's description — the live rerun read three passages,
         printed seven addresses, and then submitted an answer citing none of
-        them. The address shape is spelled out because a model told only "cite"
-        invents a format, and then the harness cannot tell a citation from a
-        guess.
+        them. Since RO13 what it asks for is the **alias**, because copying a short
+        handle whole is the step that the address syntax kept costing turns on; the
+        form is spelled out because a model told only "cite" invents a format, and then
+        the harness cannot tell a citation from a guess.
         """
         section = corpus_helpers_section("/srv/corpus", has_index=True)
         assert "Cite your evidence" in section
         assert "Citations:" in section
-        assert "#L<start>-<end>" in section
-        # ...and what to do when the corpus does not hold the answer: an answer
-        # with no address and no coverage note is the shape this rule forbids.
+        assert "alias" in section
+        # ...and what to do when the corpus does not hold the answer: no handle and no
+        # coverage note is the shape this rule forbids.
         assert "corpus_coverage()" in section
 
 
@@ -593,6 +596,10 @@ class TestCorpusHelpersInALiveCell:
         because `corpus_search` had taught it that a list of hits is a list. One verb
         returning a list and its sibling returning a blob is a trap, not a contract,
         and the model paid a whole turn for it.
+
+        Since RO13 the *element* is a record rather than a string, so indexing into one
+        is a Python slice-with-a-meaning (`str(hit)`) instead of a character. The list
+        contract itself is unchanged, and that is what this test holds.
         """
         repl = REPLSandbox(cell_timeout=30.0)
         repl._corpus_bridge = bridge
@@ -601,11 +608,13 @@ class TestCorpusHelpersInALiveCell:
             shape = repl.execute(
                 "hits = corpus_find('budget')\n"
                 "print(type(hits).__name__, len(hits))\n"
-                "print(hits[0][:20])"
+                "print(str(hits[0])[:20])\n"
+                "print([type(h).__name__ for h in hits])"
             )
             assert shape.stderr == "", shape.stderr
             assert shape.stdout.splitlines()[0].startswith("list "), shape.stdout
             assert "notes/budget.md" in shape.stdout
+            assert "HitRecord" in shape.stdout, "an element is a record, not a string"
             # A miss is still a list: one element carrying the reason, as a search does.
             empty = repl.execute("print(type(corpus_find('nothing-like-this')).__name__)")
             assert empty.stdout.strip() == "list", empty.stdout
@@ -764,3 +773,490 @@ class TestThePromptMatchesTheWorker:
     def test_a_bridge_without_an_index_says_so_in_the_prompt(self, corpus: Path) -> None:
         backend = self._run(CorpusBridge.open_for(corpus, None))
         assert "No path index" in backend.system_prompts[0]
+
+
+# ── Mnemonic aliases and structured hits (RO13, 2026-09-20) ─────────────────
+#
+# The owner's finding on the prompt-experiment page: the model found four `strong`
+# hits, cited one exactly, and lost three cells to `IndexError` doing string surgery on
+# `path#L<start>-<end>` to feed a hit to `corpus_read`. These tests cover the four
+# places the alias changes: what a hit *is*, what `corpus_read` accepts, where the
+# citation audit reads its addresses, and what the delivered answer contains.
+
+
+class TestAHitIsARecordWithAnAlias:
+    """`hits[0]` is a record: fields by name, printing as the line, teaching on `[0]`.
+
+    The second half of the owner's finding was that a hit was being read *character by
+    character* — `hits[0][0]` was `'S'`, and a model that expected a structure got a
+    letter and carried on, which is worse than an error because nothing goes red.
+    """
+
+    def _repl_with_corpus(self, bridge) -> REPLSandbox:
+        repl = REPLSandbox(cell_timeout=30.0, alias_table=AliasTable(rng=random.Random(1)))
+        repl._corpus_bridge = bridge
+        repl.start("no context needed", MockSubcallMgr())
+        return repl
+
+    def test_a_search_hit_carries_named_fields(self, corpus: Path, bridge) -> None:
+        # The question is what the band is measured against, so it has to be set for the
+        # label to exist at all — a hit from a run with no question is honestly unlabelled.
+        bridge.question = "sails and ropes"
+        repl = self._repl_with_corpus(bridge)
+        try:
+            result = repl.execute(
+                "hits = corpus_search('sails')\n"
+                "hit = hits[0]\n"
+                "print('sail' in hit['snippet'])\n"
+                "print(hit['address'].startswith('notes/budget.md#L'))\n"
+                "print(hit['band'], hit['covers'])\n"
+                "print(len(hit['alias']) > 0, hit['alias'] != '')"
+            )
+            assert result.stderr == "", result.stderr
+            lines = result.stdout.split()
+            assert lines[0] == "True", result.stdout
+            assert lines[1] == "True", result.stdout
+            assert lines[2] == "strong", result.stdout
+            assert lines[3] == "2/2", result.stdout
+        finally:
+            repl.shutdown()
+
+    def test_integer_indexing_teaches_instead_of_returning_a_character(
+        self, corpus: Path, bridge,
+    ) -> None:
+        """The failure that started this: `hits[0][0]` silently yielded `'S'`."""
+        repl = self._repl_with_corpus(bridge)
+        try:
+            result = repl.execute(
+                "hits = corpus_search('sails')\n"
+                "print(hits[0][0])"
+            )
+            assert "a corpus hit is a record" in result.stderr, result.stderr
+            for field in ("address", "alias", "band", "snippet"):
+                assert field in result.stderr, f"{field} is not named in the message"
+        finally:
+            repl.shutdown()
+
+    def test_str_of_a_hit_is_the_printable_line_the_model_saw(
+        self, corpus: Path, bridge,
+    ) -> None:
+        """`print(hits)` must look unchanged, and the address must stay passable.
+
+        The hit line is the prompt's own example of what `corpus_search` returns, so the
+        record's string form has to be that line — with the address still the first
+        address-shaped token in it, because that is what the citation guard reads back
+        out of the model's stdout.
+        """
+        repl = self._repl_with_corpus(bridge)
+        try:
+            result = repl.execute(
+                "hits = corpus_search('sails')\n"
+                "hit = hits[0]\n"
+                "print(type(hit).__name__)\n"
+                "print(str(hit) == hit['text'])\n"
+                "print(str(hit).startswith('notes/budget.md#L'))\n"
+                "print('[alias:' in str(hit))\n"
+                "print(len(hits), len(list(hits)))"
+            )
+            assert result.stderr == "", result.stderr
+            assert result.stdout.splitlines() == [
+                "HitRecord", "True", "True", "False", "1 1",
+            ], result.stdout
+        finally:
+            repl.shutdown()
+
+    def test_iterating_hits_yields_records_not_characters(
+        self, corpus: Path, bridge,
+    ) -> None:
+        repl = self._repl_with_corpus(bridge)
+        try:
+            result = repl.execute(
+                "hits = corpus_search('sails')\n"
+                "print([type(h).__name__ for h in hits])\n"
+                "print(all(h['address'] for h in hits))"
+            )
+            assert result.stderr == "", result.stderr
+            assert "HitRecord" in result.stdout
+            assert result.stdout.splitlines()[-1] == "True"
+        finally:
+            repl.shutdown()
+
+    def test_a_path_hit_is_still_a_record_with_no_alias(
+        self, corpus: Path, bridge,
+    ) -> None:
+        """`corpus_find` returns paths, which are not citations.
+
+        A path has no chunk range, so it cannot be cited and cannot be read by address;
+        minting an alias for one would give the model a handle that resolves to nothing
+        citable. The record type still applies — that is the character-by-character fix
+        for every enumeration verb — and the alias field says `None` rather than lying.
+        """
+        repl = self._repl_with_corpus(bridge)
+        try:
+            result = repl.execute(
+                "hits = corpus_find('budget')\n"
+                "print(type(hits[0]).__name__)\n"
+                "print(hits[0]['alias'] is None)\n"
+                "print(hits[0]['address'] is None)"
+            )
+            assert result.stderr == "", result.stderr
+            assert result.stdout.splitlines() == ["HitRecord", "True", "True"]
+        finally:
+            repl.shutdown()
+
+
+class TestAliasesAreServedWithTheHits:
+    """The parent mints one alias per served address, and remembers the mapping."""
+
+    def _sandbox(self, bridge, alias_table=None) -> REPLSandbox:
+        repl = REPLSandbox(alias_table=alias_table
+                           or AliasTable(rng=random.Random(2)))
+        repl._worker_sock = FakeWorkerSock()  # type: ignore[assignment]
+        repl._corpus_bridge = bridge
+        return repl
+
+    def test_a_search_serves_an_alias_for_every_hit(self, bridge) -> None:
+        repl = self._sandbox(bridge)
+        repl._handle_request("corpus_search", {"query": "sails"})
+        served = repl.corpus_addresses_served
+        assert served
+        for address in served:
+            assert repl._alias_table.alias_for(address), address
+
+    def test_the_alias_is_marked_in_the_reply_and_is_not_an_address(
+        self, bridge,
+    ) -> None:
+        """The marker is the parent's annotation; the address is still the front token."""
+        repl = self._sandbox(bridge)
+        repl._handle_request("corpus_search", {"query": "sails"})
+        reply = repl._worker_sock.frames[-1]["result"]
+        assert isinstance(reply, list), reply
+        first = reply[0]
+        assert first.startswith("[alias:"), first
+        assert re.match(r"\[alias:[A-Z0-9-]+\] notes/budget\.md#L\d+-\d+", first), first
+
+    def test_one_alias_per_address_and_the_same_one_each_time(self, bridge) -> None:
+        repl = self._sandbox(bridge)
+        repl._handle_request("corpus_search", {"query": "sails"})
+        first = dict(zip(sorted(repl.corpus_addresses_served),
+                         [repl._alias_table.alias_for(a)
+                          for a in sorted(repl.corpus_addresses_served)]))
+        repl._handle_request("corpus_search", {"query": "sails"})
+        for address, alias in first.items():
+            assert repl._alias_table.alias_for(address) == alias
+
+    def test_path_verbs_serve_no_aliases(self, bridge) -> None:
+        """Only what can be cited and re-read gets a mnemonic."""
+        repl = self._sandbox(bridge)
+        for msg_type, msg in (("corpus_find", {"query": "budget"}),
+                              ("corpus_list", {"rel": ""}),
+                              ("corpus_count", {}),
+                              ("corpus_coverage", {})):
+            repl._handle_request(msg_type, msg)
+        assert len(repl._alias_table) == 0
+
+    def test_a_run_with_no_corpus_has_no_alias_table(self) -> None:
+        repl = REPLSandbox()
+        assert repl._alias_table is None
+
+
+class TestReadingThroughAnAlias:
+    """`corpus_read` takes an alias or an address; the parent does the translating.
+
+    One process learns the mnemonic vocabulary — the parent, which owns the table and the
+    served set — so the bridge, the mount and the containment check never see an alias.
+    """
+
+    def _sandbox(self, bridge, alias_table=None) -> REPLSandbox:
+        repl = REPLSandbox(alias_table=alias_table
+                           or AliasTable(rng=random.Random(3)))
+        repl._worker_sock = FakeWorkerSock()  # type: ignore[assignment]
+        repl._corpus_bridge = bridge
+        return repl
+
+    def test_an_alias_is_read_as_the_address_it_means(self, bridge) -> None:
+        repl = self._sandbox(bridge)
+        repl._handle_request("corpus_search", {"query": "sails"})
+        address = sorted(repl.corpus_addresses_served)[0]
+        alias = repl._alias_table.alias_for(address)
+        repl._handle_request("corpus_read", {"rel": alias})
+        reply = repl._worker_sock.frames[-1]["result"]
+        assert not str(reply).startswith("Error:"), reply
+        assert "sails" in str(reply), reply
+        assert address in repl.corpus_addresses_served
+
+    def test_an_alias_this_session_never_minted_says_so(self, bridge) -> None:
+        """A different message from "no such path", because it is a different mistake.
+
+        An alias is a handle the harness issues; one it never issued is a slip in the
+        caller, and answering "no such path" would send the model looking for a file that
+        was never the problem. The message names the aliases actually in play, so the
+        model can retry without another search.
+        """
+        repl = self._sandbox(bridge)
+        repl._handle_request("corpus_search", {"query": "sails"})
+        minted = set(repl._alias_table._by_alias)
+        repl._handle_request("corpus_read", {"rel": "ZZZ2-2"})
+        reply = str(repl._worker_sock.frames[-1]["result"])
+        assert "not an alias this session minted" in reply, reply
+        assert "no such path" not in reply, reply
+        assert all(alias in reply for alias in minted), reply
+
+    def test_a_bad_check_symbol_is_taught_as_an_alias_mistake(self, bridge) -> None:
+        """`KQM7-0` is not a well-formed alias, and it is still the mnemonic layer's miss.
+
+        Two guards in a row, and this test is about the *second* one: `looks_like_alias`
+        rejects `KQM7-0` because `0` is not in the check alphabet, and only the looser
+        `is_mnemonic_shaped` recognises it as an attempt at a handle. Remove that second
+        guard and the model is told "no such path in the corpus", which sends it looking
+        for a file when the mistake it made was about the mnemonic layer.
+        """
+        repl = self._sandbox(bridge)
+        repl._handle_request("corpus_search", {"query": "sails"})
+        repl._handle_request("corpus_read", {"rel": "KQM7-0"})
+        reply = str(repl._worker_sock.frames[-1]["result"])
+        assert "not an alias this session minted" in reply, reply
+        assert "no such path" not in reply, reply
+
+    def test_a_well_formed_but_unminted_alias_is_taught_too(self, bridge) -> None:
+        """The strict shape, for the case where the check symbol is right but unknown."""
+        repl = self._sandbox(bridge)
+        repl._handle_request("corpus_search", {"query": "sails"})
+        repl._handle_request("corpus_read", {"rel": "ZZZ2-2"})
+        reply = str(repl._worker_sock.frames[-1]["result"])
+        assert "not an alias this session minted" in reply, reply
+        assert "no such path" not in reply, reply
+
+    def test_a_real_path_is_not_mistaken_for_an_alias(self, bridge) -> None:
+        """The looser shape test must not swallow ordinary file names."""
+        repl = self._sandbox(bridge)
+        repl._handle_request("corpus_read", {"rel": "notes/absent.txt"})
+        reply = str(repl._worker_sock.frames[-1]["result"])
+        assert "not an alias" not in reply, reply
+        assert "no such path" in reply, reply
+
+    def test_another_sessions_alias_is_refused(self, bridge) -> None:
+        """The owner's rule: aliases never survive into another run."""
+        previous = AliasTable(rng=random.Random(4))
+        address = sorted(bridge.handle_search("sails"))[0].split()[0]
+        stale = previous.mint(address)
+        repl = self._sandbox(bridge)
+        repl._handle_request("corpus_read", {"rel": stale})
+        reply = str(repl._worker_sock.frames[-1]["result"])
+        assert "not an alias this session minted" in reply, reply
+
+    def test_a_full_address_still_passes_through_untouched(self, bridge) -> None:
+        repl = self._sandbox(bridge)
+        address = sorted(bridge.handle_search("sails"))[0].split()[0]
+        repl._handle_request("corpus_read", {"rel": address})
+        assert "sails" in str(repl._worker_sock.frames[-1]["result"])
+        assert address in repl.corpus_addresses_served
+
+    def test_a_read_of_an_alias_serves_the_address_not_the_alias(self, bridge) -> None:
+        """The served set is the vocabulary the citation audit compares in."""
+        repl = self._sandbox(bridge)
+        repl._handle_request("corpus_search", {"query": "sails"})
+        address = sorted(repl.corpus_addresses_served)[0]
+        alias = repl._alias_table.alias_for(address)
+        repl._handle_request("corpus_read", {"rel": alias})
+        assert alias not in repl.corpus_addresses_served
+
+
+class TestTheCitationAuditReadsAddresses:
+    """A cited alias is mapped back **before** the audit (RO13).
+
+    The model is handed aliases and told to cite what it read, so the audit has to accept
+    them — while still refusing a citation that resolves to nothing the harness served.
+    """
+
+    def _loop(self, bridge, alias_table):
+        from rlm_local.config import load_config
+        from rlm_local.root_loop import RootLoop
+
+        loop = RootLoop(load_config("tiny", max_turns=2), ScriptedBackend(),
+                        kernel_bridge=None, corpus_bridge=bridge,
+                        alias_table=alias_table)
+        loop._repl = REPLSandbox(alias_table=alias_table)
+        loop._repl._corpus_bridge = bridge
+        return loop
+
+    def test_an_aliased_citation_is_served_evidence(self, bridge) -> None:
+        table = AliasTable(rng=random.Random(5))
+        loop = self._loop(bridge, table)
+        try:
+            hits = bridge.handle_search("sails")
+            address = hits[0].split()[0]
+            alias = table.mint(address)
+            loop._repl.corpus_addresses_served.add(address)
+            assert loop._refusal_reason(f"the note says so. Citations: {alias}") is None
+        finally:
+            loop.shutdown()
+
+    def test_an_alias_for_an_unserved_address_is_still_refused(self, bridge) -> None:
+        """Authorising aliases must not authorise a passage nobody handed over.
+
+        The address is real and the alias resolves — but no helper ever served that
+        address, so the citation points at evidence the run did not have. Mapping aliases
+        to addresses must not become a way to smuggle in a fabricated one.
+        """
+        table = AliasTable(rng=random.Random(6))
+        loop = self._loop(bridge, table)
+        try:
+            served = bridge.handle_search("sails")[0].split()[0]
+            loop._repl.corpus_addresses_served.add(served)
+            table.mint(served)
+            elsewhere = table.mint("notes/never-served.txt#L5-9")
+            assert loop._refusal_reason(f"Citations: {elsewhere}") == "unserved"
+        finally:
+            loop.shutdown()
+
+    def test_an_unminted_alias_cites_nothing_and_is_refused_uncited(self, bridge) -> None:
+        """A mnemonic-shaped string the table never issued resolves to no address at all.
+
+        It cannot be counted as a fabricated *address* — there is no address in it — but
+        it is still not evidence, so the answer is refused for citing nothing. Either
+        refusal sends the same nudge, and what matters is that neither is accepted.
+        """
+        table = AliasTable(rng=random.Random(13))
+        loop = self._loop(bridge, table)
+        try:
+            served = bridge.handle_search("sails")[0].split()[0]
+            loop._repl.corpus_addresses_served.add(served)
+            table.mint(served)
+            assert loop._refusal_reason("Citations: ZZZ2-2") == "uncited"
+        finally:
+            loop.shutdown()
+
+    def test_a_repaired_alias_passes_the_audit(self, bridge) -> None:
+        """The whole point: a recoverable slip is recovered, not punished."""
+        table = AliasTable(rng=random.Random(7))
+        loop = self._loop(bridge, table)
+        try:
+            address = bridge.handle_search("sails")[0].split()[0]
+            alias = table.mint(address)
+            loop._repl.corpus_addresses_served.add(address)
+            swapped = alias[1] + alias[0] + alias[2:]
+            assert loop._refusal_reason(f"Citations: {swapped}") is None
+        finally:
+            loop.shutdown()
+
+    def test_a_repair_writes_an_event_when_the_answer_is_delivered(
+        self, bridge, tmp_path: Path,
+    ) -> None:
+        """Every repair is an event — the number RO13 exists to make countable."""
+        from rlm_local.config import load_config
+        from rlm_local.logger import TrajectoryLogger
+        from rlm_local.root_loop import RootLoop
+
+        table = AliasTable(rng=random.Random(8))
+        log = tmp_path / "run.jsonl"
+        loop = RootLoop(load_config("tiny", max_turns=2), ScriptedBackend(),
+                        logger=TrajectoryLogger(str(log)),
+                        kernel_bridge=None, corpus_bridge=bridge, alias_table=table)
+        loop._repl = REPLSandbox(alias_table=table)
+        loop._repl._corpus_bridge = bridge
+        try:
+            address = bridge.handle_search("sails")[0].split()[0]
+            alias = table.mint(address)
+            loop._repl.corpus_addresses_served.add(address)
+            swapped = alias[1] + alias[0] + alias[2:]
+            loop._finalize_answer(1, f"Citations: {swapped}")
+            text = log.read_text(encoding="utf-8")
+            assert '"citation_repaired"' in text, text
+            assert "resolved as repaired" in text, text
+        finally:
+            loop.shutdown()
+
+    def test_no_repair_event_without_a_repair(self, bridge, tmp_path: Path) -> None:
+        """The event must mean something: an exact alias writes none."""
+        from rlm_local.config import load_config
+        from rlm_local.logger import TrajectoryLogger
+        from rlm_local.root_loop import RootLoop
+
+        table = AliasTable(rng=random.Random(9))
+        log = tmp_path / "run.jsonl"
+        loop = RootLoop(load_config("tiny", max_turns=2), ScriptedBackend(),
+                        logger=TrajectoryLogger(str(log)),
+                        kernel_bridge=None, corpus_bridge=bridge, alias_table=table)
+        loop._repl = REPLSandbox(alias_table=table)
+        loop._repl._corpus_bridge = bridge
+        try:
+            address = bridge.handle_search("sails")[0].split()[0]
+            alias = table.mint(address)
+            loop._repl.corpus_addresses_served.add(address)
+            loop._finalize_answer(1, f"Citations: {alias}")
+            assert '"citation_repaired"' not in log.read_text(encoding="utf-8")
+        finally:
+            loop.shutdown()
+
+
+class TestTheDeliveredAnswerNamesRealPassages:
+    """The owner's call: the answer the reader gets carries true addresses.
+
+    *"the harness substitutes the true address inline"*, with *"the model's raw output"*
+    kept in the trajectory (2026-09-17). So the substitution happens on the way out, and
+    only there.
+    """
+
+    def _loop(self, bridge, alias_table, logger=None):
+        from rlm_local.config import load_config
+        from rlm_local.root_loop import RootLoop
+
+        loop = RootLoop(load_config("tiny", max_turns=2), ScriptedBackend(),
+                        logger=logger, kernel_bridge=None, corpus_bridge=bridge,
+                        alias_table=alias_table)
+        loop._repl = REPLSandbox(alias_table=alias_table)
+        loop._repl._corpus_bridge = bridge
+        return loop
+
+    def test_an_alias_in_the_answer_becomes_its_address(self, bridge) -> None:
+        table = AliasTable(rng=random.Random(10))
+        loop = self._loop(bridge, table)
+        try:
+            address = bridge.handle_search("sails")[0].split()[0]
+            alias = table.mint(address)
+            loop._repl.corpus_addresses_served.add(address)
+            delivered = loop._finalize_answer(1, f"It says so. Citations: {alias}")
+            assert address in delivered
+            assert alias not in delivered
+        finally:
+            loop.shutdown()
+
+    def test_prose_around_the_address_keeps_its_own_case(self, bridge) -> None:
+        """Only the alias span is rewritten; shouting the whole answer is not a feature."""
+        table = AliasTable(rng=random.Random(11))
+        loop = self._loop(bridge, table)
+        try:
+            address = bridge.handle_search("sails")[0].split()[0]
+            alias = table.mint(address)
+            loop._repl.corpus_addresses_served.add(address)
+            delivered = loop._finalize_answer(1, f"the Note says so ({alias.lower()})")
+            assert "the Note says so" in delivered
+            assert address in delivered
+        finally:
+            loop.shutdown()
+
+    def test_the_trajectory_keeps_the_raw_answer(self, bridge, tmp_path: Path) -> None:
+        """The trace is a record of what the model said, aliases and all."""
+        from rlm_local.config import load_config
+        from rlm_local.logger import TrajectoryLogger
+        from rlm_local.root_loop import RootLoop
+
+        table = AliasTable(rng=random.Random(12))
+        log = tmp_path / "run.jsonl"
+        loop = RootLoop(load_config("tiny", max_turns=2), ScriptedBackend(),
+                        logger=TrajectoryLogger(str(log)),
+                        kernel_bridge=None, corpus_bridge=bridge, alias_table=table)
+        loop._repl = REPLSandbox(alias_table=table)
+        loop._repl._corpus_bridge = bridge
+        try:
+            address = bridge.handle_search("sails")[0].split()[0]
+            alias = table.mint(address)
+            loop._repl.corpus_addresses_served.add(address)
+            raw = f"The note says so. Citations: {alias}"
+            loop._logger.log_root_message("assistant", raw)
+            loop._finalize_answer(1, raw)
+            assert alias in log.read_text(encoding="utf-8")
+        finally:
+            loop.shutdown()
+

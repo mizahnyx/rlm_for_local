@@ -46,12 +46,15 @@ from rlm_local.context_store import Context, _InMemoryContext
 # The address shape, from the module that owns the citation grammar: what the
 # harness served and what the model cites must be compared in one vocabulary.
 from rlm_kernel.textindex import ADDRESS_TOKEN_RE
+from rlm_local.mnemonics import AliasTable, is_mnemonic_shaped, looks_like_alias
 from rlm_local.templates import (
     CELL_HARD_TIMEOUT_ERROR,
     CELL_STDERR_TRUNCATED,
     CELL_STDOUT_TRUNCATED,
     CELL_TIMEOUT_ERROR,
+    HIT_ALIAS_MARKER,
     REPL_WORKER_RESTARTED,
+    WORKER_CORPUS_UNKNOWN_ALIAS,
     WORKER_MESSAGES,
 )
 
@@ -376,11 +379,70 @@ def _as_hits(result, fallback):
     # because that is the shape corpus_search taught it to reach for (2026-09-20:
     # it looped over the characters of the string instead of the hits).
     if isinstance(result, list):
-        return result
-    text = str(result if result is not None else fallback).strip()
-    if not text:
-        return [fallback]
-    return [line for line in text.splitlines() if line.strip()]
+        lines = result
+    else:
+        text = str(result if result is not None else fallback).strip()
+        if not text:
+            return [fallback]
+        lines = [line for line in text.splitlines() if line.strip()]
+    # Each hit becomes a *record* carrying its alias, band and coverage (RO13). The
+    # parent serves those inside markers defined in `templates.py`; they are stripped
+    # here so `str(record)` is the line the model has always seen. The wrapper is what
+    # makes `hit['address']` work and `hit[0]` teach instead of returning a letter.
+    return [_hit_record(line) for line in lines]
+
+def _hit_record(line):
+    line = str(line)
+    marker = _HIT_MARKER_RE.search(line)
+    fields = {"alias": None, "band": None, "covers": None}
+    if marker:
+        fields["alias"] = marker.group(1)
+        line = (line[:marker.start()] + line[marker.end():]).lstrip()
+    before, _, after = line.partition('\n')
+    band = _HIT_BAND_RE.search(before)
+    if band:
+        # Group 3 is the band name; 1 and 2 are the covered/total counts that ride in
+        # front of it. Getting these the wrong way round is a silent mislabel — the
+        # record would say `band='2'` — which is why the test asserts the value.
+        fields["band"] = band.group(3)
+        fields["covers"] = f"{band.group(1)}/{band.group(2)}"
+    address = _ADDRESS_RE.search(before)
+    return HitRecord(line, address.group(0) if address else None,
+                     after.strip(), fields)
+
+class HitRecord(dict):
+    '''One corpus search hit: a mapping with named fields that prints as its line.
+
+    Why a record rather than a string (RO13, owner's finding 2026-09-17): `hits[0][0]`
+    used to be `'S'`, so a model that expected a structure got a letter and continued —
+    a silent wrong answer, which is worse than an error. Here `hit['address']` works,
+    `hit[0]` raises a message naming the fields, and `str(hit)` is *exactly* the line
+    the model was already shown, so `print(hits)` and every prompt example still work.
+    '''
+    def __init__(self, line, address, snippet, fields):
+        super().__init__(text=line, address=address, snippet=snippet, **fields)
+        self._line = line
+
+    def __str__(self):
+        return self._line
+
+    def __repr__(self):
+        return self._line
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            raise TypeError(_MSG['hit_not_a_record'].format(key=key))
+        return dict.__getitem__(self, key)
+
+    def get(self, key, default=None):
+        if isinstance(key, int):
+            raise TypeError(_MSG['hit_not_a_record'].format(key=key))
+        return dict.get(self, key, default)
+
+_HIT_MARKER_RE = re.compile(r"\[alias:([A-Z0-9][A-Z0-9-]*)\]\s*")
+_HIT_BAND_RE = re.compile(
+    r"covers\s+(\d+)/(\d+)\s+of the question's words\s+\((strong|partial|weak|none)\)")
+_ADDRESS_RE = re.compile(r"[^\s`\"'()\[\]<>]+#L\d+-\d+")
 
 def _teaching(helper, takes, as_list=False):
     # A cell that mistypes a parameter should lose one tool call, not a turn: the
@@ -433,16 +495,18 @@ def _harness_corpus_count(kind=None, under=""):
 
 @_teaching("corpus_search", "query, k=8, include_vendored=False", as_list=True)
 def _harness_corpus_search(query, k=8, include_vendored=False):
-    # Returns a LIST of hit strings, not one blob. The first live run had the model
+    # Returns a LIST of hit records, not one blob. The first live run had the model
     # write len(hits), hits[0] and hits[:3] against a returned string, and get the
-    # character count and the letter 'A' — so this shape is the contract.
+    # character count and the letter 'A' — so this shape is the contract. Since RO13 each
+    # element is a record: `hit['address']` names the passage, `hit['alias']` is the short
+    # handle, and `str(hit)` is the line this verb has always printed.
     _send({"cmd": "corpus_search", "query": query, "k": k,
            "include_vendored": include_vendored, "cell_id": _cell_id})
     resp = _recv()
     result = resp.get('result')
     if isinstance(result, list):
-        return result
-    return [_MSG['corpus_search_failed']]
+        return _as_hits(result, _MSG['corpus_search_failed'])
+    return _as_hits(_MSG['corpus_search_failed'], _MSG['corpus_search_failed'])
 
 @_teaching("corpus_coverage", "no arguments")
 def _harness_corpus_coverage():
@@ -508,7 +572,10 @@ _SHOW_VARS_IGNORE = frozenset({"answer", "context", "__builtins__", "llm_query",
                                 "_harness_search", "_harness_propose",
                                 "_SHOW_VARS_IGNORE", "_sock", "_send", "_recv", "_cell_id",
                                 "json", "os", "re", "socket", "struct", "sys", "traceback",
-                                "StringIO", "_HOST", "_PORT", "_FileContext", "_decode_one"})
+                                "StringIO", "_HOST", "_PORT", "_FileContext", "_decode_one",
+                                # RO13: the hit record's own machinery, not the model's data.
+                                "HitRecord", "_hit_record", "_as_hits",
+                                "_HIT_MARKER_RE", "_HIT_BAND_RE", "_ADDRESS_RE"})
 
 def peek(n=2000):
     s = str(context)[:n]
@@ -855,6 +922,7 @@ class REPLSandbox:
         cell_timeout_hard: float = 1200.0,
         stdout_cap: int = 256 * 1024,
         restart_after_consecutive_timeouts: int = 2,
+        alias_table: AliasTable | None = None,
     ) -> None:
         self._cell_timeout = cell_timeout
         self._cell_timeout_hard = cell_timeout_hard
@@ -893,6 +961,13 @@ class REPLSandbox:
         #: sandbox serves, so the run's trajectory records what the model was shown.
         #: Injected by the root loop like the other bridges.
         self._corpus_quality_logger: Any = None
+        #: RO13: the aliases this **chat session** has handed out, and the way back. It
+        #: lives beside `corpus_addresses_served` for the same reason — the parent is the
+        #: only process that knows what it served — and it is created once here, so
+        #: aliases span the runs of one session and a fresh process refuses another
+        #: session's aliases. `rng` is injectable for tests, exactly as
+        #: `textindex.random_chunks` takes one.
+        self._alias_table: AliasTable | None = alias_table
         #: Called as `report(verb, query, addresses, chars, ok)` after every corpus
         #: helper call, where `addresses` is `[{"address": …, "band": …}]`. The
         #: distribution the quality logger reports says how many of each band were
@@ -1282,9 +1357,86 @@ class REPLSandbox:
         # corpus at all", not "did its look succeed".
         self.corpus_calls += 1
         bridge = self._corpus_bridge
+        if msg_type == "corpus_read":
+            # A read may name an alias instead of an address (RO13). The translation
+            # happens here, in the parent, which is where the table lives and where the
+            # served set is kept — so the bridge, the mount and the containment check
+            # never learn a mnemonic vocabulary, and the worker never holds a second copy
+            # of the mapping that could disagree with this one.
+            msg, refusal = self._resolve_read_target(msg)
+            if refusal is not None:
+                self._report_served(msg_type, msg, [], chars=len(refusal), ok=False)
+                return refusal
         result = self._corpus_dispatch(msg_type, msg, bridge)
+        result = self._serve_aliases(msg_type, result)
         self._remember_served(msg_type, msg, result)
         return result
+
+    def _resolve_read_target(self, msg: dict) -> tuple[dict, str | None]:
+        """Translate an aliased `corpus_read` into the address it means.
+
+        Returns the (possibly rewritten) message and, when the alias cannot be trusted,
+        the refusal text to hand the model *instead* of calling the bridge at all. Three
+        outcomes, and the middle one matters: a full address passes through untouched; a
+        clean alias becomes its address; an alias-shaped string this session never minted
+        gets a message that says exactly that, rather than a `no such path` that would
+        send the model hunting for a file that was never the problem.
+        """
+        rel = str(msg.get("rel") or "")
+        if self._alias_table is None:
+            return msg, None
+        if looks_like_alias(rel):
+            resolution = self._alias_table.resolve(rel)
+            if resolution.address is not None:
+                rewritten = dict(msg)
+                rewritten["rel"] = resolution.address
+                return rewritten, None
+            return msg, WORKER_CORPUS_UNKNOWN_ALIAS.format(
+                alias=rel, known=self._known_aliases(resolution.candidates))
+        if is_mnemonic_shaped(rel):
+            # Shaped like a handle but not a well-formed one — a bad check symbol, say.
+            # Answering "no such path" would send the model looking for a file, when the
+            # mistake it made was about the mnemonic layer.
+            return msg, WORKER_CORPUS_UNKNOWN_ALIAS.format(
+                alias=rel, known=self._known_aliases())
+        return msg, None
+
+    def _known_aliases(self, candidates: list[str] | None = None) -> str:
+        """The aliases in play, for an error message — counts, never corpus text."""
+        if self._alias_table is None:
+            return "none minted yet"
+        known = ", ".join(sorted(self._alias_table._by_alias))
+        if candidates:
+            known = f"{known or 'none'} (closest: {', '.join(candidates)})"
+        return known or "none minted yet"
+
+    def _serve_aliases(self, msg_type: str, result: Any) -> Any:
+        """Serve every address in a hit list together with its alias (RO13).
+
+        The alias is added inside a marker the worker strips into the record's `alias`
+        field, so the line the model sees keeps its address at the front where it has
+        always been, and `str(hit)` stays the string the prompts show.
+
+        Only the *address-producing* verbs are decorated. `corpus_find` returns paths and
+        `corpus_list` returns entries — a path is not a citation and has no chunk range,
+        so minting a mnemonic for one would give the model a handle it cannot cite and
+        cannot read. The character-by-character defect is fixed for all three verbs by
+        the record type; the alias is for what can be cited.
+        """
+        if (self._alias_table is None or msg_type != "corpus_search"
+                or not isinstance(result, list)):
+            return result
+        decorated: list[str] = []
+        for element in result:
+            text = str(element)
+            address = ADDRESS_TOKEN_RE.search(text.split("\n", 1)[0])
+            if address is None:
+                decorated.append(text)
+                continue
+            alias = self._alias_table.mint(address.group(0))
+            marker = HIT_ALIAS_MARKER.format(alias=alias)
+            decorated.append(f"{marker} {text.lstrip()}")
+        return decorated
 
     def _corpus_dispatch(self, msg_type: str, msg: dict, bridge: Any) -> str:
         """The verb table, separate so `_corpus_result` can inspect the answer."""
@@ -1369,7 +1521,18 @@ class REPLSandbox:
         if report is None:
             return
         bands = bands or {}
-        payload = [{"address": address, "band": bands.get(address)}
+        aliases = {}
+        table = self._alias_table
+        for address in addresses:
+            # The alias the model was handed for this address, if it has one. Derived
+            # from the table rather than parsed back out of the reply text, so the event
+            # carries the mapping itself and not a second reading of a formatted line.
+            if table is not None:
+                minted = table.alias_for(address)
+                if minted is not None:
+                    aliases[address] = minted
+        payload = [{"address": address, "band": bands.get(address),
+                    "alias": aliases.get(address)}
                    for address in addresses]
         query = str(msg.get("query") or msg.get("rel") or "")
         try:

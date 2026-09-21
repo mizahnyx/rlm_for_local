@@ -693,6 +693,45 @@ hard way — the first version returned one formatted string, and the first live
 saw the model write `len(hits)` and `hits[0]` against it, get a character count and
 the letter `A`, then report "malformed data" and give up.
 
+**A hit is a record with a short handle, and the model cites the handle.** Since
+2026-09-21 each element is a `HitRecord`, not a string:
+
+```python
+hits = corpus_search("the question's own words")
+hit = hits[0]
+hit['alias']     # 'KQM7-3'  — the short handle, and what a citation should use
+hit['address']   # 'path/to/file.txt#L1204-1360' — the full address
+hit['band']      # 'strong' | 'partial' | 'weak' | 'none'
+hit['covers']    # '2/4'
+hit['snippet']   # the passage opening
+str(hit)         # exactly the line printed before, so print(hits) is unchanged
+```
+
+`hit[0]` **raises** a message naming those fields instead of returning a character.
+That is deliberate, and it fixes a failure that was invisible: `hits[0][0]` used to be
+`'S'`, so a model that expected a structure got a letter and carried on — worse than an
+error, because nothing went red. `corpus_read(hit)`, `corpus_read(hit['alias'])` and
+`corpus_read(hit['address'])` all read the same passage.
+
+**Why a handle at all.** An address is 40–120 characters of path bytes and numbers,
+and the model has to hand it back to cite it. A live run on 2026-09-20 found four
+`strong` hits, cited one exactly, and then lost three cells to `IndexError` doing
+string surgery on the address to feed it to `corpus_read`. An alias is short enough to
+copy whole, and repairable when it is not: case and whitespace normalise, a confused
+glyph folds to the one the alphabet keeps (`0`→`O`, `1`/`L`→`I`, `5`→`S`, `8`→`B`,
+`rn`→`m`), and a single-edit slip is accepted only when **exactly one** live alias is
+that close — two readings is a refusal naming both, never a guess. Every repair writes
+a `citation_repaired` event.
+
+**What the owner sees.** The trajectory keeps the model's raw output, aliases and all;
+the answer delivered to you has the true address substituted inline, and the rendered
+trace page shows the alias beside the address for everything cited or served. So:
+
+```bash
+# How often did the model mistype a handle? (the number the feature exists to measure)
+grep -c '"guardrail": "citation_repaired"' "$LOG"
+```
+
 **The shape is a contract for every enumeration verb, and a mistyped parameter is
 answered rather than raised.** `corpus_search`, `corpus_find` and `corpus_list` all
 return a **list** — one element per hit, path or entry — and `corpus_stat`,

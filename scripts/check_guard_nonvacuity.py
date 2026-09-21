@@ -1576,10 +1576,8 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO4 corpus_search returns one string instead of a list of hits",
         "src/rlm_local/repl.py",
-        "    result = resp.get('result')\n"
         "    if isinstance(result, list):\n"
-        "        return result",
-        "    result = resp.get('result')\n"
+        "        return _as_hits(result, _MSG['corpus_search_failed'])",
         "    if isinstance(result, list):\n"
         "        return \"\\n\".join(result)",
         [
@@ -1703,7 +1701,7 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO4 the prompt stops requiring the answer to cite its evidence",
         "src/rlm_local/prompts.py",
-        "    \"- **Cite your evidence.** Every claim you make about the corpus must carry\"",
+        "    \"- **Cite your evidence, by its handle.** Every claim you make about the corpus must\"",
         "    \"Mention your sources only if you feel like it.\"",
         [
             "tests/test_corpus_repl.py::TestWorkerDefinesTheCorpusVerbs"
@@ -1725,8 +1723,8 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO4 a forced corpus answer stops being measured",
         "src/rlm_local/root_loop.py",
-        "            self._record_citations(turn + 1, final_answer)",
-        "            pass",
+        "            final_answer = self._finalize_answer(turn + 1, final_answer)",
+        "            pass  # a forced answer is not measured",
         [
             "tests/test_root_loop_integration.py::TestCorpusCitationTelemetry"
             "::test_the_forced_finalization_answer_is_measured_too",
@@ -2043,9 +2041,11 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO10 the band stops travelling with the address",
         "src/rlm_local/repl.py",
-        "        payload = [{\"address\": address, \"band\": bands.get(address)}\n"
+        "        payload = [{\"address\": address, \"band\": bands.get(address),\n"
+        "                    \"alias\": aliases.get(address)}\n"
         "                   for address in addresses]",
-        "        payload = [{\"address\": address, \"band\": None}\n"
+        "        payload = [{\"address\": address, \"band\": None,\n"
+        "                    \"alias\": aliases.get(address)}\n"
         "                   for address in addresses]",
         [
             "tests/test_corpus_repl.py::TestTheSandboxReportsWhatItServed"
@@ -2610,6 +2610,158 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         [
             "tests/test_cli_corpus.py::TestReindexEncodingsCommand"
             "::test_one_unstorable_source_does_not_end_the_pass",
+        ],
+    ),
+    # ── RO13: the mnemonic alias table (2026-09-20) ────────────────────────
+    # The alias layer's whole value is that a mis-typed handle either resolves to
+    # the passage it came from or is refused. Each entry below removes one of the
+    # properties that makes that true.
+    (
+        "RO13 a confusable glyph comes back into the alphabet",
+        "src/rlm_local/mnemonics.py",
+        'LETTERS = "ABCDEFGHIJKMNOPQRSTUVWXYZ"',
+        'LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"',
+        ["tests/test_mnemonics.py::TestAlphabet::test_letters_exclude_l"],
+    ),
+    (
+        "RO13 the check symbol stops validating the body it is a digest of",
+        "src/rlm_local/mnemonics.py",
+        "    if verify_check:\n"
+        "        for index, allowed in enumerate(expected):\n"
+        "            if body[index] not in allowed:\n"
+        "                return \"\"",
+        "    if False:\n"
+        "        for index, allowed in enumerate(expected):\n"
+        "            if body[index] not in allowed:\n"
+        "                return \"\"",
+        [
+            "tests/test_mnemonics.py::TestResolveFolding"
+            "::test_a_folded_body_with_an_excluded_glyph_is_not_a_candidate",
+        ],
+    ),
+    (
+        "RO13 a repeated draw is not checked for collision",
+        "src/rlm_local/mnemonics.py",
+        "            alias = f\"{candidate}-{code_to_check(candidate)}\"\n"
+        "            if alias not in self._by_alias:\n"
+        "                return alias\n"
+        "        # The draws stopped finding free space.",
+        "            alias = f\"{candidate}-{code_to_check(candidate)}\"\n"
+        "            return alias\n"
+        "        # The draws stopped finding free space.",
+        [
+            "tests/test_mnemonics.py::TestBijection"
+            "::test_a_repeated_draw_is_checked_for_collision",
+        ],
+    ),
+    (
+        "RO13 the fold goes toward the excluded digit again",
+        "src/rlm_local/mnemonics.py",
+        '    folded = (text.replace("0", "O")',
+        '    folded = (text.replace("O", "0")',
+        [
+            "tests/test_mnemonics.py::TestResolveFolding"
+            "::test_a_confusable_slip_folds_to_the_surviving_glyph",
+        ],
+    ),
+    (
+        "RO13 an ambiguous repair takes the first candidate",
+        "src/rlm_local/mnemonics.py",
+        "        if len(candidates) == 1:\n"
+        "            winner = candidates[0]",
+        "        if candidates:\n"
+        "            winner = candidates[0]",
+        [
+            "tests/test_mnemonics.py::TestResolveRepair"
+            "::test_ambiguity_is_refused_not_guessed",
+        ],
+    ),
+    (
+        "RO13 the alias table is shared across runs",
+        "src/rlm_local/mnemonics.py",
+        "        self._rng = rng if rng is not None else random.Random()",
+        "        self._rng = rng if rng is not None else random.Random()\n"
+        "        self._by_address = _PROCESS_WIDE_CACHE.setdefault('by_address', {})\n"
+        "        self._by_alias = _PROCESS_WIDE_CACHE.setdefault('by_alias', {})",
+        [
+            "tests/test_mnemonics.py::TestBijection"
+            "::test_a_fresh_table_refuses_another_runs_alias",
+        ],
+    ),
+    (
+        "RO13 an integer index returns a character again",
+        "src/rlm_local/repl.py",
+        "    def __getitem__(self, key):\n"
+        "        if isinstance(key, int):\n"
+        "            raise TypeError(_MSG['hit_not_a_record'].format(key=key))",
+        "    def __getitem__(self, key):\n"
+        "        if isinstance(key, int):\n"
+        "            return self._line[key]",
+        [
+            "tests/test_corpus_repl.py::TestAHitIsARecordWithAnAlias"
+            "::test_integer_indexing_teaches_instead_of_returning_a_character",
+        ],
+    ),
+    (
+        "RO13 the record stops printing the line it always printed",
+        "src/rlm_local/repl.py",
+        "    def __str__(self):\n        return self._line",
+        "    def __str__(self):\n        return repr(dict(self))",
+        [
+            "tests/test_corpus_repl.py::TestAHitIsARecordWithAnAlias"
+            "::test_str_of_a_hit_is_the_printable_line_the_model_saw",
+        ],
+    ),
+    (
+        "RO13 a served hit gets no alias",
+        "src/rlm_local/repl.py",
+        "            alias = self._alias_table.mint(address.group(0))",
+        "            alias = None  # mutation: the address is served without a handle",
+        [
+            "tests/test_corpus_repl.py::TestAliasesAreServedWithTheHits"
+            "::test_a_search_serves_an_alias_for_every_hit",
+        ],
+    ),
+    (
+        "RO13 an unknown alias is answered as a missing path",
+        "src/rlm_local/repl.py",
+        "        if is_mnemonic_shaped(rel):",
+        "        if False:",
+        [
+            "tests/test_corpus_repl.py::TestReadingThroughAnAlias"
+            "::test_a_bad_check_symbol_is_taught_as_an_alias_mistake",
+        ],
+    ),
+    (
+        "RO13 a cited alias bypasses the address mapping",
+        "src/rlm_local/mnemonics.py",
+        "        if resolution.status in _RESOLVED and resolution.address is not None:",
+        "        if False:",
+        [
+            "tests/test_corpus_repl.py::TestTheCitationAuditReadsAddresses"
+            "::test_an_aliased_citation_is_served_evidence",
+        ],
+    ),
+    (
+        "RO13 a repaired citation writes no event",
+        "src/rlm_local/root_loop.py",
+        "        repairs = self._citation_repairs\n"
+        "        self._citation_repairs = []",
+        "        repairs = []\n"
+        "        self._citation_repairs = []",
+        [
+            "tests/test_corpus_repl.py::TestTheCitationAuditReadsAddresses"
+            "::test_a_repair_writes_an_event_when_the_answer_is_delivered",
+        ],
+    ),
+    (
+        "RO13 the delivered answer keeps the model's aliases",
+        "src/rlm_local/root_loop.py",
+        "        mapped = substitute_addresses(text, table, repairs=self._citation_repairs)",
+        "        mapped = text",
+        [
+            "tests/test_corpus_repl.py::TestTheDeliveredAnswerNamesRealPassages"
+            "::test_an_alias_in_the_answer_becomes_its_address",
         ],
     ),
 ]

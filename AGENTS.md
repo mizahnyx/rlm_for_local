@@ -234,6 +234,47 @@ nothing (the `AGENTS.md` §1.8 corollary again). Such refusals are their own eve
 2026-09-17: **implemented and unit-proved, never yet observed against a live
 model** — `docs/20260917-0410-corpus-a-citation-must-answer-the-question.md`.
 
+**A hit is a record with a short handle, and the model cites the handle.** Since
+RO13 (2026-09-21) `corpus_search` returns a list of `HitRecord`s: `hit['address']`,
+`hit['alias']`, `hit['band']`, `hit['covers']`, `hit['snippet']`, `hit['text']`.
+`str(hit)` is exactly the line the model has always been shown, and `len(hits)` /
+`hits[0]` / iteration still work, but `hit[0]` **raises** a message naming the
+fields — an integer index used to return a character (`hits[0][0]` was `'S'`), and a
+model that expected a structure got a letter and carried on, which is worse than an
+error because nothing goes red. The five parts of the contract, each separately
+guarded:
+
+| part | where | the rule |
+|---|---|---|
+| the alias | `mnemonics.AliasTable` | `KQM7-3`: three letters, a digit, a check symbol, from alphabets without `L`, `0`, `1`, `5`, `8`. 93 750 codes, and **the width is a measured requirement, not a preference** |
+| who owns it | `repl.REPLSandbox._alias_table` | the **parent**, beside `corpus_addresses_served`. The worker never learns the vocabulary — it hands an alias back untouched and the parent translates it — because the audit, the repair events and the served set all live in the parent |
+| `corpus_read` | `repl._resolve_read_target` | takes an alias or a full address; an alias this session never minted is answered as an alias mistake (`WORKER_CORPUS_UNKNOWN_ALIAS`), never as "no such path" |
+| the answer | `root_loop._finalize_answer` | the trajectory keeps the model's raw output; the **delivered** answer gets the true address substituted inline |
+| the event | `root_loop._log_citation_repairs` | every repair writes `citation_repaired` — the number this feature exists to make countable |
+
+Three properties make an alias safe to repair, and only the third is load-bearing:
+the alphabet excludes one member of each confusable pair, so a slip cannot become a
+*different valid* alias; the check symbol is a digest of the body, which is
+corruption **detection** and is **not** injective (27 symbols cannot distinguish
+93 750 codes — the design's original claim of injectivity is arithmetically
+impossible); and `resolve` repairs only on a **unique winner**, refusing `ambiguous`
+with both candidates named and never picking. The uniqueness rule is the guard, and
+that was measured rather than reasoned: a variant that *additionally* required a
+repair candidate's check symbol to match resolved **11 slips out of 3 110 to the
+wrong passage**, while the unique-winner rule resolved none — narrowing the
+candidate set can leave exactly one survivor where two readings exist.
+`docs/20260921-0118-mnemonic-aliases-ownership-and-three-corrections.md`.
+
+**A mnemonic layer that resolves ambiguously is worse than the addresses it
+replaces**, because it points a citation at a passage the model never meant — the
+one failure this project ranks below silence. The residual risk is therefore a slip
+that lands *on* another live alias, and space is the whole defence: at the design's
+original 3 750 codes a sampled session produced exactly that wrong resolution, and
+at 93 750 it does not. Two live aliases one glyph apart would make such a slip
+`ambiguous` rather than wrong, which is the safe direction; a fresh table also
+refuses another session's aliases, so an old trace's handle cannot silently mean a
+new passage.
+
 **Read a run back as Markdown, and keep it where the corpus is.** `rlm trace
 render` turns a trajectory into one page per run — question, outcome, citation
 audit, turn-by-turn transcript, and the passage behind every cited or served

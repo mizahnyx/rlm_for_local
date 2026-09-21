@@ -67,10 +67,17 @@ _REPL_ECHO_PREFIX = "REPL output:"
 
 @dataclass
 class ServedAddress:
-    """One address a helper handed the model, with the band it came with."""
+    """One address a helper handed the model, with the band and alias it came with.
+
+    `alias` is the mnemonic the model was given for this passage (RO13) — the handle it
+    was asked to cite instead of the address. It is on the page so a reader can see the
+    mapping the run actually used, which is also what makes an alias in a cited answer
+    legible without another lookup.
+    """
 
     address: str
     band: str | None = None
+    alias: str | None = None
 
 
 @dataclass
@@ -462,7 +469,8 @@ def _absorb(run: RunTrace, event: dict[str, Any]) -> None:
             ok=bool(event.get("ok", True)),
             addresses=[
                 ServedAddress(address=str(entry.get("address") or ""),
-                              band=entry.get("band"))
+                              band=entry.get("band"),
+                              alias=entry.get("alias"))
                 for entry in (event.get("addresses") or [])
                 if isinstance(entry, dict) and entry.get("address")
             ],
@@ -645,16 +653,17 @@ def render_run_markdown(
         if turn.served:
             lines.append("**Served to the model**")
             lines.append("")
-            lines.append("| verb | query | address | band |")
-            lines.append("|---|---|---|---|")
+            lines.append("| verb | query | alias | address | band |")
+            lines.append("|---|---|---|---|---|")
             for call in turn.served:
                 if not call.addresses:
-                    lines.append(f"| `{call.verb}` | {_cell(call.query)} | "
+                    lines.append(f"| `{call.verb}` | {_cell(call.query)} | | "
                                  f"_(nothing served; ok={call.ok})_ | |")
                     continue
                 for served in call.addresses:
                     band = f"**{served.band}**" if served.band else "_(no band)_"
-                    lines.append(f"| `{call.verb}` | {_cell(call.query)} | "
+                    alias = f"`{served.alias}`" if served.alias else "—"
+                    lines.append(f"| `{call.verb}` | {_cell(call.query)} | {alias} | "
                                  f"`{served.address}` | {band} |")
             lines.append("")
         for nudge in turn.nudges:
@@ -676,7 +685,7 @@ def render_run_markdown(
 def _address_block(run: RunTrace, address: str,
                    passages: dict[str, str],
                    max_passage: int) -> list[str]:
-    """One audited address: its band, who served it, and the passage itself."""
+    """One audited address: its alias, band, who served it, and the passage itself."""
     bands = run.band_by_address()
     band = bands.get(address)
     servers = [call for call in run.served
@@ -687,7 +696,12 @@ def _address_block(run: RunTrace, address: str,
     else:
         who = "no helper"
     label = f"**{band}**" if band else "no band (unknown)"
-    out = [f"- `{address}` — {label}, served by {who}"]
+    # RO13: the alias beside the address, so a reader can connect the handle the model
+    # wrote to the passage it means without re-deriving the mapping from the events.
+    alias = next((s.alias for call in servers for s in call.addresses
+                  if s.address == address and s.alias), None)
+    handle = f" (alias `{alias}`)" if alias else ""
+    out = [f"- `{address}`{handle} — {label}, served by {who}"]
     passage = passages.get(address)
     if passage:
         if len(passage) > max_passage:

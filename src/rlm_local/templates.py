@@ -84,14 +84,17 @@ NUDGE_CORPUS_UNSEARCHED = (
 # about coverage. The prompt-only version of this rule was measured and failed —
 # three consecutive live runs of the 4B laptop model searched, read up to five
 # passages, printed the addresses, and cited none of them — so the requirement is
-# enforced once now, with the escape hatch the instruction already names.
+# enforced once now, with the escape hatch the instruction already says. Since RO13 the
+# form it asks for is the short alias, because copying an alias whole is the step the
+# address syntax kept costing turns on.
 NUDGE_CORPUS_UNCITED = (
     "Your answer cites nothing, so it cannot be checked. Submit the same answer "
-    "again with a final `Citations:` line naming the addresses you actually "
-    "read — `Citations: <path>#L<start>-<end>; <path>#L<start>-<end>`. If you "
-    "did not read anything that answers the question, say that instead and quote "
-    "the coverage line from corpus_coverage(): 'the corpus does not contain "
-    "this' is an acceptable answer, an uncited claim about it is not."
+    "again with a final `Citations:` line naming the passages you actually read, by "
+    "the short handle the search printed for each — `Citations: KQM7-3; PQ2X-7`. "
+    "Copy each handle exactly as it appeared; if you did not read anything that "
+    "answers the question, say that instead and quote the coverage line from "
+    "corpus_coverage(): 'the corpus does not contain this' is an acceptable answer, "
+    "an uncited claim about it is not."
 )
 
 # Raised when a corpus answer's *entire* evidence is made of hits the search
@@ -150,10 +153,11 @@ NUDGE_CELL_TIMEOUT = (
 NUDGE_CORPUS_LAST_TURN = (
     "This is your last turn (turn {turn} of {max_turns}). Stop searching and "
     "submit now. If what you read answers the question, submit it with the "
-    "addresses in a final `Citations:` line. If it does not, submit an answer "
-    "that says the corpus does not contain this and quote the coverage line from "
-    "corpus_coverage() — 'I did not find it' is a complete answer, and a run that "
-    "ends without submitting loses everything it had learned."
+    "handles in a final `Citations:` line, copied as the search printed them. If "
+    "it does not, submit an answer that says the corpus does not contain this and "
+    "quote the coverage line from corpus_coverage() — 'I did not find it' is a "
+    "complete answer, and a run that ends without submitting loses everything it "
+    "had learned."
 )
 
 # ---------------------------------------------------------------------------
@@ -203,11 +207,12 @@ FORCED_FINALIZATION_PROMPT = (
 FORCED_FINALIZATION_CORPUS_PROMPT = (
     "Based on everything you have learned so far, provide your best final "
     "answer now, in plain text. This run had a read-only corpus, so end your "
-    "answer with a `Citations:` line naming the addresses you actually read — "
-    "`Citations: <path>#L<start>-<end>` — or, if you did not read anything that "
-    "answers the question, say that the corpus does not contain the answer and "
-    "quote the line corpus_coverage() printed (it begins `[coverage:`). An "
-    "answer that does neither cannot be checked, and it will be recorded as such."
+    "answer with a `Citations:` line naming the passages you actually read, by the "
+    "short handle the search printed for each — `Citations: KQM7-3` — or, if you did "
+    "not read anything that answers the question, say that the corpus does not "
+    "contain the answer and quote the line corpus_coverage() printed (it begins "
+    "`[coverage:`). An answer that does neither cannot be checked, and it will be "
+    "recorded as such."
 )
 
 # Terminal placeholders — the harness must never return an empty string as an
@@ -286,6 +291,47 @@ WORKER_CORPUS_BAD_ARGUMENTS = (
     "Nothing was run; call it again with the parameters above."
 )
 
+# A corpus hit is a *record*, not a string (RO13). Integer indexing used to return a
+# character — `hits[0][0]` was `'S'`, and a small model that expected a structure got a
+# letter and carried on, which is worse than an error. The fields are named in the
+# message so one failed access teaches the shape.
+WORKER_HIT_NOT_A_RECORD = (
+    "Error: a corpus hit is a record, not a string, so hit[{key}] has no meaning. "
+    "Use hit['address'] (the address to pass to corpus_read), hit['alias'] (the short "
+    "handle for it), hit['band'] (strong/partial/weak/none), hit['snippet'] (the "
+    "passage opening) or hit['text'] (the whole line). len(hits), hits[0] and "
+    "iteration over hits all work as before."
+)
+
+# ── Mnemonic aliases (RO13) ───────────────────────────────────────────────
+# The parent serves each hit with its alias inside these markers, and the worker strips
+# them into a record's fields; `str(record)` prints the line without them. Markers rather
+# than a second wire field because the hit list is the contract (`len`, `hits[0]`, and
+# the headings the model reads), and a harness-internal annotation must not change what
+# the model sees at the start of the line or where the address is.
+HIT_ALIAS_MARKER = "[alias:{alias}]"
+
+# The alias error a cell gets when it passes one this session never minted. It is a
+# distinct message from "no such path" because they are distinct mistakes: an alias is a
+# handle the harness issued, and one it never issued is a slip in the caller, not a
+# corpus miss. Emitted by the **parent** (which owns the table), not by the worker, so it
+# is deliberately absent from `WORKER_MESSAGES` — that dict is the worker's own message
+# layer, and `tests/test_templates.py` checks the two agree.
+WORKER_CORPUS_UNKNOWN_ALIAS = (
+    "Error: {alias} is not an alias this session minted — aliases are created per "
+    "conversation and never survive into another one. The aliases in play are: {known}. "
+    "Re-run corpus_search and use an alias from that result, or pass a full address "
+    "(`path#L<start>-<end>`)."
+)
+
+# The operator line for a repaired citation. The owner's decision (2026-09-17) is that
+# every repair is an event, so the model's real error rate on addresses becomes a number
+# instead of an anecdote — this is the number RO13 exists to make measurable.
+CITATION_REPAIRED_DETAIL = (
+    "{where}citation {written!r} resolved as {status} to {address!r} "
+    "(alias={alias} minted={minted})"
+)
+
 # ---------------------------------------------------------------------------
 # Corpus runs (RO4)
 # ---------------------------------------------------------------------------
@@ -313,5 +359,6 @@ WORKER_MESSAGES: dict[str, str] = {
     "corpus_count_failed": WORKER_CORPUS_COUNT_FAILED,
     "corpus_search_failed": WORKER_CORPUS_SEARCH_FAILED,
     "corpus_bad_arguments": WORKER_CORPUS_BAD_ARGUMENTS,
+    "hit_not_a_record": WORKER_HIT_NOT_A_RECORD,
 }
 
