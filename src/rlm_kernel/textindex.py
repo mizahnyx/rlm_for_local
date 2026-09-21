@@ -482,12 +482,22 @@ class TextIndex:
         *,
         mount: LocalTreeMount | None = None,
         cache_root: Path | None = None,
+        max_bytes: int | None = None,
     ) -> str:
         """The chunk's text, read from where it lives.
 
         A citation is only real if it can be re-read, so this is the *only* way
         text comes back out of the index — and it fails loudly rather than
         returning a plausible empty string.
+
+        `max_bytes` bounds the read to the first N bytes of the chunk, for a caller that
+        needs only the opening — the search does, to build a 300-character snippet and
+        count the question's words in it (RO21). The cost that matters is not the bytes
+        but the *open*: measured on the live index, an open plus a 64 KiB read is a median
+        87 ms with a multi-second tail, and a search performs one per hit to decorate an
+        answer it has already found. A chunk is bounded by `MAX_CHUNK_BYTES`, so the
+        saving per hit is real but modest; the saving is in not being the *largest*
+        read on the path.
         """
         if hit.origin == ORIGIN_CACHE:
             if cache_root is None or not hit.cache_task or not hit.cache_key:
@@ -498,15 +508,18 @@ class TextIndex:
                 data = path.read_bytes()
             except OSError as e:
                 raise ReadOnlyViolation(f"derived text is gone: {e}") from e
+            if max_bytes is not None:
+                data = data[:max_bytes]
         else:
             if mount is None:
                 raise ReadOnlyViolation("mount required for a source chunk")
             rel = hit.source.encode("utf-8", "surrogateescape").decode(
                 "utf-8", "surrogateescape"
             )
+            span = hit.byte_end - hit.byte_start
             with mount.open_readonly(rel) as handle:
                 handle.seek(hit.byte_start)
-                data = handle.read(hit.byte_end - hit.byte_start)
+                data = handle.read(span if max_bytes is None else min(span, max_bytes))
         # The same decode the tokenizer used, so what the model reads back is what the
         # search matched — and a NULL encoding reads as UTF-8, which is what those
         # rows were indexed with (`Hit.encoding` is where that distinction lives).

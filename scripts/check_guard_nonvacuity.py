@@ -2820,6 +2820,27 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "test_a_member_address_reads_from_the_cache_without_a_scan",
         ],
     ),
+    (
+        "RO21 a search reads the whole passage again",
+        "src/rlm_kernel/corpus.py",
+        "                text = text_index.read(hit, mount=self.mount, cache_root=self.cache_root,\n"
+        "                                       max_bytes=SEARCH_SNIPPET_BYTES)",
+        "                text = text_index.read(hit, mount=self.mount, cache_root=self.cache_root)",
+        [
+            "tests/rlm_kernel/test_search_read_bound.py"
+            "::TestASearchReadsOnlyTheOpening::test_no_read_asks_for_a_whole_chunk",
+        ],
+    ),
+    (
+        "RO21 the read path ignores the byte bound",
+        "src/rlm_kernel/textindex.py",
+        "                data = handle.read(span if max_bytes is None else min(span, max_bytes))",
+        "                data = handle.read(span)",
+        [
+            "tests/rlm_kernel/test_search_read_bound.py"
+            "::TestTheIndexReadHonoursTheBound::test_read_max_bytes_truncates_a_source_chunk",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

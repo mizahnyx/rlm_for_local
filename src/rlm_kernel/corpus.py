@@ -64,6 +64,24 @@ DEFAULT_FIND_LIMIT = 20
 DEFAULT_LIST_LIMIT = 50
 DEFAULT_READ_BYTES = 20_000
 
+#: How much of a hit's passage a *search* reads to decorate it (RO21).
+#:
+#: A search needs two things from each hit's text: a 300-character snippet, and the count
+#: of the question's content words inside it. Neither needs the whole chunk — a chunk is
+#: bounded by `MAX_CHUNK_BYTES` (8 000), but the cost that matters here is the file
+#: *open*, one per hit inside the search, on a host where the index is 38 GB and the page
+#: cache 6 GB. Measured 2026-09-21: `handle_search` for one word took 0.3 s to 116 s
+#: across eight runs, while a real `corpus_read` took 0.10–1.19 s —
+#: `docs/20260921-1047-the-read-path-measured-read-amplification-in-search.md`.
+#:
+#: 4 KiB is generous for 300 characters in any encoding this corpus holds (the widest is
+#: UTF-8 at up to 4 bytes per character, so 300 characters fit in 1 200 bytes) and small
+#: enough to bound the read. The label computed from it is honest about its scope: it
+#: counts the question's words in the passage's **opening**, which is what the snippet
+#: shows, and the prompt describes the label as "the question's content words present in
+#: that passage".
+SEARCH_SNIPPET_BYTES = 4_096
+
 _SCHEMA_VERSION = "1"
 
 
@@ -907,7 +925,13 @@ class CorpusBridge:
         best_covered = 0
         for hit in result.hits:
             try:
-                text = text_index.read(hit, mount=self.mount, cache_root=self.cache_root)
+                # RO21: the snippet is 300 characters and the label counts the question's
+                # words in what the snippet shows, so reading the whole chunk here is a
+                # read amplification — one file open per hit to decorate an answer the
+                # search already has. Reading the *opening* keeps the label's meaning (it
+                # is the passage's opening that the model is shown) and bounds the read.
+                text = text_index.read(hit, mount=self.mount, cache_root=self.cache_root,
+                                       max_bytes=SEARCH_SNIPPET_BYTES)
             except ReadOnlyViolation as e:
                 text = CORPUS_NOT_REREADABLE.format(error=e)
             covered, total = term_coverage(text, terms)
