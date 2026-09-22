@@ -960,8 +960,8 @@ def _libarchive_class(stderr: bytes) -> str:
     return "libarchive-error"
 
 
-def _libarchive_run(mount: LocalTreeMount, rel: str, args: list[str], *,
-                    timeout: float = 900.0) -> bytes:
+def _libarchive_run(mount: LocalTreeMount, rel: str, flags: list[str],
+                    members: Iterable[str] = (), *, timeout: float = 900.0) -> bytes:
     """Run `bsdtar` over the mount's *descriptor*, never over a path.
 
     libarchive needs a seekable input and the mount is the only thing allowed to open a
@@ -969,12 +969,18 @@ def _libarchive_run(mount: LocalTreeMount, rel: str, args: list[str], *,
     Measured on 2026-09-22: four RARs listed this way (1, 6 859, 3 857 and 41 members), and
     the verbose form parsed 10 800 of 10 800 rows.
 
+    **The archive goes immediately after the flags**, because bsdtar's grammar is
+    `bsdtar <flags> archive [members]`. The first version appended it last, so an extraction
+    read the *member name* as the archive: the live run read none of the 3 215 text members
+    it had just listed, and the empty result was reported as `no_text_members` — a wrong
+    answer shaped exactly like a fact about the archives.
+
     The child's stderr is classified into a class rather than propagated: it quotes the file
     it was reading, and `note` travels.
     """
     with mount.open_readonly(rel) as handle:
         fd = handle.fileno()
-        argv = [BSDTAR, *args, f"/dev/fd/{fd}"]
+        argv = [BSDTAR, *flags, f"/dev/fd/{fd}", *members]
         try:
             run = subprocess.run(argv, pass_fds=(fd,), capture_output=True, timeout=timeout)
         except FileNotFoundError as e:  # no bsdtar on this host
@@ -1046,7 +1052,7 @@ def _libarchive_text(mount: LocalTreeMount, rel: str) -> tuple[str, dict[str, An
             break
         remaining = MAX_CONTAINER_TEXT_BYTES - used
         try:
-            raw = _libarchive_run(mount, rel, ["-xOf", name], timeout=600.0)
+            raw = _libarchive_run(mount, rel, ["-xOf"], [name], timeout=600.0)
         except LibarchiveError as e:
             # One unreadable member does not end the container: it is recorded as skipped
             # and the rest are still read, the same rule the listing task follows for a
@@ -1059,6 +1065,14 @@ def _libarchive_text(mount: LocalTreeMount, rel: str) -> tuple[str, dict[str, An
         parts.append(f"===== {name} =====\n" + raw.decode("utf-8", "replace"))
         used += len(raw)
         read += 1
+    if read == 0 and skipped:
+        # Every text member failed to read. Reporting that as "no text members" would be a
+        # fact-shaped lie about the archive: the truth is that the extraction did not work,
+        # and the first live run of this code did exactly that — 129 containers recorded
+        # `no_text_members` while 3 215 members each failed with the archive in the wrong
+        # argument position. An empty result from *no candidates* is a fact; an empty result
+        # from *every candidate failing* is a failure.
+        raise LibarchiveError(f"all-members-unreadable:{len(skipped)}")
     text = "\n".join(parts)
     meta = {
         "engine": "libarchive",

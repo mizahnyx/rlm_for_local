@@ -3070,11 +3070,43 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO23 libarchive is handed the corpus path instead of the mount's descriptor",
         "src/rlm_kernel/mine.py",
-        "        argv = [BSDTAR, *args, f\"/dev/fd/{fd}\"]",
-        "        argv = [BSDTAR, *args, rel]",
+        "        argv = [BSDTAR, *flags, f\"/dev/fd/{fd}\", *members]",
+        "        argv = [BSDTAR, *flags, rel, *members]",
         [
             "tests/rlm_kernel/test_mine.py::TestRarThroughLibarchive"
             "::test_the_listing_command_never_opens_the_corpus_itself",
+        ],
+    ),
+    (
+        "RO23 the archive is appended after the member again",
+        "src/rlm_kernel/mine.py",
+        "        argv = [BSDTAR, *flags, f\"/dev/fd/{fd}\", *members]",
+        "        argv = [BSDTAR, *flags, *members, f\"/dev/fd/{fd}\"]",
+        [
+            "tests/rlm_kernel/test_mine.py::TestRarThroughLibarchive"
+            "::test_the_archive_comes_before_the_member_in_the_command",
+        ],
+    ),
+    (
+        "RO23 every member failing reads as an empty archive",
+        "src/rlm_kernel/mine.py",
+        "    if read == 0 and skipped:\n"
+        "        # Every text member failed to read. Reporting that as \"no text members\""
+        " would be a\n"
+        "        # fact-shaped lie about the archive: the truth is that the extraction did"
+        " not work,\n"
+        "        # and the first live run of this code did exactly that — 129 containers"
+        " recorded\n"
+        "        # `no_text_members` while 3 215 members each failed with the archive in the"
+        " wrong\n"
+        "        # argument position. An empty result from *no candidates* is a fact; an empty"
+        " result\n"
+        "        # from *every candidate failing* is a failure.\n"
+        "        raise LibarchiveError(f\"all-members-unreadable:{len(skipped)}\")\n",
+        "",
+        [
+            "tests/rlm_kernel/test_mine.py::TestRarThroughLibarchive"
+            "::test_all_members_failing_is_a_failure_not_an_empty_archive",
         ],
     ),
     (

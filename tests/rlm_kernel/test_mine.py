@@ -1076,6 +1076,85 @@ class TestRarThroughLibarchive:
         assert kinds["link"] == "link"
         assert len(members) == 3, "an unparseable row must be skipped, not guessed"
 
+    def test_the_archive_comes_before_the_member_in_the_command(
+        self, corpus: Path, mount: LocalTreeMount, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """bsdtar's grammar is `bsdtar <flags> archive [members]`.
+
+        The first version appended the archive last, so an extraction read the *member*
+        as the archive: the live run of 2026-09-22 listed 3 215 text members across five
+        containers and read none of them. This pins the order, and the sanity assertion
+        pins that a member really is after the archive.
+        """
+        import subprocess as sp
+
+        from rlm_kernel.mine import _libarchive_run
+
+        seen: dict[str, object] = {}
+
+        def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+            seen["argv"] = list(argv)
+            return sp.CompletedProcess(argv, 0, stdout=b"ok", stderr=b"")
+
+        monkeypatch.setattr(sp, "run", fake_run)
+        _libarchive_run(mount, "bundle.zip", ["-xOf"], ["notes/a.txt"])
+        argv = seen["argv"]
+        assert isinstance(argv, list)
+        archive_at = next(i for i, a in enumerate(argv) if str(a).startswith("/dev/fd/"))
+        assert argv[archive_at + 1:] == ["notes/a.txt"], (
+            f"the member must follow the archive, got {argv}"
+        )
+        assert argv[1] == "-xOf", argv
+
+    def test_all_members_failing_is_a_failure_not_an_empty_archive(
+        self, corpus: Path, mount: LocalTreeMount, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An empty result from *every candidate failing* is not a fact about the archive.
+
+        129 containers were recorded `no_text_members` on the first live run while every
+        member they held was failing to extract — a wrong answer shaped exactly like a
+        fact. An archive with no text members still says `no_text_members`; one whose
+        members all failed says so.
+        """
+        import subprocess as sp
+
+        from rlm_kernel.mine import LibarchiveError, _libarchive_members, _libarchive_text
+
+        def listing_ok(argv, **kwargs):  # type: ignore[no-untyped-def]
+            return sp.CompletedProcess(argv, 0,
+                                       stdout=b"-rw-r--r--  0 0 0 12 Jan 1 2020"
+                                              b" notes/a.txt\n", stderr=b"")
+
+        monkeypatch.setattr(sp, "run", listing_ok)
+        assert [n for n, _, _ in _libarchive_members(mount, "bundle.zip")] == ["notes/a.txt"]
+
+        def extract_refused(argv, **kwargs):  # type: ignore[no-untyped-def]
+            # Only the *extraction* fails. Failing the listing too would make this test
+            # pass for the wrong reason — the table caught exactly that on the first
+            # version, where the raise came from the listing call and the guard under
+            # test was never reached.
+            if "-tvf" in argv:
+                return listing_ok(argv, **kwargs)
+            return sp.CompletedProcess(argv, 1, stdout=b"", stderr=b"malformed archive")
+
+        monkeypatch.setattr(sp, "run", extract_refused)
+        with pytest.raises(LibarchiveError):
+            _libarchive_text(mount, "bundle.zip")
+
+    def test_an_archive_with_no_text_members_says_so(
+        self, corpus: Path, mount: LocalTreeMount, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The honest empty: nothing to read, so nothing failed."""
+        import subprocess as sp
+
+        from rlm_kernel.mine import _libarchive_text
+
+        monkeypatch.setattr(sp, "run", lambda argv, **kw: sp.CompletedProcess(
+            argv, 0, stdout=b"-rw-r--r--  0 0 0 12 Jan 1 2020 image.png\n", stderr=b""))
+        text, meta = _libarchive_text(mount, "bundle.zip")
+        assert text == ""
+        assert meta["members_read"] == 0 and meta["skipped_members"] == 0
+
     def test_a_rar_is_planned_for_listing_and_for_extraction(
         self, corpus: Path, index: CorpusIndex, store: MineStore, mount: LocalTreeMount,
     ) -> None:
