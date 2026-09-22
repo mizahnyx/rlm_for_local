@@ -101,6 +101,99 @@ def is_vendored(display_path: str) -> bool:
     return any(marker in lowered for marker in VENDORED_MARKERS)
 
 
+#: Text that is text and is not prose (owner, 2026-09-22: sampling must "prioritize prose
+#: over scripts, code or textual-shaped multimedia"). Three groups, and the third is the
+#: reason this list is here rather than a prose-extension allowlist: a subtitle file, a
+#: playlist, a cue sheet and a game data table are all *text* by every crude test, and none
+#: of them is something a person wrote to be read. The name can only ever be a hint — the
+#: content score below is what actually decides — but it is a free hint, because it is
+#: applied in the same indexed lookup that draws the row, with no extra read.
+NON_PROSE_EXTENSIONS = (
+    # scripts and code
+    ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".py", ".pyi", ".rb", ".pl", ".pm",
+    ".php", ".java", ".kt", ".scala", ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".cs",
+    ".go", ".rs", ".swift", ".m", ".mm", ".lua", ".sh", ".bash", ".zsh", ".fish", ".bat",
+    ".cmd", ".ps1", ".psm1", ".sql", ".r", ".jl", ".dart", ".ex", ".exs", ".erl", ".clj",
+    ".vb", ".asm", ".s", ".f", ".f90", ".pas", ".groovy", ".gradle", ".cmake", ".mk",
+    # markup, configuration and data
+    ".html", ".htm", ".xhtml", ".xml", ".xsl", ".xsd", ".dtd", ".css", ".scss", ".less",
+    ".json", ".jsonl", ".ndjson", ".geojson", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+    ".conf", ".properties", ".env", ".lock", ".csv", ".tsv", ".map", ".po", ".pot",
+    ".reg", ".desktop", ".service", ".plist", ".strings", ".resx", ".rc",
+    # the textual-shaped sidecars of multimedia, and machine output
+    ".srt", ".vtt", ".ass", ".ssa", ".sub", ".sbv", ".idx", ".m3u", ".m3u8", ".pls",
+    ".cue", ".nfo", ".sfv", ".log", ".gcode", ".dxf", ".svg", ".pgm", ".pbm", ".hex",
+    ".srec", ".dbf", ".diff", ".patch", ".lst", ".sum", ".md5", ".sha1", ".sha256",
+)
+
+#: Punctuation that carries meaning to a parser rather than to a reader. Dense use of it is
+#: the single most reliable signal that a passage is not prose, and it is why the score
+#: below is a *ratio* rather than a word count: minified JavaScript has plenty of "words".
+CODE_PUNCTUATION = set("{}[]<>();=*/\\|&$#@`~^_%")
+
+
+def prose_score(text: str) -> float:
+    """How much a passage reads like something a person wrote, 0.0 … 1.0.
+
+    Five ratios, each capped and weighted, chosen because each separates prose from code,
+    markup and sidecar text on its own and together they are hard to game by accident:
+
+    * **letters dominate** — a human writes mostly letters;
+    * **spaces are frequent** — prose is word-separated, while data and code are punctuated;
+    * **parser punctuation is rare** — `{}[]<>();=*/\\|&$#@\\`~^_%` above ~1% is not prose;
+    * **digits are rare** — tables, logs and dumps are digit-heavy;
+    * **sentences end** — `. `, `? ` and `! ` per word is what a sentence *is*, and nothing
+      in the other groups produces them in quantity.
+
+    A heuristic, and treated as one: it decides what to *offer*, never what exists. The
+    thresholds are measured against real draws rather than asserted (see
+    `docs/20260922-1540-sampling-prose.md`), and the sampler reports what it rejected so a
+    wrong floor is visible in the output instead of silently reshaping the draw.
+    """
+    if not text or not text.strip():
+        return 0.0
+    length = len(text)
+    letters = sum(1 for ch in text if ch.isalpha())
+    spaces = text.count(" ")
+    digits = sum(1 for ch in text if ch.isdigit())
+    codeish = sum(1 for ch in text if ch in CODE_PUNCTUATION)
+    words = re.findall(r"[^\s]+", text)
+    word_count = max(1, len(words))
+    sentences = len(re.findall(r"[.!?][\"')\]]?\s", text)) + text.rstrip().endswith((".", "!", "?"))
+
+    score = 0.0
+    score += 0.35 * min(1.0, (letters / length) / 0.75)
+    score += 0.25 * min(1.0, (spaces / length) / 0.14)
+    score += 0.25 * (1.0 - min(1.0, (codeish / length) / 0.02))
+    score += 0.05 * (1.0 - min(1.0, (digits / length) / 0.05))
+    score += 0.10 * min(1.0, (sentences / word_count) / 0.06)
+    return round(min(1.0, max(0.0, score)), 4)
+
+
+#: The floor a drawn passage must clear to be offered as prose. Measured, not chosen: it
+#: separates real draws, and it is deliberately forgiving, because the failure that matters
+#: is offering a minified bundle or a subtitle file — not occasionally offering a dry letter
+#: or a formal notice, which are prose.
+PROSE_FLOOR = 0.62
+
+
+def looks_like_prose(text: str, *, floor: float = PROSE_FLOOR) -> bool:
+    return prose_score(text) >= floor
+
+
+def non_prose_extension(display_path: str) -> str | None:
+    """The extension that marks a path as non-prose, or None.
+
+    Longest suffix first, so `.min.js` is not reported as `.js` and `.tar.gz`-style
+    compounds cannot match a shorter sibling by accident.
+    """
+    lowered = display_path.lower()
+    for extension in sorted(NON_PROSE_EXTENSIONS, key=len, reverse=True):
+        if lowered.endswith(extension):
+            return extension
+    return None
+
+
 def chunk_ranges(
     data: bytes,
     *,
@@ -571,6 +664,7 @@ class TextIndex:
         include_vendored: bool = False,
         include_derived: bool = False,
         attempts: int | None = None,
+        exclude_extensions: Iterable[str] = (),
     ) -> list[Hit]:
         """Draw `count` distinct chunks from anywhere in the table (2026-09-18).
 
@@ -628,6 +722,13 @@ class TextIndex:
             # address family that still costs >150 s (RO11).
             clauses.append("origin = ?")
             tail = (ORIGIN_FILE,)
+        # Name rejections ride in the same indexed lookup, so a candidate the name rules
+        # out is never read. Longest suffix first is irrelevant here (these are all
+        # `NOT LIKE`), but the set is de-duplicated so a compound like `.min.js` cannot
+        # add a clause that is already implied by `.js`.
+        for extension in sorted(set(exclude_extensions), key=len, reverse=True):
+            clauses.append("lower(display) NOT LIKE ?")
+            tail = (*tail, f"%{extension}")
         where = (" AND " + " AND ".join(clauses)) if clauses else ""
 
         budget = attempts if attempts is not None else max(50, want * 25)
@@ -658,6 +759,102 @@ class TextIndex:
             seen.add(hit.chunk_id)
             picked.append(hit)
         return picked
+
+    def random_prose(
+        self,
+        count: int,
+        *,
+        rng: Any = None,
+        mount: LocalTreeMount | None = None,
+        cache_root: Path | None = None,
+        include_vendored: bool = False,
+        attempts: int | None = None,
+        floor: float = PROSE_FLOOR,
+        chars: int = 8_000,
+    ) -> tuple[list[Hit], list[str], dict[str, Any]]:
+        """Draw passages that read as human prose, and say what it cost (2026-09-22).
+
+        The owner's instruction: sampling must *prioritise prose over scripts, code or
+        textual-shaped multimedia*, because a question devised from minified JavaScript or
+        from a subtitle file is not a question about the corpus a person would ask.
+
+        Two filters, in the order that keeps the draw cheap:
+
+        1. **The name**, applied inside the indexed lookup `random_chunks` already does —
+          `vendored`/`origin` conditions plus one `NOT LIKE` per non-prose extension, so a
+          candidate is rejected before it is read. Free.
+        2. **The content**, on the text actually read: `prose_score >= floor`. This is the
+          one that decides, because the name is only a hint (a `.txt` can be a data dump
+          and an extensionless file can be an essay).
+
+        Returns `(hits, texts, stats)`. The stats are the honest part: how many candidates
+        were drawn and read, how many the name rejected, how many the content rejected, and
+        the mean score of what was kept. A filter that silently reshapes a draw is how a
+        question set comes to describe something other than the corpus.
+
+        Bounded by `attempts`, like `random_chunks`: a floor that nothing clears returns
+        fewer passages rather than spinning.
+        """
+        import random
+
+        want = max(0, int(count))
+        stats: dict[str, Any] = {"drawn": 0, "kept": 0, "rejected_content": 0,
+                                 "unreadable": 0, "duplicates": 0, "mean_score": 0.0,
+                                 "floor": floor, "batches": 0}
+        if want == 0:
+            return [], [], stats
+        picker = rng if rng is not None else random.Random()
+        budget = attempts if attempts is not None else max(60, want * 30)
+        kept: list[Hit] = []
+        texts: list[str] = []
+        scores: list[float] = []
+        seen: set[int] = set()
+        batch_size = max(4, want)
+
+        while len(kept) < want and stats["drawn"] < budget:
+            stats["batches"] += 1
+            batch = self.random_chunks(
+                batch_size, rng=picker, include_vendored=include_vendored,
+                attempts=min(batch_size * 3, max(1, budget - stats["drawn"])),
+                exclude_extensions=NON_PROSE_EXTENSIONS,
+            )
+            if not batch:
+                break
+            fresh = 0
+            for hit in batch:
+                # Every candidate counts against the budget, duplicates included. The first
+                # version counted only *new* chunks, so once the reachable pool was
+                # exhausted a batch of nothing-but-duplicates could not advance `drawn` and
+                # the loop probed forever — the exact "command that stopped responding"
+                # failure this method's docstring promises to avoid. The `fresh` guard below
+                # is the second half of that: a whole batch with nothing new means the pool
+                # is exhausted, whatever the arithmetic says.
+                stats["drawn"] += 1
+                if hit.chunk_id in seen:
+                    stats["duplicates"] += 1
+                    continue
+                seen.add(hit.chunk_id)
+                fresh += 1
+                try:
+                    text = self.read(hit, mount=mount, cache_root=cache_root,
+                                     max_bytes=chars)
+                except (OSError, ReadOnlyViolation):
+                    stats["unreadable"] += 1
+                    continue
+                score = prose_score(text or "")
+                if score < floor:
+                    stats["rejected_content"] += 1
+                    continue
+                kept.append(hit)
+                texts.append(text)
+                scores.append(score)
+                if len(kept) >= want:
+                    break
+            if fresh == 0:
+                break
+        stats["kept"] = len(kept)
+        stats["mean_score"] = round(sum(scores) / len(scores), 4) if scores else 0.0
+        return kept, texts, stats
 
     def read_address(
         self,

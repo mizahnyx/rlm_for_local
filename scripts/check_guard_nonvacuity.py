@@ -3158,6 +3158,61 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_rar_is_planned_for_listing_and_for_extraction",
         ],
     ),
+    # ── RO24: sampling prefers prose (owner, 2026-09-22) ──────────────────────
+    (
+        "RO24 the name filter stops riding in the draw",
+        "src/rlm_kernel/textindex.py",
+        "        for extension in sorted(set(exclude_extensions), key=len, reverse=True):\n"
+        "            clauses.append(\"lower(display) NOT LIKE ?\")\n"
+        "            tail = (*tail, f\"%{extension}\")",
+        "        pass",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestSamplingProse"
+            "::test_a_name_rejected_candidate_is_never_read",
+        ],
+    ),
+    (
+        "RO24 the content score stops being consulted",
+        "src/rlm_kernel/textindex.py",
+        "                if score < floor:\n"
+        "                    stats[\"rejected_content\"] += 1\n"
+        "                    continue",
+        "                if False:\n"
+        "                    stats[\"rejected_content\"] += 1\n"
+        "                    continue",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestSamplingProse"
+            "::test_content_decides_when_the_name_looks_fine",
+        ],
+    ),
+    (
+        "RO24 the prose floor stops separating",
+        "src/rlm_kernel/textindex.py",
+        "PROSE_FLOOR = 0.62",
+        "PROSE_FLOOR = 0.0",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestSamplingProse"
+            "::test_the_score_separates_prose_from_its_lookalikes",
+            "tests/rlm_kernel/test_textindex.py::TestSamplingProse"
+            "::test_a_floor_nothing_clears_returns_fewer_rather_than_spinning",
+        ],
+    ),
+    (
+        "RO24 duplicates stop counting against the draw budget",
+        "src/rlm_kernel/textindex.py",
+        "                stats[\"drawn\"] += 1\n"
+        "                if hit.chunk_id in seen:\n"
+        "                    stats[\"duplicates\"] += 1\n"
+        "                    continue",
+        "                if hit.chunk_id in seen:\n"
+        "                    stats[\"duplicates\"] += 1\n"
+        "                    continue\n"
+        "                stats[\"drawn\"] += 1",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestSamplingProse"
+            "::test_duplicates_count_against_the_budget",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

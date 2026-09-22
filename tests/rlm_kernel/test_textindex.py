@@ -15,6 +15,7 @@ The properties that matter, each with a test that would fail if it were weakened
 
 from __future__ import annotations
 
+import random
 import sqlite3
 import time
 from pathlib import Path
@@ -26,13 +27,147 @@ from rlm_kernel.textindex import (
     ADDRESS_IN_TEXT_RE,
     DEFAULT_CHUNK_BYTES,
     MAX_CHUNK_BYTES,
+    NON_PROSE_EXTENSIONS,
     ORIGIN_CACHE,
+    PROSE_FLOOR,
     TextIndex,
     chunk_ranges,
     coverage_note,
     format_hits,
     is_vendored,
+    non_prose_extension,
+    prose_score,
 )
+
+
+PROSE = (
+    "La casa estaba vacía desde hacía años, pero nadie se atrevía a decirlo en voz alta. "
+    "Mi abuela contaba que en el verano de 1974 alguien dejó una carta sobre la mesa del "
+    "comedor y que, desde entonces, la puerta permaneció cerrada. Cuando por fin entramos, "
+    "encontramos las sillas cubiertas con sábanas y un reloj de pared que seguía andando."
+)
+
+MINIFIED_JS = (
+    "function a(b){return b.map(function(c){return c*2})}var d={e:[1,2,3],f:function(g)"
+    "{if(g){return null}else{return(void 0)}}};window.__x=function(){return d};"
+)
+
+JSON_DUMP = (
+    '{"id":1234,"name":"x","items":[{"k":1,"v":"a"},{"k":2,"v":"b"}],"meta":{"n":2,'
+    '"ts":1695384000,"ok":true,"ratio":0.9123,"path":"a/b/c"}}'
+)
+
+SUBTITLE = (
+    "1\n00:00:01,000 --> 00:00:04,000\nHola, ¿cómo estás?\n\n"
+    "2\n00:00:04,500 --> 00:00:08,000\nBien, gracias.\n"
+)
+
+
+class TestSamplingProse:
+    """Sampling must prioritise prose (owner, 2026-09-22).
+
+    The setting: a question devised from minified JavaScript, a JSON dump or a subtitle
+    file is not a question about the corpus a person would ask, and the sampler was drawing
+    uniformly from 29M chunks whose population is ~37% code. Two filters, and the tests
+    below pin each one separately because they fail differently: the *name* is free (it
+    rides in the indexed lookup, so a rejected candidate is never read) and the *content*
+    is what actually decides, since a `.txt` can be a data dump.
+    """
+
+    def test_the_score_separates_prose_from_its_lookalikes(self) -> None:
+        assert prose_score(PROSE) >= PROSE_FLOOR, prose_score(PROSE)
+        for label, other in (("minified javascript", MINIFIED_JS),
+                             ("a json dump", JSON_DUMP),
+                             ("empty", ""),
+                             ("whitespace", "   \n\t\n")):
+            assert prose_score(other) < PROSE_FLOOR, (label, prose_score(other))
+
+    def test_a_subtitle_file_is_rejected_by_name_not_by_score(self) -> None:
+        """The honest division of labour: `- ->` timestamps and short lines score high.
+
+        A subtitle reads *almost* like prose — letters, spaces, sentence punctuation — so
+        expecting the score to catch it would be expecting the wrong filter to work. It is
+        the name that rejects it, which is why both filters exist.
+        """
+        assert non_prose_extension("films/una-pelicula.srt") == ".srt"
+        assert non_prose_extension("build/app.min.js") == ".js"
+        assert non_prose_extension("notes/letter.txt") is None
+        assert non_prose_extension("MEMORY.DMP") is None
+        assert ".srt" in NON_PROSE_EXTENSIONS
+
+    def test_a_name_rejected_candidate_is_never_read(
+        self, index: TextIndex, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The free half of the filter, and the one that must not silently cost reads."""
+        index.add_text(raw=b"a", display="notes/letter.txt", source_hash="h1",
+                       text=PROSE.encode("utf-8"))
+        index.add_text(raw=b"b", display="build/app.min.js", source_hash="h2",
+                       text=MINIFIED_JS.encode("utf-8"))
+        index.add_text(raw=b"c", display="films/film.srt", source_hash="h3",
+                       text=SUBTITLE.encode("utf-8"))
+        read: list[str] = []
+
+        def spy(self, hit, **kwargs):  # type: ignore[no-untyped-def]
+            read.append(hit.source)
+            return PROSE if hit.source == "notes/letter.txt" else JSON_DUMP
+
+        monkeypatch.setattr(TextIndex, "read", spy)
+        kept, texts, stats = index.random_prose(1, rng=random.Random(7), attempts=20)
+        assert [hit.source for hit in kept] == ["notes/letter.txt"]
+        assert read == ["notes/letter.txt"], read
+        assert stats["kept"] == 1
+
+    def test_content_decides_when_the_name_looks_fine(
+        self, index: TextIndex, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A `.txt` holding a data dump is not prose, and this is the filter that sees it."""
+        index.add_text(raw=b"a", display="data/dump.txt", source_hash="h1",
+                       text=JSON_DUMP.encode("utf-8"))
+        monkeypatch.setattr(TextIndex, "read",
+                            lambda self, hit, **kw: JSON_DUMP)
+        kept, _texts, stats = index.random_prose(1, rng=random.Random(3), attempts=10)
+        assert kept == []
+        assert stats["drawn"] >= 1 and stats["rejected_content"] >= 1, stats
+
+    def test_a_floor_nothing_clears_returns_fewer_rather_than_spinning(
+        self, index: TextIndex, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        index.add_text(raw=b"a", display="data/dump.txt", source_hash="h1",
+                       text=JSON_DUMP.encode("utf-8"))
+        monkeypatch.setattr(TextIndex, "read", lambda self, hit, **kw: JSON_DUMP)
+        kept, _texts, stats = index.random_prose(
+            5, rng=random.Random(11), attempts=8, floor=0.99)
+        assert stats["kept"] == 0 and stats["drawn"] <= 8, stats
+
+    def test_duplicates_count_against_the_budget(self, index: TextIndex,
+                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+        """A pool smaller than the request must terminate — and the accounting is why.
+
+        The first version counted only *new* chunks against the draw budget, so a batch of
+        nothing-but-duplicates could not advance it and the loop probed forever. The
+        `fresh == 0` early exit would also stop that loop, which is exactly why this test
+        asserts on the *accounting* instead: with one chunk in the table and a budget of 30,
+        the draw must report more than one candidate drawn.
+        """
+        index.add_text(raw=b"a", display="notes/one.txt", source_hash="h1",
+                       text=PROSE.encode("utf-8"))
+        monkeypatch.setattr(TextIndex, "read", lambda self, hit, **kw: JSON_DUMP)
+        kept, _texts, stats = index.random_prose(5, rng=random.Random(5), attempts=30)
+        assert kept == []
+        assert stats["drawn"] > 1, f"duplicates must count against the budget: {stats}"
+        assert stats["drawn"] <= 30, stats
+
+    def test_the_same_seed_draws_the_same_passages(
+        self, index: TextIndex, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        for i in range(12):
+            index.add_text(raw=f"r{i}".encode(), display=f"notes/letter-{i}.txt",
+                           source_hash=f"h{i}", text=PROSE.encode("utf-8"))
+        monkeypatch.setattr(TextIndex, "read", lambda self, hit, **kw: PROSE)
+        first, _, _ = index.random_prose(3, rng=random.Random(99), attempts=20)
+        second, _, _ = index.random_prose(3, rng=random.Random(99), attempts=20)
+        assert [h.chunk_id for h in first] == [h.chunk_id for h in second]
+        assert len(first) == 3
 
 
 class TestAddressShapeInProse:

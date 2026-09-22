@@ -317,6 +317,14 @@ def build_parser() -> argparse.ArgumentParser:
                                 "office, archives) — the addresses that still re-read "
                                 "slowly (RO11)")
     p_csample.add_argument("--cache-root", type=Path, default=None)
+    p_csample.add_argument("--any", dest="any_text", action="store_true",
+                           help="Draw any indexed text, prose or not. The default "
+                                "prioritises human prose: a question devised from minified "
+                                "JavaScript or a subtitle file is not a question about the "
+                                "corpus a person would ask (owner, 2026-09-22).")
+    p_csample.add_argument("--floor", type=float, default=None,
+                           help="Override the prose floor (0..1). Lower it when the draw "
+                                "keeps rejecting; the floor in force is printed either way.")
 
     p_creindex = corpus_sub.add_parser(
         "reindex-encodings",
@@ -1364,31 +1372,55 @@ def _cmd_corpus_sample(args: argparse.Namespace) -> int:
         text_index = index.text()
         text_index.ensure()
         seed = args.seed if args.seed is not None else random.randrange(2 ** 31)
-        hits = text_index.random_chunks(
-            args.n, rng=random.Random(seed),
-            include_vendored=args.include_vendored,
-            include_derived=args.include_derived,
-        )
+        picker = random.Random(seed)
         cache_root, _, _ = _mine_paths(args)
         try:
             mount = LocalTreeMount(args.corpus_root)
         except ReadOnlyViolation as e:
             print(f"Error: {e}", file=sys.stderr)
             return 2
+        stats: dict = {}
+        texts: list[str] = []
+        if getattr(args, "any_text", False):
+            hits = text_index.random_chunks(
+                args.n, rng=picker,
+                include_vendored=args.include_vendored,
+                include_derived=args.include_derived,
+            )
+        else:
+            hits, texts, stats = text_index.random_prose(
+                args.n, rng=picker, mount=mount, cache_root=cache_root,
+                include_vendored=args.include_vendored,
+                chars=max(4_000, int(args.chars or 0)),
+                **(dict(floor=args.floor) if args.floor is not None else {}),
+            )
         print(f"# {len(hits)} of {args.n} passage(s) drawn from the corpus index, "
-              f"seed={seed}")
+              f"seed={seed}"
+              + ("" if getattr(args, "any_text", False) else ", prose-preferred"))
+        if stats:
+            print(f"# prose filter: drew {stats['drawn']}, kept {stats['kept']}, "
+                  f"rejected {stats['rejected_content']} on content, "
+                  f"unreadable {stats['unreadable']}, floor {stats['floor']}, "
+                  f"mean score {stats['mean_score']}")
+            if stats["kept"] < args.n:
+                print(f"# only {stats['kept']} of {args.n} drew as prose within the draw "
+                      "budget — widen it or lower --floor rather than assuming the corpus "
+                      "holds no prose")
         print("# This is corpus text, read through the read-only mount: it may be "
               "read where")
         print("# the corpus is and must not be copied anywhere else (AGENTS.md §1.9).")
         print()
         for position, hit in enumerate(hits, 1):
             print(f"=== {position}/{len(hits)}  {hit.address}")
-            try:
-                text = text_index.read(hit, mount=mount, cache_root=cache_root)
-            except (ReadOnlyViolation, OSError) as e:
-                print(f"(cannot re-read this passage: {e})")
-                print()
-                continue
+            if texts:
+                text = texts[position - 1]
+            else:
+                try:
+                    text = text_index.read(hit, mount=mount, cache_root=cache_root)
+                except (ReadOnlyViolation, OSError) as e:
+                    print(f"(cannot re-read this passage: {e})")
+                    print()
+                    continue
             print(_clip_passage(text.strip(), args.chars))
             print()
         if not hits:
