@@ -378,7 +378,11 @@ over `tests/` is **1179 passed, 7 skipped, 12 deselected** in ~7 min.)
   `require_same_origin` deleted from the `POST /jobs` dependencies — a security
   regression in the working tree, visible only to `git diff`. So after killing or
   losing a run, `git status --porcelain` must show no unexpected `src/` file, and a
-  stray one is restored with `git checkout --` before anything else.
+  stray one is restored with `git checkout --` before anything else. **And do not
+  `git add`/commit while it runs either.** Its mutations are real file contents, so a
+  commit made mid-run captures one: measured 2026-09-22, `model_check.py` was committed
+  with a probe's `_turn_after` guard deleted and had to be amended out. Wait for the
+  table to finish and for `git status --porcelain` to come back clean.
 - **`ssh` to `lunacode`** uses key auth with no persisted host key:
   `ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL lunacode …`.
   PowerShell re-adds CR to piped scripts; pipe remote scripts through
