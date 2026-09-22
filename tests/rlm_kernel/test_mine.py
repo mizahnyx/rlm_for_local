@@ -26,6 +26,7 @@ import pytest
 
 from rlm_kernel.classify import classify_entries
 from rlm_kernel.corpus import CorpusIndex
+from rlm_kernel import mine as mine_module
 from rlm_kernel.mine import (
     DONE,
     EXTRACT_TEXT,
@@ -813,6 +814,161 @@ class TestTheLock:
         assert time.time() - lock.stat().st_mtime < 5, "the lock was not refreshed"
         assert acquire_lock(lock) is None, "a refreshed lock must not be stolen"
         release_lock(lock)
+
+
+class TestTheClosingPathDoesNotCountBigTables:
+    """A finished window must not spend an hour *reporting*.
+
+    Measured 2026-09-22 on the real corpus: window 1 listed 7 437 containers inside its
+    25-minute budget, then spent ~51 minutes publishing the coverage snapshot, and then —
+    with its lock already released — counted `archive_members` for a closing status line.
+    The chain looked stopped; it was counting. Both counts are the CL6 defect with a new
+    subject, so both are pinned here: the closing path may not scan, a chained window can
+    decline the expensive half, and the deliberate path records what it counted so that
+    nobody has to count it again.
+    """
+
+    def test_a_chained_window_can_skip_the_index_scan(
+        self, store: MineStore, mount: LocalTreeMount, derived: Path,
+    ) -> None:
+        from rlm_kernel.freshness import recorded
+        from rlm_kernel.textindex import TextIndex
+
+        store.enqueue([(b"bundle.zip", LIST_ARCHIVE, 30)])
+        run_queue(store=store, conn=store._conn, mount=mount,  # noqa: SLF001
+                  cache_root=derived, tasks=[LIST_ARCHIVE], coverage_scan=False)
+        assert TextIndex(store._conn).published_coverage() is None, (  # noqa: SLF001
+            "a chained window must be able to decline the whole-index scan"
+        )
+        assert recorded(store._conn, "archive_listings") is not None, (  # noqa: SLF001
+            "the fingerprints are the cheap half and must still be recorded"
+        )
+
+    def test_the_expensive_path_publishes_the_member_count(
+        self, store: MineStore, mount: LocalTreeMount, derived: Path,
+    ) -> None:
+        from rlm_kernel.mine import published_member_count
+
+        store.enqueue([(b"bundle.zip", LIST_ARCHIVE, 30)])
+        run_queue(store=store, conn=store._conn, mount=mount,  # noqa: SLF001
+                  cache_root=derived, tasks=[LIST_ARCHIVE])
+        counted = published_member_count(store._conn)  # noqa: SLF001
+        assert counted is not None and counted >= 1
+        assert counted == store.member_count(), (
+            "the deliberate path must publish the number nobody else should count"
+        )
+
+    def test_the_status_line_never_counts_the_member_table(self, store: MineStore) -> None:
+        statements: list[str] = []
+        store._conn.set_trace_callback(statements.append)  # noqa: SLF001
+        try:
+            text = format_status(store.status())
+        finally:
+            store._conn.set_trace_callback(None)  # noqa: SLF001
+        assert "from archive_members" not in " ".join(statements).lower(), (
+            "a status line counted the member table again"
+        )
+        assert "archive members recorded: unknown" in text, text
+
+    def test_a_published_member_count_is_quoted_not_recounted(
+        self, store: MineStore, mount: LocalTreeMount, derived: Path,
+    ) -> None:
+        store.enqueue([(b"bundle.zip", LIST_ARCHIVE, 30)])
+        run_queue(store=store, conn=store._conn, mount=mount,  # noqa: SLF001
+                  cache_root=derived, tasks=[LIST_ARCHIVE])
+        statements: list[str] = []
+        store._conn.set_trace_callback(statements.append)  # noqa: SLF001
+        try:
+            text = format_status(store.status())
+        finally:
+            store._conn.set_trace_callback(None)  # noqa: SLF001
+        assert f"archive members recorded: {store.member_count()}" in text, text
+        assert "from archive_members" not in " ".join(statements).lower()
+
+    def test_the_window_hands_the_closing_scan_a_heartbeat(
+        self, store: MineStore, mount: LocalTreeMount, derived: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The lock heartbeats per item, so the long non-item phase is the gap."""
+        lock = derived / "mine.lock"
+        assert acquire_lock(lock) is not None
+        stale = time.time() - 10_000
+        os.utime(lock, (stale, stale))
+        seen: dict[str, object] = {}
+        real = mine_module.publish_coverage_snapshot
+
+        def spy(conn, *, expensive=True, on_progress=None):  # type: ignore[no-untyped-def]
+            seen["on_progress"] = on_progress
+            return real(conn, expensive=expensive, on_progress=on_progress)
+
+        monkeypatch.setattr(mine_module, "publish_coverage_snapshot", spy)
+        store.enqueue([(b"bundle.zip", LIST_ARCHIVE, 30)])
+        run_queue(store=store, conn=store._conn, mount=mount,  # noqa: SLF001
+                  cache_root=derived, tasks=[LIST_ARCHIVE], lock_file=lock)
+        pulse = seen.get("on_progress")
+        assert callable(pulse), "the closing scan was handed no heartbeat"
+        os.utime(lock, (stale, stale))
+        pulse()
+        assert time.time() - lock.stat().st_mtime < 5, "the heartbeat did not touch the lock"
+        release_lock(lock)
+
+    def test_the_pulse_sees_a_scan_but_not_a_bare_count(self, store: MineStore) -> None:
+        """What the heartbeat can and cannot cover, measured rather than assumed.
+
+        `set_progress_handler` runs per VM step. A row-stepping statement therefore
+        pulses, and a **bare `COUNT(*)` does not**: SQLite answers it from the b-tree
+        without stepping the VM at all (0 pulses vs 600 over 200k rows,
+        `scripts/probe_count_forms.py`). That is why `MEMBER_COUNT_SQL` counts a column,
+        and why the second half of this test is here — it is the fact that keeps the
+        heartbeat honest, so it should be red if SQLite ever changes it.
+        """
+        conn = store._conn  # noqa: SLF001
+        conn.execute("CREATE TABLE many (x INTEGER)")
+        conn.executemany("INSERT INTO many VALUES (?)", [(i,) for i in range(20_000)])
+        conn.commit()
+        calls: list[int] = []
+
+        def pulse_then(sql: str, **kwargs: float) -> None:
+            with mine_module._pulse(  # noqa: SLF001
+                conn, lambda: calls.append(1), **kwargs
+            ):
+                conn.execute(sql).fetchone()
+
+        pulse_then("SELECT SUM(x) FROM many")
+        assert calls, ("a row-stepping statement must pulse: `set_progress_handler` is "
+                       "the only hook that runs inside the scan a heartbeat covers")
+        calls.clear()
+        pulse_then("SELECT COUNT(*) FROM many")
+        assert not calls, ("a bare COUNT(*) stepped the VM, so the heartbeat story in "
+                           "MEMBER_COUNT_SQL needs revisiting")
+        calls.clear()
+        pulse_then("SELECT COUNT(x) FROM many")
+        assert calls, "counting a column must be visible to the heartbeat"
+        # The cleanup assertion has to defeat the rate limit to see anything: with the
+        # default 30 s between pulses, a *leaked* handler stays silent and the check
+        # passes while the guard is gone. The mutation table proved exactly that.
+        calls.clear()
+        pulse_then("SELECT SUM(x) FROM many", min_seconds=0.0)
+        assert calls, "an unlimited pulse must fire on every step"
+        calls.clear()
+        conn.execute("SELECT SUM(x) FROM many").fetchone()
+        assert not calls, "the pulse outlived the statement it guards"
+
+    def test_the_member_count_is_one_a_heartbeat_can_see(self, store: MineStore) -> None:
+        """The count the closing scan publishes must not be invisible to the lock."""
+        conn = store._conn  # noqa: SLF001
+        conn.executemany(
+            "INSERT OR REPLACE INTO archive_members (container, member, size, kind)"
+            " VALUES (?, ?, ?, ?)",
+            [(b"c", f"member/{i}.txt", 1, "file") for i in range(20_000)],
+        )
+        conn.commit()
+        calls: list[int] = []
+        with mine_module._pulse(conn, lambda: calls.append(1)):  # noqa: SLF001
+            counted = mine_module._count_members(conn)  # noqa: SLF001
+        assert counted == 20_000
+        assert calls, ("the published member count must step the VM, or the lock goes "
+                       "stale for however long it takes")
 
 
 class TestReadOnlyByConstruction:

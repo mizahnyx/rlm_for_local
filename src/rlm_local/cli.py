@@ -446,6 +446,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_mrun.add_argument("--pause-file", type=Path, default=None,
                         help="Pause flag (default: <index dir>/mine.pause)")
     p_mrun.add_argument("--progress-every", type=int, default=200)
+    p_mrun.add_argument("--no-coverage-scan", dest="coverage_scan", action="store_false",
+                        help="Skip the whole-index coverage scan this window would "
+                             "otherwise publish (~16 min warm, ~51 min cold). Use it for "
+                             "every window of a chain and pay once at the end: the scan "
+                             "runs past the window's budget, because the budget bounds "
+                             "items, not the closing work.")
 
     p_mpause = mine_sub.add_parser("pause", help="Ask the worker to stop between items")
     _add_corpus_flags(p_mpause, require_root=False, require_index=False)
@@ -1221,8 +1227,17 @@ def _cmd_corpus_counters(args: argparse.Namespace) -> int:
 
             publish_coverage_snapshot(index._conn)  # noqa: SLF001 - the index's connection
         snapshot = text_index.published_coverage()
+        # Same command, same deliberate scan: it publishes the member count too, so that
+        # `mine status` and this report can quote it instead of counting 30M rows each
+        # time (measured 2026-09-22: that count held a finished window open for an hour).
+        from rlm_kernel.mine import published_member_count
+
+        members = published_member_count(index._conn)  # noqa: SLF001
     finally:
         index.close()
+
+    if members is not None:
+        print(f"archive_members: {members:,}")
 
     if snapshot is None:
         print(CORPUS_COVERAGE_UNKNOWN)
@@ -1848,14 +1863,18 @@ def _cmd_mine(args: argparse.Namespace) -> int:
                     max_items=args.max_items, pause_file=pause_path,
                     lock_file=lock_path, progress=progress,
                     progress_every=every,
+                    coverage_scan=args.coverage_scan,
                 )
+                # The report is inside the lock: it used to run after `release_lock`,
+                # so a window whose work was done and published still looked free while
+                # it counted — and a second worker could start on the same index.
+                print(f"stopped: {run.stop_reason} after {run.seconds:,.1f}s")
+                print(f"  done {run.stats.done:,}, skipped {run.stats.skipped:,}, "
+                      f"failed {run.stats.failed:,}, cache hits {run.stats.cache_hits:,}")
+                print(f"  by task: {run.stats.by_task}")
+                print(format_status(store.status()))
             finally:
                 release_lock(lock_path)
-            print(f"stopped: {run.stop_reason} after {run.seconds:,.1f}s")
-            print(f"  done {run.stats.done:,}, skipped {run.stats.skipped:,}, "
-                  f"failed {run.stats.failed:,}, cache hits {run.stats.cache_hits:,}")
-            print(f"  by task: {run.stats.by_task}")
-            print(format_status(store.status()))
             return 0
     finally:
         index.close()

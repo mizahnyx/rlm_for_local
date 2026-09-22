@@ -174,6 +174,10 @@ uv run python -m rlm_local.cli mine plan --corpus-index ~/rlm-derived/corpus.sql
 uv run python -m rlm_local.cli mine status --corpus-index ~/rlm-derived/corpus.sqlite
 uv run python -m rlm_local.cli mine run --corpus-root /srv/corpus \
     --corpus-index ~/rlm-derived/corpus.sqlite --for 2h   # a window, then stop
+uv run python -m rlm_local.cli mine run --corpus-root /srv/corpus \
+    --corpus-index ~/rlm-derived/corpus.sqlite --for 25m --no-coverage-scan
+                                                    # a window in a chain: skip the
+                                                    # ~16 min scan; publish once at the end
 uv run python -m rlm_local.cli mine pause     # stop after the item in flight
 uv run python -m rlm_local.cli ask "…" --corpus-root /srv/corpus \
     --corpus-index ~/rlm-derived/corpus.sqlite     # corpus_find/read/search/… in a cell

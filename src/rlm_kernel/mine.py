@@ -37,9 +37,10 @@ import subprocess
 import tarfile
 import time
 import zipfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 from rlm_kernel.mounts import LocalTreeMount, ReadOnlyViolation
 # The origin label for derived text, shared with the text index so a citation from
@@ -69,6 +70,18 @@ PENDING = "pending"
 DONE = "done"
 FAILED = "failed"
 SKIPPED = "skipped"
+
+#: Where a *deliberate* count of the member table is published, so that no cheap path has
+#: to scan for it. See `published_member_count`.
+MEMBER_COUNT_KEY = "archive_members_published"
+
+#: The one way to count member rows. `COUNT(member)` rather than `COUNT(*)` on purpose:
+#: `member` is `NOT NULL`, so the two agree exactly, and both read the same covering index
+#: — but SQLite answers a *bare* `COUNT(*)` from the b-tree without stepping the VM, so the
+#: progress handler a window heartbeats with is blind to it (measured: 0 pulses vs 600 for
+#: 200k rows, `scripts/probe_count_forms.py`). A count the heartbeat cannot see is a count
+#: during which the lock goes stale while the worker is demonstrably working.
+MEMBER_COUNT_SQL = "SELECT COUNT(member) FROM archive_members"
 
 #: Priority bands. Lower runs first; the bands are the mining order the owner
 #: confirmed: prose, then containers, then media, then everything else.
@@ -297,8 +310,25 @@ class MineStore:
         return len(rows)
 
     def member_count(self) -> int:
-        row = self._conn.execute("SELECT COUNT(*) FROM archive_members").fetchone()
+        """The exact number of member rows — by scanning the whole table.
+
+        Exact, and slow for exactly that reason: on the real index (~30M rows) this is
+        the query that held a window open for an hour **after** its work was committed
+        and its lock released (measured 2026-09-22,
+        `docs/20260922-0855-the-window-that-counted-instead-of-finishing.md`). Nothing
+        on a window's closing path may call it. Read `published_member_count` instead.
+        """
+        row = self._conn.execute(MEMBER_COUNT_SQL).fetchone()
         return int(row[0]) if row else 0
+
+    def published_member_count(self) -> int | None:
+        """The member count a deliberate publication recorded, or None.
+
+        Never scans: a status line that counts a 30M-row table is how a finished window
+        looks hung, and a window that would rather not pay for the count says "unknown"
+        instead of a number it did not measure (AGENTS.md §1.8).
+        """
+        return published_member_count(self._conn)
 
     def has_members(self) -> bool:
         """Whether any archive listing has been recorded here.
@@ -345,7 +375,7 @@ class MineStore:
             by_task.setdefault(str(task), {})[str(state)] = int(n)
         return {
             "queued_by_task": by_task,
-            "archive_members": self.member_count(),
+            "archive_members": self.published_member_count(),
             "mining_version": MINING_VERSION,
         }
 
@@ -893,6 +923,7 @@ def run_queue(
     pause_file: Path | None = None,
     lock_file: Path | None = None,
     text_index: Any = None,
+    coverage_scan: bool = True,
     progress: Callable[[MineStats], None] | None = None,
     progress_every: int = 100,
     now: Callable[[], float] = time.monotonic,
@@ -904,6 +935,12 @@ def run_queue(
     flight is the most that can be lost. The stop reason is returned as text so a
     window that ended because the owner came back is distinguishable from one that
     ran out of work.
+
+    **The budget bounds the items, not the closing work.** A window checks the clock
+    between items, so the trailing coverage publication runs past it — measured
+    2026-09-22, a 25-minute window took 76 minutes. `coverage_scan=False` drops that
+    publication's expensive half for a window in a chain; the cheap fingerprints are
+    recorded either way.
     """
     started = now()
     stats = MineStats()
@@ -962,7 +999,13 @@ def run_queue(
         progress(stats)
     # Leave a coverage snapshot behind: the search path reads it instead of
     # counting 25M chunks inside a 120 s cell (see `publish_coverage_snapshot`).
-    publish_coverage_snapshot(conn)
+    # The heartbeat rides along, because this is the phase that outlives the item
+    # loop: without it the lock goes stale while the worker is demonstrably working.
+    def heartbeat() -> None:
+        if lock_file is not None:
+            refresh_lock(lock_file)
+
+    publish_coverage_snapshot(conn, expensive=coverage_scan, on_progress=heartbeat)
     return MineRun(stats=stats, stop_reason=stop_reason, seconds=now() - started)
 
 
@@ -971,7 +1014,12 @@ def _size_for(conn: sqlite3.Connection, raw: bytes) -> int:
     return int(row[0]) if row else 0
 
 
-def publish_coverage_snapshot(conn: sqlite3.Connection) -> bool:
+def publish_coverage_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    expensive: bool = True,
+    on_progress: Callable[[], None] | None = None,
+) -> bool:
     """Compute and store the coverage a search will quote. Best effort, slow.
 
     The scan behind this takes ~16 minutes on the real index (25M chunks), which
@@ -981,25 +1029,44 @@ def publish_coverage_snapshot(conn: sqlite3.Connection) -> bool:
     has been published, and at the end, so the snapshot a finished window leaves
     behind describes the index that window produced.
 
+    **`expensive=False` skips the whole-index scan** and records only the cheap
+    fingerprints, for a *chained* window that should pay for the scan once rather
+    than once per window. Measured 2026-09-22: a 25-minute window that listed 7 437
+    containers then spent ~51 minutes here, cold, so a chain of six windows would
+    have spent five hours counting to produce snapshots nobody read in between. A
+    skipped scan publishes no coverage fingerprint, because claiming a number was
+    current when it was not measured is the one thing this must never do.
+
+    `on_progress` is called, rate-limited, from *inside* the scan: the window's lock
+    heartbeats per item (`refresh_lock`), so the long non-item phases are exactly
+    where a live worker starts to look dead and a second one takes its lock.
+
+    When it does scan, it also publishes the member count, so that `mine status` can
+    quote a number instead of counting a 30M-row table itself.
+
     Never raises: a window that cannot publish coverage must still finish its work.
     """
     try:
-        from rlm_kernel.textindex import TextIndex
-
-        text = TextIndex(conn)
-        text.ensure()
-        coverage = text.coverage()
-        text.publish_coverage(coverage)
-        # RO15: the snapshot is the moment the text index's numbers are known, so this is
-        # also the moment to fingerprint the caches derived from it. `freshness.capture`
-        # is best effort and never raises: a window that cannot record a fingerprint still
-        # finishes its work, and the cache then honestly reports `unknown`.
         from rlm_kernel.freshness import capture
 
-        capture(conn, "coverage", {
-            "sources_indexed": coverage.get("sources_indexed"),
-            "chunks": coverage.get("chunks"),
-        })
+        if expensive:
+            from rlm_kernel.textindex import TextIndex
+
+            text = TextIndex(conn)
+            text.ensure()
+            with _pulse(conn, on_progress):
+                coverage = text.coverage()
+                members = _count_members(conn)
+            text.publish_coverage(coverage)
+            record_member_count(conn, members)
+            # RO15: the snapshot is the moment the text index's numbers are known, so this is
+            # also the moment to fingerprint the caches derived from it. `freshness.capture`
+            # is best effort and never raises: a window that cannot record a fingerprint still
+            # finishes its work, and the cache then honestly reports `unknown`.
+            capture(conn, "coverage", {
+                "sources_indexed": coverage.get("sources_indexed"),
+                "chunks": coverage.get("chunks"),
+            })
         counts = {task: int(conn.execute(
             "SELECT COUNT(*) FROM mine_queue WHERE task = ? AND state = 'done'",
             (task,)).fetchone()[0]) for task in (LIST_ARCHIVE, EXTRACT_TEXT)}
@@ -1008,6 +1075,77 @@ def publish_coverage_snapshot(conn: sqlite3.Connection) -> bool:
         return True
     except Exception:  # pragma: no cover - defensive
         return False
+
+
+@contextmanager
+def _pulse(
+    conn: sqlite3.Connection,
+    on_progress: Callable[[], None] | None,
+    *,
+    every: int = 1_000,
+    min_seconds: float = 30.0,
+) -> Iterator[None]:
+    """Call `on_progress`, rate-limited, from inside one long SQLite statement.
+
+    `set_progress_handler` is the only hook that runs *during* a single scan, which is
+    what a heartbeat needs — a lock touched only between items goes stale during the
+    ~16-minute coverage count and the next worker takes it while this one is still
+    working. The handler is called every `every` VM steps and must return 0; returning
+    non-zero would abort the statement it is watching, which is how the first sketch of
+    this turned the count into an exception.
+    """
+    if on_progress is None:
+        yield
+        return
+    last = [0.0]
+
+    def handler() -> int:
+        now = time.monotonic()
+        if now - last[0] >= min_seconds:
+            last[0] = now
+            on_progress()
+        return 0
+
+    conn.set_progress_handler(handler, every)
+    try:
+        yield
+    finally:
+        conn.set_progress_handler(None, 0)
+
+
+def _count_members(conn: sqlite3.Connection) -> int:
+    """Count the member rows, in a form a heartbeat can see. 0 when there is no table."""
+    try:
+        row = conn.execute(MEMBER_COUNT_SQL).fetchone()
+    except sqlite3.Error:
+        return 0
+    return int(row[0]) if row else 0
+
+
+def record_member_count(conn: sqlite3.Connection, members: int) -> None:
+    """Publish a member count measured now, for every cheap reader to quote."""
+    try:
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                     (MEMBER_COUNT_KEY, str(int(members))))
+        conn.commit()
+    except sqlite3.Error:  # pragma: no cover - a meta table that cannot be written
+        pass
+
+
+def published_member_count(conn: sqlite3.Connection) -> int | None:
+    """The published member count, or None. Issues no statement over `archive_members`."""
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key = ?",
+                           (MEMBER_COUNT_KEY,)).fetchone()
+    except sqlite3.Error:
+        return None
+    if not row or row[0] is None:
+        return None
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return None
+
 
 
 # ── The single-worker lock ────────────────────────────────────────────────
@@ -1064,6 +1202,20 @@ def release_lock(lock_file: Path) -> None:
         pass
 
 
+def _members_line(members: int | None) -> str:
+    """The member count for a status line, or an honest `unknown`.
+
+    Never counts: `mine status` used to scan ~30M rows to print this, which is how a
+    window that had already committed all of its work looked like a hung one for an
+    hour. `rlm corpus counters --refresh` — or a window run without
+    `--no-coverage-scan` — is the deliberate way to produce the number.
+    """
+    if members is None:
+        return ("unknown (counting them scans the whole table; publish one with "
+                "`rlm corpus counters --refresh`)")
+    return f"{members:,}"
+
+
 def format_status(status: dict[str, Any], *, cache: dict[str, int] | None = None) -> str:
     lines = ["mining queue:"]
     for task, states in sorted(status["queued_by_task"].items()):
@@ -1071,7 +1223,7 @@ def format_status(status: dict[str, Any], *, cache: dict[str, int] | None = None
         lines.append(f"  {task:<16}{parts}")
     if not status["queued_by_task"]:
         lines.append("  (empty — run `rlm mine plan` to enqueue from the map)")
-    lines.append(f"archive members recorded: {status['archive_members']:,}")
+    lines.append(f"archive members recorded: {_members_line(status['archive_members'])}")
     if cache is not None:
         lines.append(f"cache: {cache['entries']:,} entries, "
                      f"{cache['text_bytes'] / 1024 / 1024:.1f} MiB of derived text")

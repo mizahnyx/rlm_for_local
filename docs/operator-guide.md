@@ -582,6 +582,24 @@ If a search reports coverage as unknown, publish one. If the numbers look old af
 a long window, `--refresh` is the way to bring them forward; expect it to read the
 whole chunk table, and prefer running it when no mining window is active.
 
+**Running windows back to back, pass `--no-coverage-scan`.** The budget bounds the
+*items*: the checks sit at the top of the item loop, so the closing publication runs
+past the budget, and that publication's scan is ~16 minutes warm and was ~51 minutes
+cold on a window measured 2026-09-22 — a chain of six windows would have spent about
+five hours counting to produce snapshots nobody read in between. With the flag the
+window records the cheap fingerprints, skips the scan, and says nothing false about
+coverage; publish **once** when the queue empties:
+
+```bash
+rlm mine run … --for 25m --no-coverage-scan     # each window of the chain
+rlm corpus counters --refresh                   # once, at the end
+```
+
+The same command publishes the archive-member count, which is why `mine status` and
+`counters` can print `archive members recorded: N` without counting 30M rows — and why
+they print **unknown** plus that remedy until something has published one. That count
+was the other hour this window lost: `mine status` used to scan the member table.
+
 ### `rlm corpus sample` — passages to devise questions from
 
 Probe questions that matter are the ones drawn from *this* corpus, not invented. This

@@ -164,6 +164,43 @@ class TestRun:
         capsys.readouterr()
         assert not (built.parent / "mine.lock").exists()
 
+    def test_a_chained_window_can_skip_the_coverage_scan(self, corpus: Path, built: Path,
+                                                         capsys: pytest.CaptureFixture) -> None:
+        """The scan is ~16 min warm and ~51 min cold, and it runs past the budget.
+
+        The budget bounds the items, not the closing work, so a chain that pays this
+        once per window spends hours counting. `--no-coverage-scan` is how a window in
+        a chain declines it; the deliberate path (`corpus counters --refresh`) is where
+        the snapshot is then produced.
+        """
+        import sqlite3
+        from rlm_kernel.textindex import TextIndex
+
+        cli_main(["mine", "plan", "--corpus-index", str(built)])
+        capsys.readouterr()
+        rc = cli_main(["mine", "run", "--corpus-root", str(corpus),
+                       "--corpus-index", str(built), "--max-items", "1",
+                       "--no-coverage-scan"])
+        assert rc == 0
+        con = sqlite3.connect(built)
+        try:
+            assert TextIndex(con).published_coverage() is None, (
+                "the flag must skip the whole-index scan, not merely log it"
+            )
+        finally:
+            con.close()
+
+    def test_a_window_without_a_published_count_says_unknown(self, corpus: Path, built: Path,
+                                                             capsys: pytest.CaptureFixture) -> None:
+        """Counting 30M member rows to print a status line is how a window looks hung."""
+        cli_main(["mine", "plan", "--corpus-index", str(built)])
+        capsys.readouterr()
+        cli_main(["mine", "run", "--corpus-root", str(corpus),
+                  "--corpus-index", str(built), "--max-items", "1", "--no-coverage-scan"])
+        out = capsys.readouterr().out
+        assert "archive members recorded: unknown" in out, out
+        assert "rlm corpus counters --refresh" in out, "an unknown must name its remedy"
+
     def test_a_paused_worker_does_nothing(self, corpus: Path, built: Path,
                                           capsys: pytest.CaptureFixture) -> None:
         cli_main(["mine", "plan", "--corpus-index", str(built)])

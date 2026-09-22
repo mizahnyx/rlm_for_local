@@ -2965,6 +2965,83 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_skip_for_a_different_reason_is_left_alone",
         ],
     ),
+    # ── RO22: a window that counted instead of finishing (2026-09-22) ──────
+    # Each of these puts back one half of the defect the traces showed: the closing
+    # scan that runs past the budget, the status line that counts 30M member rows,
+    # the heartbeat that cannot see the count it is supposed to cover, and the
+    # publication that exists so nobody has to count at all.
+    (
+        "RO22 a chained window pays the coverage scan again",
+        "src/rlm_kernel/mine.py",
+        "    publish_coverage_snapshot(conn, expensive=coverage_scan,"
+        " on_progress=heartbeat)",
+        "    publish_coverage_snapshot(conn, expensive=True, on_progress=heartbeat)",
+        [
+            "tests/rlm_kernel/test_mine.py::TestTheClosingPathDoesNotCountBigTables"
+            "::test_a_chained_window_can_skip_the_index_scan",
+        ],
+    ),
+    (
+        "RO22 the status line counts the member table again",
+        "src/rlm_kernel/mine.py",
+        "            \"archive_members\": self.published_member_count(),",
+        "            \"archive_members\": self.member_count(),",
+        [
+            "tests/rlm_kernel/test_mine.py::TestTheClosingPathDoesNotCountBigTables"
+            "::test_the_status_line_never_counts_the_member_table",
+        ],
+    ),
+    (
+        "RO22 the member count goes back to a bare COUNT(*)",
+        "src/rlm_kernel/mine.py",
+        "MEMBER_COUNT_SQL = \"SELECT COUNT(member) FROM archive_members\"",
+        "MEMBER_COUNT_SQL = \"SELECT COUNT(*) FROM archive_members\"",
+        [
+            "tests/rlm_kernel/test_mine.py::TestTheClosingPathDoesNotCountBigTables"
+            "::test_the_member_count_is_one_a_heartbeat_can_see",
+        ],
+    ),
+    (
+        "RO22 the closing scan is handed no heartbeat",
+        "src/rlm_kernel/mine.py",
+        "    publish_coverage_snapshot(conn, expensive=coverage_scan,"
+        " on_progress=heartbeat)",
+        "    publish_coverage_snapshot(conn, expensive=coverage_scan)",
+        [
+            "tests/rlm_kernel/test_mine.py::TestTheClosingPathDoesNotCountBigTables"
+            "::test_the_window_hands_the_closing_scan_a_heartbeat",
+        ],
+    ),
+    (
+        "RO22 a pulse outlives the statement it guards",
+        "src/rlm_kernel/mine.py",
+        "    finally:\n        conn.set_progress_handler(None, 0)",
+        "    finally:\n        pass",
+        [
+            "tests/rlm_kernel/test_mine.py::TestTheClosingPathDoesNotCountBigTables"
+            "::test_the_pulse_sees_a_scan_but_not_a_bare_count",
+        ],
+    ),
+    (
+        "RO22 the expensive path stops publishing the member count",
+        "src/rlm_kernel/mine.py",
+        "            record_member_count(conn, members)\n",
+        "",
+        [
+            "tests/rlm_kernel/test_mine.py::TestTheClosingPathDoesNotCountBigTables"
+            "::test_the_expensive_path_publishes_the_member_count",
+        ],
+    ),
+    (
+        "RO22 the CLI ignores --no-coverage-scan",
+        "src/rlm_local/cli.py",
+        "                    coverage_scan=args.coverage_scan,",
+        "                    coverage_scan=True,",
+        [
+            "tests/test_cli_mine.py::TestRun"
+            "::test_a_chained_window_can_skip_the_coverage_scan",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
