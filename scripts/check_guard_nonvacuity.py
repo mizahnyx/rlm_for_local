@@ -1825,7 +1825,8 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO4 a mining window stops publishing coverage",
         "src/rlm_kernel/mine.py",
-        "    publish_coverage_snapshot(conn)\n",
+        "    publish_coverage_snapshot(conn, expensive=coverage_scan,"
+        " on_progress=heartbeat)\n",
         "    pass\n",
         [
             "tests/rlm_kernel/test_mine.py::TestWindows"
