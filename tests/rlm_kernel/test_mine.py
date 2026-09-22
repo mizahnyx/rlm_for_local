@@ -293,6 +293,57 @@ class TestTheDerivationCache:
 
 
 class TestArchiveListing:
+    @pytest.mark.parametrize("name", ["bundle.aar", "bundle.war", "bundle.ear",
+                                      "bundle.nupkg", "bundle.jmod"])
+    def test_a_zip_shaped_archive_under_another_suffix_is_listed(
+        self, name: str, store: MineStore, mount: LocalTreeMount, derived: Path,
+        corpus: Path, index: CorpusIndex,
+    ) -> None:
+        """The engine was never the limit — the extension list was (RO15 2026-09-21).
+
+        Of 84 361 containers the queue knew, 19 446 had no engine that claimed them, and
+        the head of that list was zip-shaped archives wearing a build-tool suffix
+        (`.aar`, `.war`, `.nupkg`). `zipfile` opens all of them; the list at the call site
+        simply did not name them.
+        """
+        raw = name.encode()
+        with zipfile.ZipFile(corpus / name, "w") as archive:
+            archive.writestr("inner/one.txt", "x" * 10)
+        # The file is created here, so the index the worker reads a source hash from must
+        # see it: the worker marks an item with no classification row `skipped/unclassified`
+        # and never reaches the handler.
+        index.build(mount)
+        index.classifications().ensure()
+        classify_entries(mount, index.classifications())
+        store.enqueue([(raw, LIST_ARCHIVE, 30)])
+        run = run_queue(store=store, conn=store._conn, mount=mount,  # noqa: SLF001
+                        cache_root=derived, tasks=[LIST_ARCHIVE])
+        assert run.stats.done == 1, run.stats
+        assert store.member_count() == 1
+
+    def test_an_unknown_suffix_is_still_skipped_rather_than_guessed(
+        self, store: MineStore, mount: LocalTreeMount, derived: Path, corpus: Path,
+        index: CorpusIndex,
+    ) -> None:
+        """Widening the list must not become "try zip on everything".
+
+        The population is a 200-suffix tail of application blobs; claiming them all would
+        turn 19 446 recorded skips into 19 446 recorded failures, which tells a reader
+        less. `no_listing_engine` stays the answer for a shape no engine claims.
+        """
+        (corpus / "mystery.ogz").write_bytes(b"not a container we know")
+        index.build(mount)
+        index.classifications().ensure()
+        classify_entries(mount, index.classifications())
+        store.enqueue([(b"mystery.ogz", LIST_ARCHIVE, 30)])
+        run = run_queue(store=store, conn=store._conn, mount=mount,  # noqa: SLF001
+                        cache_root=derived, tasks=[LIST_ARCHIVE])
+        assert run.stats.done == 0
+        note = store._conn.execute(  # noqa: SLF001
+            "SELECT note FROM mine_queue WHERE raw = ?", (b"mystery.ogz",)
+        ).fetchone()[0]
+        assert note == "no_listing_engine"
+
     def test_a_zip_is_listed_and_its_members_recorded(
         self, store: MineStore, mount: LocalTreeMount, derived: Path,
     ) -> None:

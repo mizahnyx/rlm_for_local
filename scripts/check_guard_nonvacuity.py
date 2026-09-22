@@ -2912,6 +2912,16 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_an_artefact_with_no_check_is_unknown_never_current",
         ],
     ),
+    (
+        "RO15 a zip-shaped container goes back to having no engine",
+        "src/rlm_kernel/mine.py",
+        "    \".aar\", \".war\", \".ear\", \".nupkg\", \".jmod\", \".egg\", \".deb\", \".rpm\",",
+        "",
+        [
+            "tests/rlm_kernel/test_mine.py::TestArchiveListing"
+            "::test_a_zip_shaped_archive_under_another_suffix_is_listed",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
