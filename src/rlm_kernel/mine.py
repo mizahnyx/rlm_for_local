@@ -32,6 +32,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import tarfile
@@ -425,15 +426,37 @@ class DerivationCache:
         return text, meta
 
     def put(self, key: str, text: str, meta: dict[str, Any]) -> None:
+        """Write an entry atomically, or not at all.
+
+        The text lands first and the metadata second, each through a temporary file and
+        `os.replace`, and `has()` looks for the *metadata* — so a reader sees either a
+        complete entry or none. A truncated `.txt` with metadata beside it would be served
+        as the passage, which is the one failure this project ranks below saying nothing.
+        The temporaries are removed on every path, including the failing one, so nothing is
+        left behind that could be mistaken for an entry, and the write is refused outright
+        when the filesystem cannot take it (owner call, 2026-09-22).
+        """
         meta_path, text_path = self._paths(key)
+        _require_space(meta_path.parent)
         meta_path.parent.mkdir(parents=True, exist_ok=True)
-        text_path.write_text(text, encoding="utf-8")
         payload = {**meta, "task": self._root.name, "mining_version": MINING_VERSION,
                    "cached_at": time.time(), "chars": len(text)}
-        meta_path.write_text(json.dumps(payload, indent=2, sort_keys=True),
-                             encoding="utf-8")
-        os.chmod(meta_path, 0o600)
-        os.chmod(text_path, 0o600)
+        tmp_text = text_path.with_name(text_path.name + ".tmp")
+        tmp_meta = meta_path.with_name(meta_path.name + ".tmp")
+        try:
+            tmp_text.write_text(text, encoding="utf-8")
+            os.chmod(tmp_text, 0o600)
+            os.replace(tmp_text, text_path)
+            tmp_meta.write_text(json.dumps(payload, indent=2, sort_keys=True),
+                                encoding="utf-8")
+            os.chmod(tmp_meta, 0o600)
+            os.replace(tmp_meta, meta_path)
+        finally:
+            for leftover in (tmp_text, tmp_meta):
+                try:
+                    leftover.unlink()
+                except OSError:
+                    pass
 
     def stats(self) -> dict[str, int]:
         entries = 0
@@ -492,9 +515,17 @@ def plan_queue(store: MineStore, *, limit: int | None = None) -> dict[str, int]:
     # listing task takes the rest.
     doc_like = " OR ".join("lower(e.name) LIKE ?" for _ in DOCUMENT_SUFFIXES)
     patterns = tuple(f"%{ext}" for ext in DOCUMENT_SUFFIXES)
+    # `.rar` is claimed for *both* tasks: listing records its members, and extraction is
+    # what makes a member's text readable (RO14 serves it from the container's own
+    # extraction entry). Every other archive is listed and nothing more, which is why the
+    # extraction claim is wider than the listing exclusion.
+    extract_like = " OR ".join(
+        "lower(e.name) LIKE ?" for _ in (*DOCUMENT_SUFFIXES, *LIBARCHIVE_DOCUMENT_EXTENSIONS))
+    extract_patterns = tuple(
+        f"%{ext}" for ext in (*DOCUMENT_SUFFIXES, *LIBARCHIVE_DOCUMENT_EXTENSIONS))
     collect(
         EXTRACT_TEXT, PRIORITY_EXTRACT_DOCUMENT,
-        f"c.kind IN ('document', 'archive') AND ({doc_like})", patterns,
+        f"c.kind IN ('document', 'archive') AND ({extract_like})", extract_patterns,
     )
     collect(
         LIST_ARCHIVE, PRIORITY_LIST_ARCHIVE,
@@ -594,7 +625,7 @@ def task_list_archive(ctx: TaskContext, rel: str, size: int, source_hash: str) -
             return TaskOutcome(FAILED, type(e).__name__)
         if by_content is None:
             return TaskOutcome(SKIPPED, "no_listing_engine")
-        engine = {"zip": "zip", "tar": "tar"}.get(by_content, "stream")
+        engine = {"zip": "zip", "tar": "tar", "rar": "libarchive"}.get(by_content, "stream")
 
     try:
         if engine == "zip":
@@ -603,9 +634,15 @@ def task_list_archive(ctx: TaskContext, rel: str, size: int, source_hash: str) -
         elif engine == "tar":
             with ctx.mount.open_readonly(rel) as handle:
                 members = _tar_members(handle)
+        elif engine == "libarchive":
+            lister = ctx.engines.get("libarchive_members") or _libarchive_members
+            members = lister(ctx.mount, rel)
         else:
             with ctx.mount.open_readonly(rel, max_bytes=1) as handle:
                 members = _gzip_single_member(handle, rel)
+    except LibarchiveError as e:
+        # The class only: libarchive quotes the file it was reading, and `note` travels.
+        return TaskOutcome(FAILED, f"libarchive:{e}")
     except (zipfile.BadZipFile, tarfile.TarError, EOFError, OSError,
             ReadOnlyViolation, ValueError) as e:
         return TaskOutcome(FAILED, type(e).__name__)
@@ -616,8 +653,15 @@ def task_list_archive(ctx: TaskContext, rel: str, size: int, source_hash: str) -
         "declared_bytes": sum(size_ for _, size_, _ in members),
         "kinds": _kind_counts(members),
     }
-    cache.put(key, text, meta)
-    ctx.store.add_members(_bytes_of(rel), members)
+    try:
+        cache.put(key, text, meta)
+        ctx.store.add_members(_bytes_of(rel), members)
+    except (OSError, sqlite3.Error) as e:
+        # Hardware and space conditions land here: a full disk, a read-only or failing
+        # filesystem. The item is recorded failed — the work is simply not done yet — and
+        # `DerivationCache.put` guarantees nothing partial was published (owner call,
+        # 2026-09-22). The listing itself is already in hand, so a retry is cheap.
+        return TaskOutcome(FAILED, type(e).__name__)
     return TaskOutcome(DONE, None, key, len(members))
 
 
@@ -690,12 +734,30 @@ def task_extract_text(ctx: TaskContext, rel: str, size: int, source_hash: str) -
             text, meta = engine(ctx.mount.open_readonly(rel))
         except (OSError, zipfile.BadZipFile, ReadOnlyViolation) as e:
             return TaskOutcome(FAILED, type(e).__name__)
+    elif lower.endswith(LIBARCHIVE_DOCUMENT_EXTENSIONS):
+        # A container is extracted so that its *members* can be read: RO14 serves a member
+        # from the container's own extraction-cache entry, so without this a `.rar` could
+        # be searched by member name and never opened.
+        engine = ctx.engines.get("libarchive_text") or _libarchive_text
+        try:
+            text, meta = engine(ctx.mount, rel)
+        except (OSError, ReadOnlyViolation, RuntimeError) as e:
+            return TaskOutcome(FAILED, type(e).__name__)
     else:
         return TaskOutcome(SKIPPED, "no_extraction_engine")
 
     if not text.strip():
-        return TaskOutcome(SKIPPED, "needs_ocr", key, 0)
-    cache.put(key, text, meta)
+        # An archive with no text members is not a document awaiting OCR, and saying so
+        # would queue it for a vision pass that has nothing to look at.
+        note = ("no_text_members" if lower.endswith(LIBARCHIVE_DOCUMENT_EXTENSIONS)
+                else "needs_ocr")
+        return TaskOutcome(SKIPPED, note, key, 0)
+    try:
+        cache.put(key, text, meta)
+    except (OSError, sqlite3.Error) as e:
+        # Same guard as the listing path: a disk that cannot take the write is a recorded
+        # failure, and never a half-written entry a reader would serve as the passage.
+        return TaskOutcome(FAILED, type(e).__name__)
     # A derived document goes into the text index straight away: the words are
     # already in hand, and the chunk rows point at the cache entry rather than at
     # the container, because the container cannot be read without extracting it
@@ -813,11 +875,200 @@ WRAPPED_TAR_PROBE_BYTES = 1_024
 #: failures and tell a reader less.
 CONTAINER_MAGIC: tuple[tuple[str, tuple[bytes, ...]], ...] = (
     ("zip", (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")),
+    # RAR is routed by *content*, never by its name, and the reason is measured: 52 of the
+    # corpus's 136 `.rar` are zips wearing that name, and content routing already lists
+    # them through the zip engine. Claiming the extension would send those to libarchive
+    # (which would cope) and would make the name override the bytes, which is the rule this
+    # table exists to keep. RAR4 and RAR5 both: `Rar!\x1a\x07\x00` and the RAR5 form.
+    ("rar", (b"Rar!\x1a\x07\x00", b"Rar!\x1a\x07\x01\x00")),
     ("gzip", (b"\x1f\x8b",)),
     ("bzip2", (b"BZh",)),
     ("xz", (b"\xfd7zXZ\x00",)),
     ("zstd", (b"\x28\xb5\x2f\xfd",)),
 )
+
+#: Where libarchive lives. Present on the corpus host and already used for `.tar`; the
+#: extraction engine streams members to stdout, so no temporary directory is ever created.
+BSDTAR = "bsdtar"
+
+#: Extensions claimed for extraction by name, because their `kind` is `archive` and the
+#: extraction task is what makes their members *readable* (RO14 serves a member from the
+#: container's own extraction-cache entry). `.rar` is here rather than in
+#: `ZIP_CONTAINER_EXTENSIONS` deliberately: it is a *listing* extension only by content.
+LIBARCHIVE_DOCUMENT_EXTENSIONS = (".rar",)
+
+#: Members inside a libarchive container whose text is worth extracting. A judgement, and a
+#: narrow one: the alternative — reading every member and asking whether it decodes — spends
+#: a container's whole budget on things like `.png` payloads that decode to noise.
+LIBARCHIVE_TEXT_MEMBER_EXTENSIONS = (
+    ".txt", ".text", ".md", ".markdown", ".rst", ".log", ".csv", ".tsv", ".json", ".xml",
+    ".html", ".htm", ".xhtml", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".toml", ".sql",
+    ".js", ".mjs", ".cjs", ".ts", ".py", ".rb", ".pl", ".php", ".java", ".kt", ".c", ".h",
+    ".cc", ".cpp", ".hpp", ".cs", ".go", ".rs", ".swift", ".sh", ".bash", ".zsh", ".bat",
+    ".ps1", ".lua", ".r", ".m", ".tex", ".svg", ".gitignore", ".properties",
+)
+
+#: How much member text one container may contribute, and how many members are read. Bounds
+#: the work, not the enumeration: every member is still listed (the owner asked for that);
+#: this only caps what is *extracted* into the cache.
+MAX_CONTAINER_TEXT_BYTES = 8 * 1024 * 1024
+MAX_CONTAINER_TEXT_MEMBERS = 2_000
+
+#: Free space a cache write requires before it is attempted. A write that cannot finish
+#: leaves a truncated entry, and a truncated entry is worse than a miss: a reader would
+#: serve it as the passage. So the write is refused up front, the item is recorded failed,
+#: and the work is simply not done yet.
+MIN_FREE_BYTES = 256 * 1024 * 1024
+
+
+class NoSpaceLeftError(OSError):
+    """Raised instead of attempting a write the disk cannot take."""
+
+
+class LibarchiveError(RuntimeError):
+    """`bsdtar` refused the container. The message is a *class*, never text it printed.
+
+    libarchive's own diagnostics quote the file it was reading, so they are classified
+    here and the class is what reaches the queue's `note` column. `note` is derived state
+    that travels; a path is not.
+    """
+
+
+def _require_space(root: Path) -> None:
+    """Refuse a cache write when the filesystem cannot take it (owner call, 2026-09-22)."""
+    try:
+        free = shutil.disk_usage(root if Path(root).exists() else Path(root).anchor).free
+    except OSError:  # pragma: no cover - a filesystem that cannot be asked
+        return
+    if free < MIN_FREE_BYTES:
+        raise NoSpaceLeftError(28, "not enough free space for a cache write")
+
+
+def _libarchive_class(stderr: bytes) -> str:
+    """A class for a `bsdtar` failure, from its message, without ever echoing it."""
+    low = stderr.decode("utf-8", "replace").lower()
+    if "passphrase" in low or "password" in low or "encrypt" in low:
+        return "encrypted"
+    if "solid" in low:
+        return "solid"
+    if "unexpected end" in low or "truncated" in low or "damaged" in low:
+        return "truncated"
+    if "unsupported" in low or "not supported" in low:
+        return "unsupported"
+    if "unrecognized" in low or "malformed" in low:
+        return "unrecognized-format"
+    return "libarchive-error"
+
+
+def _libarchive_run(mount: LocalTreeMount, rel: str, args: list[str], *,
+                    timeout: float = 900.0) -> bytes:
+    """Run `bsdtar` over the mount's *descriptor*, never over a path.
+
+    libarchive needs a seekable input and the mount is the only thing allowed to open a
+    corpus file, so the mount's descriptor is passed through (`/dev/fd/N` plus `pass_fds`).
+    Measured on 2026-09-22: four RARs listed this way (1, 6 859, 3 857 and 41 members), and
+    the verbose form parsed 10 800 of 10 800 rows.
+
+    The child's stderr is classified into a class rather than propagated: it quotes the file
+    it was reading, and `note` travels.
+    """
+    with mount.open_readonly(rel) as handle:
+        fd = handle.fileno()
+        argv = [BSDTAR, *args, f"/dev/fd/{fd}"]
+        try:
+            run = subprocess.run(argv, pass_fds=(fd,), capture_output=True, timeout=timeout)
+        except FileNotFoundError as e:  # no bsdtar on this host
+            raise LibarchiveError("no-libarchive") from e
+        except subprocess.TimeoutExpired as e:
+            raise LibarchiveError("timeout") from e
+    if run.returncode != 0:
+        raise LibarchiveError(_libarchive_class(run.stderr))
+    return run.stdout
+
+
+def _libarchive_members(
+    mount: LocalTreeMount, rel: str,
+) -> list[tuple[str, int, str]]:
+    """List a container's members through libarchive: `(member, size, kind)`.
+
+    The verbose form carries the sizes `archive_members` needs, and its layout was
+    measured rather than assumed: 10 800 of 10 800 rows split into exactly nine fields with
+    the size at index 4. A row that does not match is **skipped**, not guessed — a member
+    with an invented size is a wrong number in a table that travels.
+    """
+    stdout = _libarchive_run(mount, rel, ["-tvf"])
+    members: list[tuple[str, int, str]] = []
+    for line in stdout.decode("utf-8", "replace").splitlines():
+        parts = line.split(None, 8)
+        if len(parts) != 9 or not parts[4].isdigit():
+            continue
+        mode, name = parts[0], parts[8].strip()
+        kind = "dir" if mode.startswith("d") else ("link" if mode.startswith("l") else "file")
+        if kind == "link":
+            # The verbose form renders a symlink as `name -> target`; the member is `name`,
+            # and storing the arrow text would invent a member that is not in the archive.
+            name = name.split(" -> ", 1)[0].strip()
+        if not name:
+            continue
+        members.append((name, int(parts[4]), kind))
+        if len(members) >= MAX_MEMBERS:
+            break
+    return members
+
+
+def _member_is_text(name: str) -> bool:
+    lower = name.lower()
+    return lower.endswith(LIBARCHIVE_TEXT_MEMBER_EXTENSIONS)
+
+
+def _libarchive_text(mount: LocalTreeMount, rel: str) -> tuple[str, dict[str, Any]]:
+    """Extract the text of a container's members, one member at a time, to stdout.
+
+    Each member is streamed with `-xO`, so **no temporary file is ever created** — which is
+    the whole of the cleanup story for extraction, and the reason the owner's "clean up
+    what you extracted" is satisfied by construction rather than by a sweeper.
+
+    Bounded twice: by `MAX_CONTAINER_TEXT_MEMBERS` and by `MAX_CONTAINER_TEXT_BYTES`, and a
+    container that hits either says `truncated` in its metadata rather than presenting a
+    partial extraction as the whole.
+    """
+    members = _libarchive_members(mount, rel)
+    parts: list[str] = []
+    used = 0
+    read = 0
+    skipped: list[str] = []
+    truncated = False
+    for name, size, kind in members:
+        if kind != "file" or not _member_is_text(name):
+            continue
+        if read >= MAX_CONTAINER_TEXT_MEMBERS or used >= MAX_CONTAINER_TEXT_BYTES:
+            truncated = True
+            break
+        remaining = MAX_CONTAINER_TEXT_BYTES - used
+        try:
+            raw = _libarchive_run(mount, rel, ["-xOf", name], timeout=600.0)
+        except LibarchiveError as e:
+            # One unreadable member does not end the container: it is recorded as skipped
+            # and the rest are still read, the same rule the listing task follows for a
+            # damaged container.
+            skipped.append(str(e))
+            continue
+        if len(raw) > remaining:
+            raw = raw[:remaining]
+            truncated = True
+        parts.append(f"===== {name} =====\n" + raw.decode("utf-8", "replace"))
+        used += len(raw)
+        read += 1
+    text = "\n".join(parts)
+    meta = {
+        "engine": "libarchive",
+        "members_listed": len(members),
+        "members_read": read,
+        "declared_bytes": used,
+        "skipped_members": len(skipped),
+        "truncated": truncated,
+    }
+    return text, meta
 
 
 def _wrapped_tar(handle: io.BufferedReader, head: bytes) -> bool:

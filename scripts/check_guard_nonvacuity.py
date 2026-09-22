@@ -3043,6 +3043,89 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_chained_window_can_skip_the_coverage_scan",
         ],
     ),
+    # ── RO23: `.rar` through libarchive, and writes that survive a full disk ──
+    # The owner's call of 2026-09-22, plus the guard that came with it: list everything,
+    # but record a hardware or space failure instead of leaving a partial entry behind.
+    (
+        "RO23 a rar is routed to the stream engine",
+        "src/rlm_kernel/mine.py",
+        "        engine = {\"zip\": \"zip\", \"tar\": \"tar\", \"rar\": \"libarchive\"}"
+        ".get(by_content, \"stream\")",
+        "        engine = {\"zip\": \"zip\", \"tar\": \"tar\"}.get(by_content, \"stream\")",
+        [
+            "tests/rlm_kernel/test_mine.py::TestRarThroughLibarchive"
+            "::test_a_rar_is_listed_and_its_members_recorded",
+        ],
+    ),
+    (
+        "RO23 the rar magic goes back to being unclaimed",
+        "src/rlm_kernel/mine.py",
+        "    (\"rar\", (b\"Rar!\\x1a\\x07\\x00\", b\"Rar!\\x1a\\x07\\x01\\x00\")),\n",
+        "",
+        [
+            "tests/rlm_kernel/test_mine.py::TestRarThroughLibarchive"
+            "::test_a_rar_is_listed_and_its_members_recorded",
+        ],
+    ),
+    (
+        "RO23 libarchive is handed the corpus path instead of the mount's descriptor",
+        "src/rlm_kernel/mine.py",
+        "        argv = [BSDTAR, *args, f\"/dev/fd/{fd}\"]",
+        "        argv = [BSDTAR, *args, rel]",
+        [
+            "tests/rlm_kernel/test_mine.py::TestRarThroughLibarchive"
+            "::test_the_listing_command_never_opens_the_corpus_itself",
+        ],
+    ),
+    (
+        "RO23 a symlink row invents a member name",
+        "src/rlm_kernel/mine.py",
+        "            name = name.split(\" -> \", 1)[0].strip()",
+        "            name = name",
+        [
+            "tests/rlm_kernel/test_mine.py::TestRarThroughLibarchive"
+            "::test_verbose_rows_are_parsed_and_bad_ones_skipped",
+        ],
+    ),
+    (
+        "RO23 a cache write ignores the free space",
+        "src/rlm_kernel/mine.py",
+        "        _require_space(meta_path.parent)",
+        "        pass",
+        [
+            "tests/rlm_kernel/test_mine.py"
+            "::TestWritesSurviveAFullDiskAndCleanUpAfterThemselves"
+            "::test_a_full_disk_fails_the_item_and_leaves_no_entry",
+        ],
+    ),
+    (
+        "RO23 a failed write leaves its temporary behind",
+        "src/rlm_kernel/mine.py",
+        "        finally:\n"
+        "            for leftover in (tmp_text, tmp_meta):\n"
+        "                try:\n"
+        "                    leftover.unlink()\n"
+        "                except OSError:\n"
+        "                    pass",
+        "        finally:\n            pass",
+        [
+            "tests/rlm_kernel/test_mine.py"
+            "::TestWritesSurviveAFullDiskAndCleanUpAfterThemselves"
+            "::test_a_failed_write_leaves_no_partial_entry_or_temp_file",
+        ],
+    ),
+    (
+        "RO23 a rar stops being queued for extraction",
+        "src/rlm_kernel/mine.py",
+        "    extract_like = \" OR \".join(\n"
+        "        \"lower(e.name) LIKE ?\" for _ in (*DOCUMENT_SUFFIXES,"
+        " *LIBARCHIVE_DOCUMENT_EXTENSIONS))",
+        "    extract_like = doc_like",
+        [
+            "tests/rlm_kernel/test_mine.py::TestRarThroughLibarchive"
+            "::test_a_rar_is_planned_for_listing_and_for_extraction",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

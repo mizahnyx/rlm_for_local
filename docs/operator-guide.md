@@ -600,6 +600,29 @@ The same command publishes the archive-member count, which is why `mine status` 
 they print **unknown** plus that remedy until something has published one. That count
 was the other hour this window lost: `mine status` used to scan the member table.
 
+### Containers libarchive opens: `.rar`
+
+A `.rar` is listed and extracted through **libarchive** (`bsdtar`), which is already
+installed — no `unrar` is needed. Three properties are worth knowing, because each was
+measured rather than assumed (`docs/20260922-0946-rar-and-7z-what-is-measured.md`):
+
+- **It is routed by content, not by name.** 52 files in this corpus are zips wearing a
+  `.rar` name, and they keep going to the zip engine; RAR4 and RAR5 magic send a file to
+  libarchive whatever it is called.
+- **The mount stays the only opener.** libarchive needs a seekable input, so `bsdtar` is
+  handed the mount's own descriptor (`/dev/fd/N` with `pass_fds`) rather than a path.
+- **Nothing is left behind.** Every member is streamed to stdout (`-xO`), so extraction
+  creates no temporary file at all, and a cache write is atomic: text and metadata land
+  through a temporary file and a rename, the temporaries are removed on failure too, and a
+  write is **refused** when the filesystem has less than 256 MiB free. A refusal, a full
+  disk or a hardware error becomes a recorded `FAILED` item — `NoSpaceLeftError` — and the
+  cache holds either a complete entry or none, never a truncated passage that a search
+  would quote as if it were the file.
+
+`.7z` is deliberately **not** handled: libarchive lists it but extracted only 1 of 4
+sampled members, so a `.7z` member could be found by name and never read. Those 39 files
+stay in the terminal skip set, recorded as `no_listing_engine`.
+
 ### `rlm corpus sample` — passages to devise questions from
 
 Probe questions that matter are the ones drawn from *this* corpus, not invented. This

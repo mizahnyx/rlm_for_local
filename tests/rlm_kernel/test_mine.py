@@ -18,6 +18,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import shutil
 import time
 import zipfile
 from pathlib import Path
@@ -969,6 +970,180 @@ class TestTheClosingPathDoesNotCountBigTables:
         assert counted == 20_000
         assert calls, ("the published member count must step the VM, or the lock goes "
                        "stale for however long it takes")
+
+
+class TestRarThroughLibarchive:
+    """`.rar` joins the container policy through libarchive (owner call, 2026-09-22).
+
+    Measured before it landed: libarchive lists 23 of 25 sampled and **extracts 6 of 6**
+    members tried, which is what makes members readable rather than only named. `.7z`
+    lists 11 of 12 but extracts 1 of 4, so it stays out
+    (`docs/20260922-0946-rar-and-7z-what-is-measured.md`).
+
+    A RAR cannot be *written* on this host — libarchive reads that format and does not
+    produce it — so these tests inject the engine and pin the wiring, and the real
+    listing is verified against the corpus instead. The command's shape is pinned
+    separately, because the one thing it must never do is open the corpus itself.
+    """
+
+    def test_a_rar_is_listed_and_its_members_recorded(
+        self, corpus: Path, store: MineStore, mount: LocalTreeMount, derived: Path,
+    ) -> None:
+        from rlm_kernel.mine import TaskContext, task_list_archive
+
+        # RAR is routed by *content*, so the file has to exist for the sniff to see the
+        # magic — which is the routing this test is really pinning.
+        (corpus / "pack.rar").write_bytes(b"Rar!\x1a\x07\x00" + b"\x00" * 32)
+        members = [("notes/a.txt", 5, "file"), ("notes/", 0, "dir")]
+        ctx = TaskContext(mount=mount, store=store, cache_root=derived,
+                          engines={"libarchive_members": lambda _m, _r: members})
+        outcome = task_list_archive(ctx, "pack.rar", 100, "hash-rar")
+        assert outcome.state == DONE, outcome.note
+        assert store.member_count() == 2, "the members were not recorded"
+        cache = DerivationCache(derived, LIST_ARCHIVE)
+        text, meta = cache.get(cache.key("hash-rar", params=f"members<={MAX_MEMBERS}"))
+        assert "notes/a.txt\t5\tfile" in text, text
+        assert meta["declared_bytes"] == 5
+
+    def test_a_rar_named_zip_still_routes_by_content(
+        self, corpus: Path, index: CorpusIndex, store: MineStore,
+        mount: LocalTreeMount, derived: Path,
+    ) -> None:
+        """The 52 zips wearing a `.rar` name must not start needing libarchive.
+
+        `.rar` is deliberately **not** an extension the listing task claims: it is added
+        to the content sniff instead, so a name never overrides the bytes and the zip
+        engine keeps handling the mis-named ones (measured 2026-09-21).
+        """
+        from rlm_kernel.mine import TaskContext, task_list_archive
+
+        ctx = TaskContext(mount=mount, store=store, cache_root=derived)
+        outcome = task_list_archive(ctx, "bundle.zip", 100, "hash-zip")
+        assert outcome.state == DONE, outcome.note
+        assert store.member_count() == 2, "the zip engine did not list it"
+
+    def test_the_listing_command_never_opens_the_corpus_itself(
+        self, corpus: Path, mount: LocalTreeMount, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The mount is the only thing allowed to open a corpus file.
+
+        libarchive needs a seekable input, so the mount's *descriptor* is passed to the
+        child (`/dev/fd/N` plus `pass_fds`) rather than a path. A future edit that
+        passes a path would put the read outside the mount, and read-only would then
+        rest on the subprocess alone — this check is what makes that visible.
+        """
+        import subprocess as sp
+
+        from rlm_kernel.mine import _libarchive_members
+
+        seen: dict[str, object] = {}
+
+        def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+            seen["argv"] = list(argv)
+            seen["pass_fds"] = kwargs.get("pass_fds")
+            return sp.CompletedProcess(argv, 0,
+                                       stdout=b"-rw-r--r--  0 0 0  12 Jan 1 2020 a.txt\n",
+                                       stderr=b"")
+
+        monkeypatch.setattr(sp, "run", fake_run)
+        members = _libarchive_members(mount, "bundle.zip")
+        argv = seen["argv"]
+        assert isinstance(argv, list)
+        assert any(str(a).startswith("/dev/fd/") for a in argv), argv
+        assert not any(str(mount.root) in str(a) for a in argv), argv
+        assert seen["pass_fds"], "the descriptor was not passed to the child"
+        assert members == [("a.txt", 12, "file")]
+
+    def test_verbose_rows_are_parsed_and_bad_ones_skipped(
+        self, corpus: Path, mount: LocalTreeMount, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import subprocess as sp
+
+        from rlm_kernel.mine import _libarchive_members
+
+        stdout = (
+            b"drwxr-xr-x  0 0 0 0 Jan 1 2020 notes/\n"
+            b"-rw-r--r--  0 0 0 12 Jan 1 2020 notes/a.txt\n"
+            b"lrwxrwxrwx  0 0 0 4 Jan 1 2020 link -> target\n"
+            b"this line is not a listing row\n"
+        )
+        monkeypatch.setattr(sp, "run", lambda argv, **kw: sp.CompletedProcess(
+            argv, 0, stdout=stdout, stderr=b""))
+        members = _libarchive_members(mount, "bundle.zip")
+        kinds = {name: kind for name, _, kind in members}
+        assert kinds["notes/"] == "dir"
+        assert kinds["notes/a.txt"] == "file"
+        assert kinds["link"] == "link"
+        assert len(members) == 3, "an unparseable row must be skipped, not guessed"
+
+    def test_a_rar_is_planned_for_listing_and_for_extraction(
+        self, corpus: Path, index: CorpusIndex, store: MineStore, mount: LocalTreeMount,
+    ) -> None:
+        """A member is only readable if the *container* was extracted (RO14)."""
+        (corpus / "pack.rar").write_bytes(b"Rar!\x1a\x07\x00not really a rar\n")
+        _refresh_map(index, mount)
+        plan_queue(store)
+        tasks = store.status()["queued_by_task"]
+        assert tasks[LIST_ARCHIVE][PENDING] >= 1
+        assert tasks[EXTRACT_TEXT][PENDING] >= 1, (
+            "a .rar must be queued for extraction too, or its members can be named "
+            "but never read"
+        )
+
+
+class TestWritesSurviveAFullDiskAndCleanUpAfterThemselves:
+    """The owner's guard on 2026-09-22: *"list everything, but have an effective guard
+    for errors caused by hardware or space constraints, and ensure temporary files
+    extracted are cleaned when unused"*.
+
+    Two properties, both about what is left behind after a failure: a cache entry is
+    either complete or absent — never a truncated passage that a reader would serve as
+    the real thing — and no temporary file survives the attempt.
+    """
+
+    def test_a_full_disk_fails_the_item_and_leaves_no_entry(
+        self, corpus: Path, store: MineStore, mount: LocalTreeMount, derived: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from rlm_kernel.mine import TaskContext, task_list_archive
+
+        (corpus / "pack.rar").write_bytes(b"Rar!\x1a\x07\x00" + b"\x00" * 32)
+
+        class Full:
+            total = 10 ** 12
+            used = 10 ** 12
+            free = 1024
+
+        monkeypatch.setattr(shutil, "disk_usage", lambda _p: Full())
+        ctx = TaskContext(mount=mount, store=store, cache_root=derived,
+                          engines={"libarchive_members": lambda _m, _r: [("a", 1, "file")]})
+        outcome = task_list_archive(ctx, "pack.rar", 100, "hash-full")
+        assert outcome.state == FAILED
+        assert outcome.note == "NoSpaceLeftError", outcome.note
+        cache = DerivationCache(derived, LIST_ARCHIVE)
+        assert not cache.has(cache.key("hash-full", params=f"members<={MAX_MEMBERS}")), (
+            "a refused write must leave no cache entry at all"
+        )
+        assert store.member_count() == 0
+
+    def test_a_failed_write_leaves_no_partial_entry_or_temp_file(
+        self, derived: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Atomic, or absent — a truncated text file would be served as the passage."""
+        cache = DerivationCache(derived, LIST_ARCHIVE)
+        key = cache.key("hash-atomic")
+        real_replace = os.replace
+
+        def failing_replace(src, dst):  # type: ignore[no-untyped-def]
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(os, "replace", failing_replace)
+        with pytest.raises(OSError):
+            cache.put(key, "a\t1\tfile\n", {"members": 1})
+        monkeypatch.setattr(os, "replace", real_replace)
+        assert not cache.has(key), "a failed write must not publish an entry"
+        leftovers = [p.name for p in Path(cache._root).rglob("*") if p.is_file()]  # noqa: SLF001
+        assert leftovers == [], f"temporary files survived the failure: {leftovers}"
 
 
 class TestReadOnlyByConstruction:
