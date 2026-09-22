@@ -458,6 +458,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_mretry = mine_sub.add_parser("retry", help="Put failed items back in the queue")
     _add_corpus_flags(p_mretry, require_root=False, require_index=True)
     p_mretry.add_argument("--task", default=None)
+    p_mretry.add_argument(
+        "--skipped-note", default=None,
+        help="Also re-open rows this task *skipped* with this note, e.g. "
+             "no_listing_engine — for when the harness has learned to do the thing the "
+             "skip recorded it could not (required with --task)",
+    )
 
     return parser
 
@@ -1770,6 +1776,15 @@ def _cmd_mine(args: argparse.Namespace) -> int:
             n = store.reset_failed(args.task)
             print(f"re-queued {n:,} failed item(s)"
                   + (f" for {args.task}" if args.task else ""))
+            note = getattr(args, "skipped_note", None)
+            if note:
+                if not args.task:
+                    print("Error: --skipped-note needs --task, so the re-opened skips are "
+                          "scoped to one task.", file=sys.stderr)
+                    return 2
+                m = store.reset_skipped(args.task, note)
+                print(f"re-opened {m:,} skipped item(s) for {args.task} "
+                      f"(note={note}) — the harness can do this now")
             return 0
 
         if sub == "run":

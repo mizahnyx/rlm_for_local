@@ -387,6 +387,60 @@ class TestContentRoutesContainers:
                                      "mystery2") == "skipped/no_listing_engine"
 
 
+class TestReopeningASupersededSkip:
+    """A skip is a judgement, and a judgement can be superseded (2026-09-21).
+
+    Content routing and a wider extension list made 12 448 extensionless containers and 52
+    mis-named archives listable — and every one was recorded `skipped/no_listing_engine`, a
+    terminal state no verb could revisit. `retry` resets `failed` only, `enqueue` is a no-op
+    for an existing row, so without this the work a change unlocks never runs.
+    """
+
+    def _skip(self, store: MineStore, raw: bytes, note: str) -> None:
+        store.enqueue([(raw, LIST_ARCHIVE, 30)])
+        store.finish(raw, LIST_ARCHIVE, SKIPPED, note)
+
+    def test_a_skipped_row_is_reopened_for_that_note(self, store: MineStore) -> None:
+        self._skip(store, b"a.bin", "no_listing_engine")
+        assert store.reset_skipped(LIST_ARCHIVE, "no_listing_engine") == 1
+        state, note = store._conn.execute(  # noqa: SLF001
+            "SELECT state, note FROM mine_queue WHERE raw = ?", (b"a.bin",)).fetchone()
+        assert state == PENDING
+        assert note is None, "a re-opened row carries no stale note"
+
+    def test_a_skip_for_a_different_reason_is_left_alone(self, store: MineStore) -> None:
+        """Scoped by note on purpose: an unscoped reset would re-run skips whose reason stands."""
+        self._skip(store, b"b.bin", "needs_ocr")
+        assert store.reset_skipped(LIST_ARCHIVE, "no_listing_engine") == 0
+        state = store._conn.execute(  # noqa: SLF001
+            "SELECT state FROM mine_queue WHERE raw = ?", (b"b.bin",)).fetchone()[0]
+        assert state == SKIPPED
+
+    def test_a_done_row_is_not_disturbed(self, store: MineStore) -> None:
+        store.enqueue([(b"c.bin", LIST_ARCHIVE, 30)])
+        store.finish(b"c.bin", LIST_ARCHIVE, DONE)
+        assert store.reset_skipped(LIST_ARCHIVE, "no_listing_engine") == 0
+        state = store._conn.execute(  # noqa: SLF001
+            "SELECT state FROM mine_queue WHERE raw = ?", (b"c.bin",)).fetchone()[0]
+        assert state == DONE
+
+    def test_the_reopened_row_is_worked_by_the_next_window(
+        self, store: MineStore, mount: LocalTreeMount, derived: Path, corpus: Path,
+        index: CorpusIndex,
+    ) -> None:
+        """The point of the verb: after it, the queue hands the item to a worker."""
+        with zipfile.ZipFile(corpus / "late.bin", "w") as archive:
+            archive.writestr("inner/one.txt", "x" * 10)
+        self._skip(store, b"late.bin", "no_listing_engine")
+        index.build(mount)
+        index.classifications().ensure()
+        classify_entries(mount, index.classifications())
+        store.reset_skipped(LIST_ARCHIVE, "no_listing_engine")
+        run_queue(store=store, conn=store._conn, mount=mount,  # noqa: SLF001
+                  cache_root=derived, tasks=[LIST_ARCHIVE])
+        assert store.member_count() == 1
+
+
 class TestArchiveListing:
     @pytest.mark.parametrize("name", ["bundle.aar", "bundle.war", "bundle.ear",
                                       "bundle.nupkg", "bundle.jmod"])

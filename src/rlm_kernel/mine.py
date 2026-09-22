@@ -260,6 +260,28 @@ class MineStore:
         self._conn.commit()
         return int(cursor.rowcount)
 
+    def reset_skipped(self, task: str, note: str) -> int:
+        """Put `skipped` rows back in the queue, for one task and one note (2026-09-21).
+
+        A skip is a *judgement at the time it was made* — "no engine claims this" — and a
+        judgement can be superseded by the harness learning to do the thing. That happened:
+        content routing (`task_list_archive`) and a wider extension list made 12 448
+        extensionless containers and 52 mis-named archives listable, and every one of them
+        was recorded `skipped/no_listing_engine`, which is a terminal state no verb could
+        revisit. `retry` resets `failed` rows only, and `enqueue` is a no-op for a row that
+        already exists, so without this the work the change unlocked would never run.
+
+        Scoped by task **and** note on purpose: a skip is re-opened for a *reason*, and an
+        unscoped reset would re-run skips whose reason still stands.
+        """
+        cursor = self._conn.execute(
+            "UPDATE mine_queue SET state = ?, note = NULL, updated_at = ?"
+            " WHERE state = ? AND task = ? AND note = ?",
+            (PENDING, time.time(), SKIPPED, task, note),
+        )
+        self._conn.commit()
+        return int(cursor.rowcount)
+
     # ── Members (what an archive listing produced) ────────────────────────
 
     def add_members(self, container: bytes, members: Iterable[tuple[str, int, str]]) -> int:

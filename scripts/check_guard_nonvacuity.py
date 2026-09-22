@@ -2953,6 +2953,18 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_tar_inside_a_gzip_is_a_container_not_a_stream",
         ],
     ),
+    (
+        "RO15 reopening a skip stops being scoped to its reason",
+        "src/rlm_kernel/mine.py",
+        "            \" WHERE state = ? AND task = ? AND note = ?\",\n"
+        "            (PENDING, time.time(), SKIPPED, task, note),",
+        "            \" WHERE state = ? AND task = ?\",\n"
+        "            (PENDING, time.time(), SKIPPED, task),",
+        [
+            "tests/rlm_kernel/test_mine.py::TestReopeningASupersededSkip"
+            "::test_a_skip_for_a_different_reason_is_left_alone",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
