@@ -633,6 +633,25 @@ python -m rlm_local.cli corpus sample --n 5 --seed 1234 \
     --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite
 ```
 
+**It draws prose by default** (owner, 2026-09-22). A question devised from minified
+JavaScript, a JSON dump or a subtitle file is not a question about the corpus a person would
+ask, and the uniform draw offered almost nothing else: measured over 20 passages, **0 of 20**
+cleared the prose floor, while the prose-preferred draw gave **20 of 20** — at eight times
+the cost (400 s against 50 s for twenty, because candidates are read before they are judged
+on content). The command prints what the filter rejected, so a wrong floor is visible:
+
+```
+# prose filter: drew 92, kept 20, rejected 65 on content, unreadable 0, floor 0.62
+```
+
+- `--any` restores the uniform draw, for a deliberate look at code and machine text.
+- `--floor` moves the threshold (0.62 by default); lower it when the draw keeps rejecting.
+- `--include-vendored` and `--include-derived` still govern *where* passages may come from.
+
+`docs/20260922-1540-sampling-prose.md` has the measurement, the five ratios the score uses,
+and the honest note that a subtitle file scores high and is rejected by *name* rather than by
+score.
+
 ```text
 # 5 of 5 passage(s) drawn from the corpus index, seed=1234
 # This is corpus text, read through the read-only mount: it may be read where
