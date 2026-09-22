@@ -362,3 +362,41 @@ WORKER_MESSAGES: dict[str, str] = {
     "hit_not_a_record": WORKER_HIT_NOT_A_RECORD,
 }
 
+# ── Drafting a question from a passage (operator tool, 2026-09-22) ────────────
+#
+# The owner asked for a non-default question set drawn from real prose, and `AGENTS.md`
+# §1.9 keeps corpus prose off any channel that leaves the machine — so the questions are
+# drafted *where the corpus is*, by a local model, from passages that never travel.
+#
+# It asks for one question and nothing else, and forbids the shapes that make a probe
+# useless: a question whose answer is inside it, and a question that needs the file's name
+# or location (the harness is supposed not to know those).
+
+DRAFT_QUESTION_SYSTEM = (
+    "You write questions for a search system that must find and quote the passage they are "
+    "answered from. You are shown one passage and you write exactly one question about its "
+    "content. You never reveal your reasoning and you never add commentary."
+)
+
+DRAFT_QUESTION_PROMPT = (
+    "Here is one passage from a private file collection:\n"
+    "\n"
+    "---\n"
+    "{passage}\n"
+    "---\n"
+    "\n"
+    "Write ONE question that this passage answers, in the same language as the passage.\n"
+    "Rules:\n"
+    "- The question must be answerable from this passage alone.\n"
+    "- Do not name the file, the folder, or any path: the system does not know them.\n"
+    "- Do not include the answer inside the question.\n"
+    "- Do not start with 'According to the passage' or similar.\n"
+    "- One sentence, ending in a question mark. No numbering, no preamble, no explanation.\n"
+)
+
+#: Emitted when a reply cannot be used as a question — so the operator sees a *reason*
+#: rather than an empty line in a set that later reports "0 questions".
+DRAFT_QUESTION_UNUSABLE = (
+    "[no usable question was drafted: the reply was empty or was commentary, not a question]"
+)
+

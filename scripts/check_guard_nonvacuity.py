@@ -3213,6 +3213,52 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_duplicates_count_against_the_budget",
         ],
     ),
+    # ── RO25: questions drafted where the corpus is (2026-09-22) ──────────────
+    (
+        "RO25 the passage never reaches the drafting prompt",
+        "src/rlm_local/question_draft.py",
+        "    prompt = DRAFT_QUESTION_PROMPT.replace(\n"
+        "        \"{passage}\", (passage or \"\")[:passage_chars].strip())",
+        "    prompt = DRAFT_QUESTION_PROMPT.replace(\"{passage}\", \"\")",
+        [
+            "tests/test_question_draft.py::TestDrafting"
+            "::test_the_passage_reaches_the_prompt",
+        ],
+    ),
+    (
+        "RO25 commentary is accepted as a question",
+        "src/rlm_local/question_draft.py",
+        "        if _COMMENTARY.match(line):\n            return \"\"",
+        "        if False:\n            return \"\"",
+        [
+            "tests/test_question_draft.py::TestCleaningAReply"
+            "::test_a_request_for_context_is_not_a_question_even_with_a_question_mark",
+        ],
+    ),
+    (
+        "RO25 a statement is shipped as a question",
+        "src/rlm_local/question_draft.py",
+        "        if line.endswith(\"?\") or line.endswith(\"¿\") or line.endswith(\"？\"):\n"
+        "            return line",
+        "        if True:\n            return line",
+        [
+            "tests/test_question_draft.py::TestCleaningAReply"
+            "::test_a_statement_is_not_turned_into_a_question",
+        ],
+    ),
+    (
+        "RO25 the drafted addresses stop being written",
+        "src/rlm_local/question_draft.py",
+        "    path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "    path.write_text(",
+        "    path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "    return\n"
+        "    path.write_text(",
+        [
+            "tests/test_question_draft.py::TestTheAddressesStayBesideTheCorpus"
+            "::test_sources_are_written_with_the_usable_flag",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
