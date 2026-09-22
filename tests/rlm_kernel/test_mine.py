@@ -292,6 +292,101 @@ class TestTheDerivationCache:
         assert cache.stats()["entries"] == 0
 
 
+class TestContentRoutesContainers:
+    """A container is opened by what it *is*, not by what it is called (RO15 2026-09-21).
+
+    The measurement that forced this: of the 19 446 containers no engine claimed, **12 448
+    were listable by engines the harness already has** — 11 377 gzip and 1 071 zip with no
+    extension at all — and 52 files named `.rar` were zip archives. In both directions the
+    name was wrong and the routing believed it. Read-only, the first bytes cannot lie.
+    """
+
+    def _enqueue_and_run(self, store, mount, derived, corpus, index, name: str) -> str:
+        index.build(mount)
+        index.classifications().ensure()
+        classify_entries(mount, index.classifications())
+        store.enqueue([(name.encode(), LIST_ARCHIVE, 30)])
+        run_queue(store=store, conn=store._conn, mount=mount,  # noqa: SLF001
+                  cache_root=derived, tasks=[LIST_ARCHIVE])
+        row = store._conn.execute(  # noqa: SLF001
+            "SELECT state, note FROM mine_queue WHERE raw = ?", (name.encode(),)
+        ).fetchone()
+        return f"{row[0]}/{row[1] or '-'}"
+
+    def test_a_zip_with_no_extension_is_listed(
+        self, store: MineStore, mount: LocalTreeMount, derived: Path, corpus: Path,
+        index: CorpusIndex,
+    ) -> None:
+        with zipfile.ZipFile(corpus / "mystery", "w") as archive:
+            archive.writestr("inner/one.txt", "x" * 10)
+        assert self._enqueue_and_run(store, mount, derived, corpus, index,
+                                     "mystery") == "done/-"
+        assert store.member_count() == 1
+
+    def test_a_gzip_stream_with_no_extension_is_named(
+        self, store: MineStore, mount: LocalTreeMount, derived: Path, corpus: Path,
+        index: CorpusIndex,
+    ) -> None:
+        import gzip as gzip_module
+
+        (corpus / "stream").write_bytes(gzip_module.compress(b"payload bytes"))
+        assert self._enqueue_and_run(store, mount, derived, corpus, index,
+                                     "stream") == "done/-"
+        assert store.member_count() == 1
+
+    def test_a_tar_inside_a_gzip_is_a_container_not_a_stream(
+        self, store: MineStore, mount: LocalTreeMount, derived: Path, corpus: Path,
+        index: CorpusIndex,
+    ) -> None:
+        """The question the record said it would not assume. A `.tgz`'s gzip *wraps* a tar.
+
+        Treating it as a single opaque stream would report one member named after the file,
+        which is wrong: it holds as many members as the tar does. The `ustar` marker is what
+        distinguishes them, and it is present because the tar reader wrote it.
+        """
+        import gzip as gzip_module
+        import io
+        import tarfile as tarfile_module
+
+        buffer = io.BytesIO()
+        with tarfile_module.open(fileobj=buffer, mode="w") as tar:
+            for name in ("a.txt", "b.txt", "c.txt"):
+                payload = b"hello"
+                info = tarfile_module.TarInfo(name)
+                info.size = len(payload)
+                tar.addfile(info, io.BytesIO(payload))
+        # Actually gzipped, and with a name no extension list claims: the extension route
+        # must not be what makes this test pass, or the guard it is meant to prove could be
+        # removed without the test noticing.
+        (corpus / "bundle.bin").write_bytes(gzip_module.compress(buffer.getvalue()))
+        assert self._enqueue_and_run(store, mount, derived, corpus, index,
+                                     "bundle.bin") == "done/-"
+        assert store.member_count() == 3, "a gzipped tar holds its members, not one stream"
+
+    def test_pk_zip_flavour_is_still_a_zip(
+        self, store: MineStore, mount: LocalTreeMount, derived: Path, corpus: Path,
+        index: CorpusIndex,
+    ) -> None:
+        """`PK\\x03\\x04` and `PK\\x05\\x06` are both zip leaders; the empty archive matters."""
+        with zipfile.ZipFile(corpus / "empty", "w"):
+            pass
+        assert self._enqueue_and_run(store, mount, derived, corpus, index,
+                                     "empty") == "done/-"
+
+    def test_an_unknown_magic_is_still_skipped_not_guessed(
+        self, store: MineStore, mount: LocalTreeMount, derived: Path, corpus: Path,
+        index: CorpusIndex,
+    ) -> None:
+        """A magic table is a claim about a format; an unlisted magic is not a container.
+
+        The 200-suffix tail beyond the measured population is application blobs, and
+        claiming them would turn recorded skips into recorded failures.
+        """
+        (corpus / "mystery2").write_bytes(b"\x89PNG\r\n\x1a\n not a container")
+        assert self._enqueue_and_run(store, mount, derived, corpus, index,
+                                     "mystery2") == "skipped/no_listing_engine"
+
+
 class TestArchiveListing:
     @pytest.mark.parametrize("name", ["bundle.aar", "bundle.war", "bundle.ear",
                                       "bundle.nupkg", "bundle.jmod"])
@@ -320,6 +415,12 @@ class TestArchiveListing:
                         cache_root=derived, tasks=[LIST_ARCHIVE])
         assert run.stats.done == 1, run.stats
         assert store.member_count() == 1
+        # The *extension* list is what this test is about, and content routing would rescue
+        # these files anyway — so the claim is asserted directly as well. A widening that
+        # could be deleted without a test going red is a widening nobody has checked.
+        from rlm_kernel.mine import ZIP_CONTAINER_EXTENSIONS
+
+        assert ("." + name.rsplit(".", 1)[-1]) in ZIP_CONTAINER_EXTENSIONS, name
 
     def test_an_unknown_suffix_is_still_skipped_rather_than_guessed(
         self, store: MineStore, mount: LocalTreeMount, derived: Path, corpus: Path,

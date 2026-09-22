@@ -523,18 +523,37 @@ def task_list_archive(ctx: TaskContext, rel: str, size: int, source_hash: str) -
         return TaskOutcome(DONE, "cache", key, len(members))
 
     lower = rel.lower()
+    # The extension decides when it names a format; when it does not, the bytes do. Both
+    # directions were measured on this corpus: 52 files named `.rar` are zip archives, and
+    # 12 448 containers with no extension at all are gzip or zip. A name is a hint the file
+    # can contradict, and read-only it costs one bounded read to ask.
+    engine = None
+    if lower.endswith(ZIP_CONTAINER_EXTENSIONS):
+        engine = "zip"
+    elif lower.endswith(TAR_CONTAINER_EXTENSIONS):
+        engine = "tar"
+    elif lower.endswith(SINGLE_STREAM_EXTENSIONS):
+        engine = "stream"
+    else:
+        try:
+            with ctx.mount.open_readonly(rel, max_bytes=CONTAINER_SNIFF_BYTES) as probe:
+                by_content = _container_by_content(probe)
+        except (OSError, ReadOnlyViolation) as e:
+            return TaskOutcome(FAILED, type(e).__name__)
+        if by_content is None:
+            return TaskOutcome(SKIPPED, "no_listing_engine")
+        engine = {"zip": "zip", "tar": "tar"}.get(by_content, "stream")
+
     try:
-        if lower.endswith(ZIP_CONTAINER_EXTENSIONS):
+        if engine == "zip":
             with ctx.mount.open_readonly(rel) as handle:
                 members = _zip_members(handle)
-        elif lower.endswith(TAR_CONTAINER_EXTENSIONS):
+        elif engine == "tar":
             with ctx.mount.open_readonly(rel) as handle:
                 members = _tar_members(handle)
-        elif lower.endswith(SINGLE_STREAM_EXTENSIONS):
+        else:
             with ctx.mount.open_readonly(rel, max_bytes=1) as handle:
                 members = _gzip_single_member(handle, rel)
-        else:
-            return TaskOutcome(SKIPPED, "no_listing_engine")
     except (zipfile.BadZipFile, tarfile.TarError, EOFError, OSError,
             ReadOnlyViolation, ValueError) as e:
         return TaskOutcome(FAILED, type(e).__name__)
@@ -726,6 +745,75 @@ ZIP_CONTAINER_EXTENSIONS = (
 TAR_CONTAINER_EXTENSIONS = (".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz",
                             ".txz", ".tar.zst")
 SINGLE_STREAM_EXTENSIONS = (".gz", ".bz2", ".xz", ".zst")
+
+#: How much of a container to read to decide what it is. Enough for a tar's `ustar` marker
+#: at byte 257 and a zip's first local header; small enough that probing costs a read no
+#: larger than a chunk.
+CONTAINER_SNIFF_BYTES = 600
+
+#: How far into a compressed stream to look for a tar header, once the outer codec is known.
+#: A tar's `ustar` sits at decompressed offset 257, so this only has to clear that.
+WRAPPED_TAR_PROBE_BYTES = 1_024
+
+#: Magic numbers that name a container format, checked in order. A *claim* about a format,
+#: not a heuristic: a byte pattern that is not here stays `no_listing_engine` rather than
+#: being tried against every parser, which would turn 19 446 recorded skips into recorded
+#: failures and tell a reader less.
+CONTAINER_MAGIC: tuple[tuple[str, tuple[bytes, ...]], ...] = (
+    ("zip", (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")),
+    ("gzip", (b"\x1f\x8b",)),
+    ("bzip2", (b"BZh",)),
+    ("xz", (b"\xfd7zXZ\x00",)),
+    ("zstd", (b"\x28\xb5\x2f\xfd",)),
+)
+
+
+def _wrapped_tar(handle: io.BufferedReader, head: bytes) -> bool:
+    """Whether a compressed stream's payload is a tar, not just a single stream.
+
+    A `.tgz`'s gzip wraps a tar, so its members are the tar's rather than one opaque blob.
+    The marker cannot be seen in the compressed head — `ustar` lives at offset 257 of the
+    **decompressed** bytes — so a bounded prefix is decompressed, and only the codecs the
+    outer head implies are tried. Every failure to decompress answers `False`: a stream that
+    cannot be read this far is reported as the stream it is, which is the honest shallow
+    description rather than a guess about what it holds.
+    """
+    import bz2
+    import lzma
+    import zlib
+
+    payload: bytes | None = None
+    try:
+        if head.startswith(b"\x1f\x8b"):
+            payload = zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(
+                head, WRAPPED_TAR_PROBE_BYTES)
+        elif head.startswith(b"BZh"):
+            payload = bz2.BZ2Decompressor().decompress(head, WRAPPED_TAR_PROBE_BYTES)
+        elif head.startswith(b"\xfd7zXZ\x00"):
+            payload = lzma.LZMADecompressor().decompress(head, WRAPPED_TAR_PROBE_BYTES)
+    except Exception:  # noqa: BLE001 - an unreadable wrapper is not a tar
+        return False
+    return bool(payload) and len(payload) > 262 and payload[257:262] == b"ustar"
+
+
+def _container_by_content(handle: io.BufferedReader) -> str | None:
+    """Which engine a container's own bytes claim, or None.
+
+    `zip`/`gzip`/`bzip2`/`xz`/`zstd` are *stream* formats — one member, or a directory for
+    zip — while `tar` is the shape that commonly appears **inside** one of them: a `.tgz`'s
+    gzip wraps a tar, and its members are the tar's, not one opaque blob. So a compressed
+    stream whose decompressed head carries tar's `ustar` marker is a tar container, and the
+    marker is there precisely because the tar reader wrote it.
+    """
+    head = handle.read(CONTAINER_SNIFF_BYTES)
+    for name, magics in CONTAINER_MAGIC:
+        if any(head.startswith(magic) for magic in magics):
+            if name in ("gzip", "bzip2", "xz") and _wrapped_tar(handle, head):
+                return "tar"
+            return name
+    if len(head) > 262 and head[257:262] == b"ustar":
+        return "tar"
+    return None
 
 
 def _kind_counts(members: Iterable[tuple[str, int, str]]) -> dict[str, int]:

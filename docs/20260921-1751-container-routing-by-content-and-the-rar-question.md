@@ -148,3 +148,41 @@ for the former, and the owner now has the path to look.
 population", which needs no install and no owner call to test — only a decision about whether
 `.rar` belongs in the container policy at all, and where the describer for it lives (RO18).
 
+---
+
+## Addendum: content routing landed, and the live corpus made the defect look small
+
+The magic-number change is in `task_list_archive`: the extension decides when it names a
+format, and when it does not the first bytes do. Verified against the **real** corpus,
+read-only, on samples from each measured population:
+
+| population | sampled | what the bytes say |
+|---|---|---|
+| files named `.rar` | 40 | **14 zip**, 26 no engine (the rar ones) |
+| extensionless containers | 40 | **34 gzip**, **5 zip**, **1 tar** |
+| `.tgz` | 25 | **25 tar** |
+| `.tar.gz` | 20 | **15 tar**, 5 gzip |
+| `.gz` | 20 | **15 tar**, 5 gzip |
+| `.bz2` | 20 | 20 bzip2 |
+| `.xz` | 20 | **16 xz**, 4 tar |
+
+Two things here were not known before this run, and both matter:
+
+**1. The answer to the question the earlier record refused to assume: a `.tgz` is a tar.**
+25 of 25. And more usefully, a compressed stream's `ustar` marker lives at offset 257 of the
+**decompressed** bytes, so detection has to decompress a bounded prefix rather than read the
+compressed head. That is what `_wrapped_tar` does, with the outer codec taken from the
+compressed head first, and any decompression failure answering "the stream it is" rather than
+guessing.
+
+**2. The defect was larger than measured, and the exposure is in the extensions the harness
+already trusted.** Files named `.gz` and `.tar.gz` were described as **one opaque stream**
+when 15 of every 20 are tar containers holding many members. So the bug was never confined to
+the 12 448 extensionless files or the 52 mis-named zips: the *named* populations were being
+under-described too, and content routing corrects them in the same change. That is the
+arguable core of it — a container's own bytes are the only honest source for what it is, and
+reading them costs one bounded read.
+
+What this does not claim: the routing is verified on samples (40/40/25/20), not on all
+19 446 containers; the counts above are what the samples showed, and a full pass is a mining
+window's work rather than a probe's.

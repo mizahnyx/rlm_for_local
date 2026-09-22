@@ -2922,6 +2922,37 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_zip_shaped_archive_under_another_suffix_is_listed",
         ],
     ),
+    (
+        "RO15 content routing is skipped for an unknown extension",
+        "src/rlm_kernel/mine.py",
+        "    else:\n"
+        "        try:\n"
+        "            with ctx.mount.open_readonly(rel, max_bytes=CONTAINER_SNIFF_BYTES) as probe:\n"
+        "                by_content = _container_by_content(probe)\n"
+        "        except (OSError, ReadOnlyViolation) as e:\n"
+        "            return TaskOutcome(FAILED, type(e).__name__)\n"
+        "        if by_content is None:\n"
+        "            return TaskOutcome(SKIPPED, \"no_listing_engine\")\n"
+        "        engine = {\"zip\": \"zip\", \"tar\": \"tar\"}.get(by_content, \"stream\")",
+        "    else:\n"
+        "        return TaskOutcome(SKIPPED, \"no_listing_engine\")",
+        [
+            "tests/rlm_kernel/test_mine.py::TestContentRoutesContainers"
+            "::test_a_zip_with_no_extension_is_listed",
+        ],
+    ),
+    (
+        "RO15 a gzipped tar goes back to being one opaque stream",
+        "src/rlm_kernel/mine.py",
+        "            if name in (\"gzip\", \"bzip2\", \"xz\") and _wrapped_tar(handle, head):\n"
+        "                return \"tar\"",
+        "            if False:\n"
+        "                return \"tar\"",
+        [
+            "tests/rlm_kernel/test_mine.py::TestContentRoutesContainers"
+            "::test_a_tar_inside_a_gzip_is_a_container_not_a_stream",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
