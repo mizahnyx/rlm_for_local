@@ -112,3 +112,39 @@ The magic numbers are matched on the first 600 bytes; one `rar` and no `7z` is w
 found, and a container whose magic sits later than 600 bytes would be counted `unrecognised`
 — there were none, but the rule is stated rather than implied. Byte totals are the index's
 `size` column, not a read of every file. Counts are one index, one host, read-only.
+
+---
+
+## Addendum: the rar population, and the host can already open it
+
+The owner asked for the full paths of the problem rar files, to judge their contents by
+heuristics and context. They are at **`~/rlm-derived/rar-probe/rar-paths.txt`** (136 lines,
+mode 0600, directory 0700, beside the corpus — not in the repository; `AGENTS.md` §1.9),
+with a machine-readable companion `rar-table.jsonl` carrying size, the tool that listed it
+and a five-member sample per tested file.
+
+**The population is 136 containers, 10 990 158 860 bytes** — the 135 named `.rar` in the
+index, plus **one extensionless container whose magic bytes say `Rar!\x1a\x07`**, which the
+extension-driven routing could never have found. That one is the addendum's own small proof:
+content routing reaches a file that no suffix would.
+
+**And the dependency is not needed.** `bsdtar` (libarchive) is already installed at
+`/usr/bin/bsdtar`, and it listed **23 of the first 25** rar containers without any new
+package. `unrar`, `rar`, `7z` and `rarfile` are all absent; `bsdtar` was there all along.
+The two that failed did not fail as rar — `bsdtar` fell through to its tar reader and said
+`This does not look like a tar archive`, so they are either a rar feature libarchive does not
+implement (RAR5 with certain headers, or an encrypted archive) or a different format whose
+magic happens to start with `Rar!`. **That is the one thing left to check before claiming
+rar support**, and it is checkable on the same 25.
+
+The shape of the largest members, from the table: one container of **7 450 230 637 bytes with
+49 members**, one of 666 955 776, one of 110 160 493. The first is the one that decides the
+owner's describability question — 7.45 GB in 49 members is either a small number of enormous
+files (media, most likely) or a large archive of many documents. The 49-member count argues
+for the former, and the owner now has the path to look.
+
+**So the recommendation from §3 changes in one respect:** the `.rar` question is no longer
+"does the host get a third-party dependency". It is "does libarchive's rar reader cover this
+population", which needs no install and no owner call to test — only a decision about whether
+`.rar` belongs in the container policy at all, and where the describer for it lives (RO18).
+
