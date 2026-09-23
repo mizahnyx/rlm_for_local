@@ -3286,6 +3286,31 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::TestItReadsTheEventsNotTheSummary::test_bands_are_summed_across_searches",
         ],
     ),
+    # ── RO27: the few-shot exemplar must not be a quest (2026-09-22) ──────────
+    (
+        "RO27 the submission exemplar becomes a quest again",
+        "src/rlm_local/prompts.py",
+        "             \"This is an example of the shape of a run, not a task about your "
+        "corpus: \"\n"
+        "             \"what is the sample token?\\n\\n\"",
+        "             \"What is the vault access code?\\n\\n\"",
+        [
+            "tests/test_prompts.py::TestFewShots"
+            "::test_the_submission_example_is_not_a_quest",
+        ],
+    ),
+    (
+        "RO27 the exemplar stops demonstrating scope discipline",
+        "src/rlm_local/prompts.py",
+        "     \"same turn. I will not narrate the answer instead of submitting it, and I "
+        "will not \"\n"
+        "     \"go looking for anything the question did not ask for.\\n\\n\"",
+        "     \"same turn. I will not narrate the answer instead of submitting it.\\n\\n\"",
+        [
+            "tests/test_prompts.py::TestFewShots"
+            "::test_the_submission_example_keeps_the_lesson",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

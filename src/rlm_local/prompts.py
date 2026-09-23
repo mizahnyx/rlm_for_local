@@ -96,28 +96,40 @@ FEWSHOT_EXAMPLE = [
 
 EXAMPLE_2_HEADER = "Example 2: Submit the moment the evidence is verified."
 
+# The exemplar's *content* is a labelled sample, not a quest, and that is a measured
+# correction (2026-09-22). The previous wording — "What is the vault access code?", answered
+# `KX-2210` — was imitated rather than used as a pattern: two of six prose-derived questions
+# stopped answering the question and searched the corpus for a "vault access code" instead,
+# because a broad question gives a 4B model nothing concrete to hold and the example handed
+# it something concrete. The lesson this exemplar exists to teach is the *shape* — grep,
+# verify, submit in the same turn — so its content is now explicitly an example, its token
+# (`EXAMPLE-0000`) matches nothing if a model does imitate it, and the assistant states the
+# scope discipline the failure lacked.
 FEWSHOT_SUBMISSION_EXAMPLE = [
-    ("user", "Answer the following: What is the vault access code?\n\n"
+    ("user", "Answer the following question.\n\n"
+             "This is an example of the shape of a run, not a task about your corpus: "
+             "what is the sample token?\n\n"
              "Your context is a str of 120000 total characters. A sub-LLM call "
              "handles roughly 8000 characters well. You have 8 turns."),
     ("assistant",
-     "One step is enough: grep the context for the code, then submit it in the "
-     "same turn. I will not narrate the answer instead of submitting it.\n\n"
+     "One step is enough: search the context for the answer, then submit it in the "
+     "same turn. I will not narrate the answer instead of submitting it, and I will not "
+     "go looking for anything the question did not ask for.\n\n"
      "```repl\n"
-     "hits = grep('access code')\n"
+     "hits = grep('sample token')\n"
      "print(f'Found {len(hits)} matches')\n"
      "print(hits[0] if hits else 'none')\n"
      "```"),
     ("user", "REPL output:\n"
              "Found 1 matches\n"
-             "The vault access code is KX-2210 and it rotates every quarter."),
+             "The sample token is EXAMPLE-0000."),
     ("assistant",
      "The evidence is verified, so I submit now — this is the step that ends the "
      "task. Note that submitting means executing code that sets `answer`; writing "
      "the answer as prose leaves the task unfinished and the harness has to force "
      "a finalization.\n\n"
      "```repl\n"
-     "answer['content'] = 'The vault access code is KX-2210.'\n"
+     "answer['content'] = 'The sample token is EXAMPLE-0000.'\n"
      "answer['ready'] = True\n"
      "```"),
 ]

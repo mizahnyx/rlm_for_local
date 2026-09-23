@@ -265,17 +265,26 @@ tags: [fewshot]
 # Submit as soon as the evidence is verified
 
 ## Query
-What is the vault access code?
+What is the sample token?
 
 ## Answer
-One step is enough: grep for the code, then submit in the same turn.
+One step is enough: grep for the answer, then submit in the same turn — and do not go
+looking for anything the question did not ask for.
 
 ```repl
-hits = grep('access code')
+hits = grep('sample token')
 answer['content'] = hits[0] if hits else 'not found'
 answer['ready'] = True
 ```
 ```
+
+The content of that bundled example is deliberately a **labelled sample** rather than a
+concrete quest. Measured 2026-09-22: when it asked "what is the vault access code?" and
+answered `KX-2210`, two of six prose-derived questions stopped answering and searched the
+corpus for a vault access code instead — a 4B model given a broad question imitates the one
+concrete goal in its prompt. The lesson the example exists to teach is the shape (search,
+verify, submit in the same turn), which is why it now says so in the harness's own voice and
+its token matches nothing.
 
 What the harness does with it — `load_fewshots_from_vault()`, called once per run
 from `RootLoop.run()` when a kernel bridge is present:

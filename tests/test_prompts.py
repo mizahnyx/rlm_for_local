@@ -108,6 +108,34 @@ class TestFewShots:
         all_text = " ".join(c for _, c in FEWSHOT_EXAMPLE)
         assert "grep" in all_text
 
+    def test_the_submission_example_is_not_a_quest(self):
+        """The exemplar's content must not be imitable as a task (measured 2026-09-22).
+
+        With the previous wording — "What is the vault access code?", answered `KX-2210` —
+        two of six prose-derived questions stopped answering and searched the corpus for a
+        vault access code instead. A 4B model given a broad question imitated the example's
+        *content* because the example was the only concrete goal in the prompt. So the
+        block now carries no memorisable quest, and says so in the harness's own voice.
+        """
+        all_text = " ".join(c for _, c in FEWSHOT_EXAMPLE).lower()
+        for quest in ("vault", "access code", "secret", "kx-", "password", "server room"):
+            assert quest not in all_text, (
+                f"{quest!r} is in the few-shot block: a concrete quest in the example is "
+                "what the model imitates instead of the question it was asked"
+            )
+        assert "example of the shape of a run, not a task" in all_text, (
+            "the exemplar must say what it is, or a model can read it as the task"
+        )
+
+    def test_the_submission_example_keeps_the_lesson(self):
+        """The structure it exists for survives the content change."""
+        all_text = " ".join(c for _, c in FEWSHOT_EXAMPLE)
+        assert "same turn" in all_text
+        assert "did not ask for" in all_text, (
+            "the scope discipline the vault failure lacked must be demonstrated, not just "
+            "described in a comment"
+        )
+
 
 class TestBuildMessages:
     def test_builds_correct_structure(self):
