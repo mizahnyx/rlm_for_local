@@ -542,9 +542,16 @@ class TestCorpusSampleCommand:
     def test_the_same_seed_hands_back_the_same_passages(
         self, corpus: Path, sampled: Path, capsys: pytest.CaptureFixture,
     ) -> None:
-        """A question set must be re-runnable, which needs a reproducible draw."""
+        """A question set must be re-runnable, which needs a reproducible draw.
+
+        Drawn with `--any`, the uniform draw: the prose-preferred **default** legitimately
+        returns fewer passages when a small corpus holds little that reads as prose (measured
+        here: one of three), so asserting three from the default was asserting the old
+        behaviour rather than the guarantee. The default's own reproducibility, and the note
+        it must print when it comes up short, have their own test below.
+        """
         def draw(seed: str) -> tuple[str, list[str]]:
-            cli_main(["corpus", "sample", "--n", "3", "--seed", seed,
+            cli_main(["corpus", "sample", "--n", "3", "--seed", seed, "--any",
                       "--corpus-root", str(corpus), "--corpus-index", str(sampled)])
             out = capsys.readouterr().out
             return out, self._addresses(out)
@@ -554,6 +561,29 @@ class TestCorpusSampleCommand:
         assert first == again, "the same seed must hand back the same passages"
         assert "seed=1234" in header, header
         assert len(first) == 3
+
+    def test_the_prose_draw_repeats_and_says_when_it_comes_up_short(
+        self, corpus: Path, sampled: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        """The default is prose, and a short draw must be *stated*, never silent.
+
+        A sampler that quietly hands back one passage when asked for three is how a question
+        set comes to describe something other than the corpus.
+        """
+        def draw() -> tuple[str, list[str]]:
+            cli_main(["corpus", "sample", "--n", "3", "--seed", "99",
+                      "--corpus-root", str(corpus), "--corpus-index", str(sampled)])
+            out = capsys.readouterr().out
+            return out, self._addresses(out)
+
+        header, first = draw()
+        _, again = draw()
+        assert first == again, "the prose-preferred draw must be reproducible too"
+        assert "prose-preferred" in header, header
+        if len(first) < 3:
+            assert "only" in header and "--floor" in header, (
+                "a short draw must say how many it drew and what to change: " + header
+            )
 
     def test_the_header_says_the_output_is_corpus_text(
         self, corpus: Path, sampled: Path, capsys: pytest.CaptureFixture,
