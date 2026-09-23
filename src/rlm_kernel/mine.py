@@ -800,6 +800,95 @@ def _index_display(rel: str) -> str:
     return path_text(rel)
 
 
+#: A summary is a *description* of a document, not a copy of it, so its input is capped far
+#: below an index pass: past roughly 32 KiB another kilobyte of the document stops changing
+#: the description, and on this host every kilobyte is paid for at ~6.6 tok/s of prompt. The
+#: output bound is the same shape of decision one level down — `MAX_CONTAINER_TEXT_BYTES` is
+#: what a reader may see, this is what a description may say (RO6: "a vendored `.jar` should
+#: probably only be described by a single line"), and 400 tokens is already generous for a
+#: line. The value is part of the cache key, so raising it re-describes rather than reuses.
+MAX_SUMMARY_INPUT_BYTES = 32 * 1024
+SUMMARY_MAX_TOKENS = 400
+
+#: Below this a document *is* its own description: paying ten minutes of a 4B model on this
+#: machine to re-state five hundred bytes is the absurdity this floor exists to prevent. The
+#: floor is deliberately well under the cap (guarded by `TestTheBoundsAreThePoint`), because
+#: the two bounds answer different questions — one is cost, the other is value.
+MIN_SUMMARY_INPUT_BYTES = 512
+
+
+def task_summarise(ctx: TaskContext, rel: str, size: int, source_hash: str) -> TaskOutcome:
+    """Describe one document, so the corpus can be *navigated* rather than read (RO6).
+
+    The model is **injected**, never imported: the engine is `ctx.engines["summarise"]`, a
+    callable `(text, max_tokens) -> (summary, meta)`, because the kernel has no model by
+    construction and a kernel that reached for one could not be tested without it. No engine
+    means a skip *with a reason*, which is the honest answer — never a fabricated
+    description, and never a silent zero.
+
+    A summary already paid for is a cache hit and costs no model call; the reply is indexed
+    as **derived** text under the document's own display, so `corpus_search` can find the
+    description and the address it is filed under still resolves to the document. Indexing is
+    skipped when there is no text index, but *the summary is still made and cached* — the
+    description is the deliverable, the index is how it becomes reachable.
+    """
+    engine = ctx.engines.get("summarise")
+    if engine is None:
+        return TaskOutcome(SKIPPED, "no_summarise_engine")
+    cache = DerivationCache(ctx.cache_root, SUMMARISE)
+    key = cache.key(source_hash, params="summary<=v1,400tok")
+    if cache.has(key):
+        return TaskOutcome(DONE, "cache")
+    if size < MIN_SUMMARY_INPUT_BYTES:
+        return TaskOutcome(SKIPPED, "too_short_to_summarise")
+    try:
+        with ctx.mount.open_readonly(rel, max_bytes=MAX_SUMMARY_INPUT_BYTES) as handle:
+            data = handle.read()
+    except (OSError, ReadOnlyViolation) as e:
+        return TaskOutcome(FAILED, type(e).__name__)
+    # A description tolerates a decoding loss; an *address* does not, which is why this is
+    # the one place bytes become text without the index's own decoder. Mislabelled bytes
+    # cost a slightly worse sentence here, and nothing at all downstream.
+    text = data.decode("utf-8", "replace")
+    try:
+        summary, meta = engine(text, SUMMARY_MAX_TOKENS)
+    except Exception as e:  # noqa: BLE001 — one document must never end a pass (RO19/RO20)
+        return TaskOutcome(FAILED, type(e).__name__)
+    summary = (summary or "").strip()
+    if not summary:
+        # An empty reply is a model failure, not a description: caching it would turn one
+        # bad minute into a permanent claim that the document says nothing.
+        return TaskOutcome(SKIPPED, "empty_summary")
+    cache.put(
+        key,
+        summary,
+        {
+            "source": source_hash,
+            "engine": str((meta or {}).get("engine", "summarise")),
+            "input_bytes": len(data),
+            "max_tokens": SUMMARY_MAX_TOKENS,
+        },
+    )
+    if ctx.text_index is None:
+        return TaskOutcome(DONE, "not_indexed")
+    try:
+        chunks = ctx.text_index.add_text(
+            raw=_bytes_of(rel),
+            display=_index_display(rel),
+            source_hash=source_hash,
+            text=summary.encode("utf-8"),
+            cache_task=SUMMARISE,
+            cache_key=key,
+            derived=True,
+            engine=str((meta or {}).get("engine", "summarise")),
+        )
+    except (UnicodeEncodeError, sqlite3.Error) as e:
+        return TaskOutcome(FAILED, type(e).__name__)
+    if not chunks:
+        return TaskOutcome(SKIPPED, "empty_summary")
+    return TaskOutcome(DONE, None, None, chunks)
+
+
 def task_index_text(ctx: TaskContext, rel: str, size: int, source_hash: str) -> TaskOutcome:
     """Index a plain text file's own bytes.
 
@@ -837,6 +926,11 @@ TASK_HANDLERS: dict[str, Callable[[TaskContext, str, int, str], TaskOutcome]] = 
     LIST_ARCHIVE: task_list_archive,
     EXTRACT_TEXT: task_extract_text,
     INDEX_TEXT: task_index_text,
+    # Deliberately in the table but **not** in `IMPLEMENTED_TASKS`: a handler exists, but a
+    # default mining window must not pick summarisation up until an engine is wired and its
+    # cost measured — `mine plan` still counts it as unimplemented, which is the truthful
+    # description of a task no window can yet be asked to run.
+    SUMMARISE: task_summarise,
 }
 
 

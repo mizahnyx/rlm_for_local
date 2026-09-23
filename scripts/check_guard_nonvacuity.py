@@ -3412,6 +3412,31 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_prose_before_a_cited_address_is_not_part_of_the_path",
         ],
     ),
+    # ── RO6: a document is described by an engine the kernel is *handed* (2026-09-23) ──
+    (
+        "RO6 the summariser runs even with no engine to run",
+        "src/rlm_kernel/mine.py",
+        '    engine = ctx.engines.get("summarise")\n'
+        '    if engine is None:\n'
+        '        return TaskOutcome(SKIPPED, "no_summarise_engine")',
+        '    engine = ctx.engines.get("summarise")\n'
+        "    if False:\n"
+        '        return TaskOutcome(SKIPPED, "no_summarise_engine")',
+        [
+            "tests/rlm_kernel/test_summarise.py::TestItSummarisesByValue"
+            "::test_without_an_engine_it_is_a_skip_with_a_reason",
+        ],
+    ),
+    (
+        "RO6 a summary already paid for is paid for again",
+        "src/rlm_kernel/mine.py",
+        '    if cache.has(key):\n        return TaskOutcome(DONE, "cache")',
+        '    if False:\n        return TaskOutcome(DONE, "cache")',
+        [
+            "tests/rlm_kernel/test_summarise.py::TestItSummarisesByValue"
+            "::test_a_cache_hit_costs_no_model_call",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
