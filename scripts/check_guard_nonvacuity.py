@@ -3259,6 +3259,20 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_sources_are_written_with_the_usable_flag",
         ],
     ),
+    (
+        "RO25 drafting with a second model stops being refused",
+        "src/rlm_local/question_draft.py",
+        "    others = sorted({name for name in loaded if name and name != wanted})\n"
+        "    if not others:\n"
+        "        return None",
+        "    others = sorted({name for name in loaded if name and name != wanted})\n"
+        "    if True:\n"
+        "        return None",
+        [
+            "tests/test_question_draft.py::TestTheOneModelRule"
+            "::test_a_second_model_is_refused_with_the_reason",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

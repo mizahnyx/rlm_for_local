@@ -99,6 +99,64 @@ def clean_question(reply: str) -> str:
     return ""
 
 
+def loaded_from_payload(data: object) -> list[str]:
+    """The model ids an OpenAI-style `/v1/models` payload reports as loaded.
+
+    Pure, so the parsing has a test that needs no router. `status.value` is the llama.cpp
+    router's own field; a payload without it reads as "nothing loaded", and a caller that
+    cannot tell must treat an empty answer as *unknown* rather than as permission.
+    """
+    if not isinstance(data, dict):
+        return []
+    loaded: list[str] = []
+    for entry in data.get("data") or []:
+        if not isinstance(entry, dict):
+            continue
+        status = entry.get("status")
+        value = status.get("value") if isinstance(status, dict) else status
+        if str(value or "").lower() in ("loaded", "loading"):
+            loaded.append(str(entry.get("id", "")))
+    return [name for name in loaded if name]
+
+
+def loaded_models(endpoint: str, *, timeout: float = 15.0) -> list[str]:
+    """Ask the local router what it has resident. Empty when it cannot be asked."""
+    import json
+    import ssl
+    import urllib.request
+
+    url = endpoint.rstrip("/") + "/models"
+    context = ssl._create_unverified_context()  # local self-signed, as everywhere here
+    try:
+        with urllib.request.urlopen(url, timeout=timeout, context=context) as response:
+            payload = json.load(response)
+    except Exception:  # noqa: BLE001 - any failure means "cannot tell"
+        return []
+    return loaded_from_payload(payload)
+
+
+def resident_conflict(loaded: Iterable[str], wanted: str) -> str | None:
+    """Why loading `wanted` would swap this box, or None when it is safe.
+
+    `AGENTS.md` §4: one model instance at a time in practice, and the router keeps *every*
+    model it has served resident — so naming a second one is how the machine starts
+    swapping. Measured 2026-09-22, the hard way: the drafting tool was pointed at a second
+    model while the answering model was still loaded, and `lunacode` went unresponsive for
+    over half an hour (SSH stalled at the banner exchange, three separate attempts). This
+    asks *before* the run and refuses with the reason, which is the whole of the fix.
+    """
+    others = sorted({name for name in loaded if name and name != wanted})
+    if not others:
+        return None
+    shown = ", ".join(others[:4])
+    more = "" if len(others) <= 4 else f" and {len(others) - 4} more"
+    return (
+        f"{len(others)} other model(s) are resident ({shown}{more}); loading {wanted!r} as "
+        "well is how this box starts swapping (AGENTS.md §4). Restart the router first, or "
+        "draft with a resident model, or pass --allow-second-model if you mean it."
+    )
+
+
 def draft_question(backend: object, passage: str, *, draft_model: str = "",
                    identifier: str = "", address: str = "", max_tokens: int = 160,
                    passage_chars: int = 3_000) -> Draft:

@@ -33,7 +33,7 @@ from rlm_kernel.mounts import LocalTreeMount, ReadOnlyViolation  # noqa: E402
 from rlm_local.config import load_config  # noqa: E402
 from rlm_local.model_backend import HTTPModelBackend  # noqa: E402
 from rlm_local.question_draft import (  # noqa: E402
-    Draft, as_questions, draft_question, write_sources,
+    Draft, as_questions, draft_question, loaded_models, resident_conflict, write_sources,
 )
 from rlm_local.question_probe import write_question_set  # noqa: E402
 
@@ -57,6 +57,12 @@ def main() -> int:
                     help="The model that drafts. Use a different one from the model that "
                          "will answer, or say why not.")
     ap.add_argument("--endpoint", default=None)
+    ap.add_argument("--allow-second-model", action="store_true",
+                    help="Draft with a model that is NOT the one already resident. The "
+                         "router keeps every model it has served, so this is how the box "
+                         "starts swapping (AGENTS.md §4): measured 2026-09-22, it made "
+                         "lunacode unresponsive for half an hour. Restart the router first "
+                         "if you want a different drafting model.")
     args = ap.parse_args()
 
     seed = args.seed if args.seed is not None else random.randrange(2 ** 31)
@@ -78,9 +84,22 @@ def main() -> int:
 
         cfg = load_config(args.profile)
         model = args.draft_model or cfg.root_model
+        endpoint = args.endpoint or cfg.root_endpoint
+        # Ask the router what is resident *before* naming a model at it. This is the guard
+        # for the incident that took this box down: one model at a time is not tidiness, it
+        # is the difference between a run and a machine that has to be waited out.
+        resident = loaded_models(endpoint)
+        conflict = resident_conflict(resident, model)
+        if conflict:
+            if not args.allow_second_model:
+                print(f"Error: {conflict}", file=sys.stderr)
+                return 2
+            print(f"# WARNING: --allow-second-model was passed. {conflict}", flush=True)
+        print(f"# router resident: {', '.join(resident) if resident else 'none reported'}; "
+              f"drafting with {model}", flush=True)
         backend = HTTPModelBackend(
-            root_endpoint=args.endpoint or cfg.root_endpoint,
-            sub_endpoint=args.endpoint or cfg.sub_endpoint,
+            root_endpoint=endpoint,
+            sub_endpoint=endpoint,
             root_model=model, sub_model=model, verify=False, timeout=600.0,
         )
         drafts: list[Draft] = []

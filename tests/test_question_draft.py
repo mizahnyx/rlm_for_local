@@ -13,7 +13,8 @@ from pathlib import Path
 import pytest
 
 from rlm_local.question_draft import (
-    Draft, as_questions, clean_question, draft_question, write_sources,
+    Draft, as_questions, clean_question, draft_question, loaded_from_payload,
+    loaded_models, resident_conflict, write_sources,
 )
 from rlm_local.templates import DRAFT_QUESTION_PROMPT, DRAFT_QUESTION_UNUSABLE
 
@@ -100,6 +101,61 @@ class TestDrafting:
         questions = as_questions(drafts)
         assert [q.id for q in questions] == ["prose-001"]
         assert questions[0].question == "What happened?"
+
+
+class TestTheOneModelRule:
+    """The guard that came out of taking the box down (2026-09-22).
+
+    The drafting tool was pointed at a second model while the answering model was still
+    resident; the router keeps every model it has served, and `lunacode` went unresponsive
+    for over half an hour. `AGENTS.md` §4 says one instance at a time; this is that rule as
+    a refusal with a reason, asked before the run rather than discovered during it.
+    """
+
+    def test_drafting_with_the_resident_model_is_allowed(self) -> None:
+        assert resident_conflict(["Qwen3.5-4B-Abliterated"], "Qwen3.5-4B-Abliterated") is None
+        assert resident_conflict([], "anything") is None
+
+    def test_a_second_model_is_refused_with_the_reason(self) -> None:
+        reason = resident_conflict(["Qwen3.5-4B-Abliterated"], "Qwen3-4B-2507")
+        assert reason is not None
+        assert "Qwen3.5-4B-Abliterated" in reason, "the resident model must be named"
+        assert "AGENTS.md" in reason, "the refusal must name the rule it is enforcing"
+        assert "--allow-second-model" in reason, "and the way to mean it anyway"
+
+    def test_many_resident_models_are_summarised_not_listed_forever(self) -> None:
+        reason = resident_conflict([f"m{i}" for i in range(9)], "wanted")
+        assert reason is not None and "and 5 more" in reason
+
+    def test_the_payload_parse_reads_the_router_status_field(self) -> None:
+        payload = {"data": [
+            {"id": "Loaded-One", "status": {"value": "loaded"}},
+            {"id": "Loading-Two", "status": {"value": "loading"}},
+            {"id": "Idle-Three", "status": {"value": "unloaded"}},
+            {"id": "No-Status"},
+        ]}
+        assert loaded_from_payload(payload) == ["Loaded-One", "Loading-Two"]
+        assert loaded_from_payload({}) == []
+        assert loaded_from_payload("not a payload") == []
+
+    def test_an_unaskable_router_says_nothing_loaded_rather_than_guessing(self) -> None:
+        """Empty means *unknown*, and the caller must not read it as permission to swap.
+
+        That is why the refusal is the conservative branch: `loaded_models` returning `[]`
+        because the router is unreachable is indistinguishable from one that is genuinely
+        idle, so the tool refuses on the *other* branch and this one stays quiet.
+        """
+        import urllib.request
+
+        def boom(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+            raise OSError("router unreachable")
+
+        original = urllib.request.urlopen
+        urllib.request.urlopen = boom  # type: ignore[assignment]
+        try:
+            assert loaded_models("https://127.0.0.1:9010/v1") == []
+        finally:
+            urllib.request.urlopen = original  # type: ignore[assignment]
 
 
 class TestTheAddressesStayBesideTheCorpus:
