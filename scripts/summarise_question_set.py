@@ -45,7 +45,7 @@ def summarise(rows: list[dict]) -> dict:
     bands: collections.Counter[str] = collections.Counter()
     budget: list[dict] = []
     citations: list[dict] = []
-    last_turn_no_submission = False
+    last_turn_warning = False
     for name, row in events:
         if name == "corpus_served":
             helpers[str(row.get("verb") or row.get("helper") or "?")] += 1
@@ -64,7 +64,11 @@ def summarise(rows: list[dict]) -> dict:
             elif kind in ("corpus_citation", "corpus_uncited", "corpus_weak_citation"):
                 citations.append({"kind": kind, "detail": detail})
             elif kind == "corpus_last_turn":
-                last_turn_no_submission = True
+                # A warning, not a verdict: it fires when the loop reaches its last turn
+                # with no submission *at that moment*, and the model may still submit within
+                # that turn. Measured 2026-09-22 (prose-004): this fired while the run's own
+                # `end` event says `forced=False`, so naming it "no submission" is wrong.
+                last_turn_warning = True
     answered = bool(citations)
     with_address = any("answers_with_address=True" in c["detail"] for c in citations)
     served = sum(bands.values())
@@ -83,7 +87,7 @@ def summarise(rows: list[dict]) -> dict:
         "cell_timeouts": timeouts,
         "cell_extended": extended,
         "budget_events": budget,
-        "last_turn_no_submission": last_turn_no_submission,
+        "last_turn_warning": last_turn_warning,
         "citation_events": citations,
     }
 
@@ -97,7 +101,7 @@ def render(summary: dict, *, label: str = "") -> str:
         f"served={summary['served']} ({bands}) citable={summary['citable_served']} "
         f"answered={summary['answers']} with_address={summary['answers_with_address']} "
         f"hard_timeouts={summary['cell_timeouts']} extended={summary['cell_extended']} "
-        f"no_submission={summary['last_turn_no_submission']}"
+        f"last_turn_warning={summary['last_turn_warning']}"
     )
 
 

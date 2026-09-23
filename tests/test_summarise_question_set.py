@@ -51,8 +51,24 @@ class TestItReadsTheEventsNotTheSummary:
         assert got["helper_calls"] == 3
         assert got["cell_timeouts"] == 1 and got["cell_extended"] == 1
         assert got["answers"] == 1 and got["answers_with_address"] is False
-        assert got["last_turn_no_submission"] is True
+        assert got["last_turn_warning"] is True
         assert "limit=hard" in got["budget_events"][1]["detail"]
+
+    def test_a_last_turn_warning_is_not_a_verdict_on_submission(self) -> None:
+        """Measured on the live set: the warning fired on a run whose `end` says forced=False.
+
+        The model reached its last turn with nothing submitted and then submitted inside it,
+        so the flag means "the last turn was reached empty-handed", not "the answer was not
+        submitted". Reading it as a verdict would have produced exactly the kind of wrong
+        published claim this whole tool exists to prevent.
+        """
+        got = module.summarise([
+            _guardrail("corpus_last_turn", "last turn reached with 4 corpus helper call(s)"),
+            {"event": "end", "forced": False},
+            _guardrail("corpus_citation", "answers_with_address=False chars=207"),
+        ])
+        assert got["last_turn_warning"] is True
+        assert got["answers"] == 1
 
     def test_an_answer_with_an_address_is_reported_as_such(self) -> None:
         got = module.summarise([
@@ -81,5 +97,5 @@ class TestItReadsTheEventsNotTheSummary:
             _guardrail("corpus_citation", "answers_with_address=False chars=9"),
         ]), label="q")
         assert line.startswith("q: turns=1")
-        for fragment in ("hard_timeouts=1", "with_address=False", "no_submission=False"):
+        for fragment in ("hard_timeouts=1", "with_address=False", "last_turn_warning=False"):
             assert fragment in line, line
