@@ -3391,6 +3391,27 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_derived_root_inside_the_corpus_is_refused",
         ],
     ),
+    # ── RO33: the enrichment selection reads usage, and only usage (2026-09-23) ──
+    (
+        "RO33 the cited address swallows the prose before it",
+        "src/rlm_kernel/enrich.py",
+        "_ANY_ADDRESS = re.compile(r\"[^\\s\\\"'\\[\\],()]+#L\\d+-\\d+\")",
+        "_ANY_ADDRESS = re.compile(r\"[\\w./@+~()\\[\\] ]+#L\\d+-\\d+\")",
+        [
+            "tests/rlm_kernel/test_enrich.py::TestItCountsDocumentsNotAddresses"
+            "::test_prose_before_a_cited_address_is_not_part_of_the_path",
+        ],
+    ),
+    (
+        "RO33 a trajectory whose answer cites inline is skipped",
+        "src/rlm_kernel/enrich.py",
+        "        if '\"corpus_served\"' not in text and \"#L\" not in text:",
+        "        if '\"corpus_served\"' not in text and \"Citations:\" not in text:",
+        [
+            "tests/rlm_kernel/test_enrich.py::TestItCountsDocumentsNotAddresses"
+            "::test_prose_before_a_cited_address_is_not_part_of_the_path",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
