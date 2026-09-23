@@ -1397,6 +1397,10 @@ class TestARunRecordsWhatEachHelperServed:
         assert searches[0]["ok"] is True
         assert [a["address"] for a in searches[0]["addresses"]] == ["notes/song.txt#L0-21"]
         assert searches[0]["addresses"][0]["band"] == "strong"
+        assert searches[0]["addresses"][0]["provenance"] is None, (
+            "a plain .txt passage is prose, and prose is deliberately unlabelled — the "
+            "labels exist for documentation, markup and code being served as if prose"
+        )
         assert searches[0]["turn"] >= 1
 
 

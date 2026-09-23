@@ -85,6 +85,21 @@ class TestProvenanceIsVisibleOnTheHitLine:
         assert pc("letter with no extension") == "prose"
         assert pc("archive/thing.stl") == "other"
 
+    def test_an_address_classifies_like_the_path_it_names(self) -> None:
+        """A served hit is named by its address, and the suffix must survive that.
+
+        `Path("notes/a.txt#L0-9").suffix` is `.txt#L0-9`, so the first version called every
+        address `other`. The integration test caught it because it reads a *served* address;
+        these unit tests passed throughout because they only ever passed bare paths.
+        """
+        from rlm_kernel.textindex import provenance_class as pc
+        assert pc("notes/letter.txt#L0-99") == "prose"
+        assert pc("site/index.html#L5-9") == "markup"
+        assert pc("src/engine.py#L120-480") == "code"
+        assert pc("project/docs/manual.htm#L1-2") == "documentation"
+        assert pc("data/config.yaml#L0-4") == "data"
+        assert pc("node_modules/x/index.js#L3-4") == "vendored"
+
     def test_a_vendored_path_outranks_its_suffix(self) -> None:
         """The strongest statement available wins, whatever the file looks like."""
         from rlm_kernel.textindex import provenance_class as pc

@@ -238,13 +238,22 @@ def provenance_class(display_path: str) -> str:
 
     A judgement, and it decides nothing on its own: it appears on the hit line so a reader —
     or the citation audit — can see what was cited instead of inferring it from a path.
+
+    **The byte-range fragment is stripped first**, and that is not tidiness: a served hit is
+    named by its *address* (`path#L120-480`), whose suffix parses as `.txt#L120-480`. The
+    first version did not strip it, so every address classified as `other` — caught by the
+    integration test that asserts a served `.txt` is called prose, and invisible to the unit
+    tests because they only ever passed bare paths. The hit-line labels were unaffected (they
+    pass `hit.source`, a path), which is exactly why the bug could sit in the live path
+    unnoticed: one caller used paths, the other addresses.
     """
-    lowered = "/" + str(display_path or "").lower().lstrip("/")
-    if is_vendored(str(display_path or "")):
+    path = str(display_path or "").split("#L", 1)[0]
+    lowered = "/" + path.lower().lstrip("/")
+    if is_vendored(path):
         return "vendored"
     if any(marker in lowered for marker in DOC_PATH_MARKERS):
         return "documentation"
-    suffix = Path(str(display_path or "")).suffix.lower()
+    suffix = Path(path).suffix.lower()
     if suffix in MARKUP_EXTENSIONS:
         return "markup"
     if suffix in CODE_EXTENSIONS:

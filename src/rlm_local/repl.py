@@ -1568,8 +1568,13 @@ class REPLSandbox:
                 minted = table.alias_for(address)
                 if minted is not None:
                     aliases[address] = minted
+        # Imported here, not at module scope: the kernel layer is imported lazily everywhere
+        # else in this file for the same reason (the two packages must not become a cycle).
+        from rlm_kernel.textindex import provenance_label
+
         payload = [{"address": address, "band": bands.get(address),
-                    "alias": aliases.get(address)}
+                    "alias": aliases.get(address),
+                    "provenance": provenance_label(address)}
                    for address in addresses]
         query = str(msg.get("query") or msg.get("rel") or "")
         try:

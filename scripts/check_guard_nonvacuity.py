@@ -3345,6 +3345,27 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_citation_on_the_answer_dict_reaches_the_text",
         ],
     ),
+    # ── RO30: a served address records what it is (2026-09-22) ───────────────
+    (
+        "RO30 every served address is labelled code",
+        "src/rlm_local/repl.py",
+        "                    \"provenance\": provenance_label(address)}",
+        "                    \"provenance\": \"code\"}",
+        [
+            "tests/test_root_loop_integration.py::TestARunRecordsWhatEachHelperServed"
+            "::test_a_search_records_what_it_served",
+        ],
+    ),
+    (
+        "RO30 the address fragment is read as a file suffix",
+        "src/rlm_kernel/textindex.py",
+        "    path = str(display_path or \"\").split(\"#L\", 1)[0]",
+        "    path = str(display_path or \"\")",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestProvenanceIsVisibleOnTheHitLine"
+            "::test_an_address_classifies_like_the_path_it_names",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
