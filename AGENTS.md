@@ -215,7 +215,13 @@ The same run's answer must cite its evidence — a final `Citations:` line of
 addresses — and an answer that cites nothing and names no coverage is **refused
 once** (`NUDGE_CORPUS_UNCITED`, both submission channels), with the escape hatch
 that makes the refusal safe: "the corpus does not contain this, here is the
-coverage" is accepted. The order was measured first, enforced second: the prompt
+coverage" is accepted. **Since 2026-09-22 the citations may equally arrive on `answer['citations']`**
+(a list, or a `;`/`,`-separated string): the scaffold hands the model a dict, and a citation
+written there was discarded in the worker before the parent ever saw it, so the answer was
+refused for being uncited. The correlation was exact — the three prose questions that used
+that key were refused three times each, the three that did not were refused none —
+`docs/20260922-2345-a-citation-on-the-dict-is-a-citation.md`. The order was measured first,
+enforced second: the prompt
 requirement alone produced 0 cited answers in 3 live runs of the 4B laptop model
 (`docs/20260915-0655-corpus-citation-compliance-measured.md`). Each accepted
 answer writes one `corpus_citation` guardrail event with

@@ -739,6 +739,40 @@ def _restore_scaffold():
     return repaired
 
 
+def _citation_items(value):
+    '''The citations a model put on `answer['citations']`, as a list of strings.'''
+    if isinstance(value, str):
+        parts = value.replace(";", ",").split(",")
+        return [p.strip() for p in parts if p.strip()]
+    if isinstance(value, (list, tuple, set)):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return []
+
+
+def _with_citations(content, answer_obj):
+    '''`content`, plus a `Citations:` line when the model cited on the dict instead.
+
+    Measured 2026-09-22 by the owner reading the trajectories, and then in them: the harness
+    asked for a literal `Citations:` line in the answer *text*, while the scaffold it hands
+    the model is a dict — so a model that set `answer['citations']` had its citation
+    discarded before the parent ever saw it and was refused for being uncited. Of six prose
+    questions, the three that wrote that key were each refused **three times** for having no
+    address, and the three that did not write it were refused zero times: the correlation was
+    exact. The two shapes are accepted interchangeably now, and the text is the one that
+    travels — the audit, the alias mapping and the delivered answer all read the text.
+    '''
+    if not isinstance(content, str) or "citations:" in content.lower():
+        return content
+    for key in ("citations", "citation"):
+        try:
+            items = _citation_items(answer_obj.get(key))
+        except AttributeError:
+            items = []
+        if items:
+            return content.rstrip() + "\n\nCitations: " + "; ".join(items)
+    return content
+
+
 def main():
     global context, answer, _cell_id, _CONTEXT_ORIGINAL
 
@@ -791,6 +825,9 @@ def main():
                 if isinstance(answer, dict) and bool(answer.get("ready")):
                     content = answer.get("content", "")
                     final_answer = content if isinstance(content, str) else str(content)
+                    # A citation the model put on the dict rather than in the text is still a
+                    # citation: reconciled here, once, where the answer leaves the worker.
+                    final_answer = _with_citations(final_answer, answer)
             except Exception:
                 # Model code owns `answer` once a cell has run, and this read is
                 # on the critical path for *sending the result at all*: an

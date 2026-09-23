@@ -3334,6 +3334,17 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_prose_is_not_labelled_and_the_rest_are",
         ],
     ),
+    # ── RO29: a citation on the answer dict is a citation (2026-09-22) ────────
+    (
+        "RO29 a citation on the answer dict is discarded again",
+        "src/rlm_local/repl.py",
+        "                    final_answer = _with_citations(final_answer, answer)",
+        "                    final_answer = final_answer",
+        [
+            "tests/test_repl.py::TestREPLSandbox"
+            "::test_a_citation_on_the_answer_dict_reaches_the_text",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

@@ -62,6 +62,66 @@ class TestREPLSandbox:
         finally:
             repl.shutdown()
 
+    def test_a_citation_on_the_answer_dict_reaches_the_text(self):
+        """The owner's finding, 2026-09-22: the scaffold is a dict and the contract was text.
+
+        The model set `answer['citations']` while the harness looked only for a `Citations:`
+        line in the content, so the citation was discarded in the worker and the answer was
+        refused for being uncited — three refusals each, on exactly the three prose questions
+        that wrote that key, and none on the three that did not.
+        """
+        for written, expected in (
+            ("['KQM7-3', 'PQ2X-7']", "Citations: KQM7-3; PQ2X-7"),
+            ("'KQM7-3; PQ2X-7'", "Citations: KQM7-3; PQ2X-7"),
+            ("'KQM7-3, PQ2X-7'", "Citations: KQM7-3; PQ2X-7"),
+            ("('KQM7-3',)", "Citations: KQM7-3"),
+        ):
+            repl = REPLSandbox(cell_timeout=10.0)
+            repl.start("data", MockSubcallMgr())
+            try:
+                result = repl.execute(
+                    "answer['content'] = 'the answer is in there';\n"
+                    f"answer['citations'] = {written}\n"
+                    "answer['ready'] = True"
+                )
+                assert result.final_answer is not None, written
+                assert result.final_answer.rstrip().endswith(expected), (
+                    f"{written} produced {result.final_answer!r}"
+                )
+                assert result.final_answer.startswith("the answer is in there"), (
+                    "the answer itself must survive: " + repr(result.final_answer)
+                )
+            finally:
+                repl.shutdown()
+
+    def test_a_citation_already_in_the_text_is_not_doubled(self):
+        repl = REPLSandbox(cell_timeout=10.0)
+        repl.start("data", MockSubcallMgr())
+        try:
+            result = repl.execute(
+                "answer['content'] = 'text\\n\\nCitations: KQM7-3';\n"
+                "answer['citations'] = ['PQ2X-7']\n"
+                "answer['ready'] = True"
+            )
+            assert result.final_answer is not None
+            assert result.final_answer.count("Citations:") == 1, result.final_answer
+            assert "PQ2X-7" not in result.final_answer, (
+                "the text's own line is authoritative; a second would be the harness "
+                "arguing with a model that already complied"
+            )
+        finally:
+            repl.shutdown()
+
+    def test_no_citations_key_changes_nothing(self):
+        """The reconciliation must be invisible when the model did not use the key."""
+        repl = REPLSandbox(cell_timeout=10.0)
+        repl.start("data", MockSubcallMgr())
+        try:
+            result = repl.execute("answer['content'] = 'plain'; answer['ready'] = True")
+            assert result.final_answer == "plain"
+        finally:
+            repl.shutdown()
+
     def test_stderr_capture(self):
         repl = REPLSandbox(cell_timeout=10.0)
         mgr = MockSubcallMgr()
