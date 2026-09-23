@@ -3273,6 +3273,19 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_second_model_is_refused_with_the_reason",
         ],
     ),
+    # ── RO26: reading a set's evidence from events, not from a summary line ───
+    (
+        "RO26 the band parser counts every key as a band",
+        "scripts/summarise_question_set.py",
+        "                    if band in BAND_NAMES:\n"
+        "                        bands[band] += int(count)",
+        "                    if True:\n"
+        "                        bands[band] += int(count)",
+        [
+            "tests/test_summarise_question_set.py"
+            "::TestItReadsTheEventsNotTheSummary::test_bands_are_summed_across_searches",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
