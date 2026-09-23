@@ -50,6 +50,7 @@ from rlm_kernel.textindex import (
     coverage_note,
     match_note,
     match_quality,
+    provenance_label,
     term_coverage,
 )
 
@@ -941,6 +942,11 @@ class CorpusBridge:
                 labels.append(f"derived:{hit.engine or 'unknown'}")
             if hit.vendored:
                 labels.append("vendored")
+            # The provenance label (2026-09-22): a prose question answered from in-tree
+            # documentation or markup should say so on the line, not only in a rendered page.
+            provenance = provenance_label(hit.source)
+            if provenance:
+                labels.append(provenance)
             if total:
                 labels.append(f"covers {covered}/{total} of the question's words "
                               f"({match_quality(covered, total)})")

@@ -3311,6 +3311,29 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_the_submission_example_keeps_the_lesson",
         ],
     ),
+    # ── RO28: a hit says what it is (2026-09-22) ─────────────────────────────
+    (
+        "RO28 the provenance label stops reaching the hit line",
+        "src/rlm_kernel/textindex.py",
+        "        provenance = provenance_label(hit.source)\n"
+        "        if provenance:\n"
+        "            labels.append(provenance)",
+        "        provenance = None",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestProvenanceIsVisibleOnTheHitLine"
+            "::test_the_label_reaches_the_formatted_hits",
+        ],
+    ),
+    (
+        "RO28 prose starts being labelled too",
+        "src/rlm_kernel/textindex.py",
+        "    return None if klass == \"prose\" else klass",
+        "    return klass",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestProvenanceIsVisibleOnTheHitLine"
+            "::test_prose_is_not_labelled_and_the_rest_are",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

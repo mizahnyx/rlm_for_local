@@ -194,6 +194,78 @@ def non_prose_extension(display_path: str) -> str | None:
     return None
 
 
+#: What a passage *is*, as opposed to what it reads like. The owner's finding (2026-09-22),
+#: from reading the rendered pages: the prose that answered a prose-derived question was
+#: mostly in-tree documentation and markup rather than free prose, and nothing on the hit
+#: line said so. Measured on that set: of **84 distinct addresses served, 30 were markup**
+#: (`.htm` 12, `.dtd` 7, `.html` 6, `.xml` 5) and only **5 were plain `.txt`** — visible only
+#: by reading 15 rendered pages, which is too late.
+#:
+#: These are *labels*, deliberately not a filter: which passages a search returns is a
+#: ranking decision and the owner's call, whereas naming what came back costs one string
+#: and can be checked by a reader.
+MARKUP_EXTENSIONS = (".htm", ".html", ".xhtml", ".xml", ".xsl", ".xsd", ".dtd", ".css",
+                     ".scss", ".less", ".svg", ".rss", ".atom", ".mht")
+CODE_EXTENSIONS = (".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".py", ".pyi", ".rb", ".pl",
+                   ".pm", ".php", ".java", ".kt", ".scala", ".c", ".h", ".cc", ".cpp",
+                   ".cxx", ".hpp", ".cs", ".go", ".rs", ".swift", ".m", ".mm", ".lua",
+                   ".sh", ".bash", ".zsh", ".fish", ".bat", ".cmd", ".ps1", ".sql", ".r",
+                   ".jl", ".dart", ".ex", ".exs", ".erl", ".clj", ".vb", ".asm", ".f",
+                   ".f90", ".pas", ".groovy", ".gradle", ".cmake", ".mk")
+DATA_EXTENSIONS = (".json", ".jsonl", ".ndjson", ".geojson", ".csv", ".tsv", ".yaml",
+                   ".yml", ".toml", ".ini", ".cfg", ".conf", ".properties", ".lock", ".map",
+                   ".po", ".reg", ".plist", ".resx", ".rc", ".strings")
+PROSE_EXTENSIONS = (".txt", ".text", ".md", ".markdown", ".rst", ".org", ".adoc", ".asc",
+                    ".tex", ".rtf")
+
+#: Prose that ships *with a project* is documentation, not free prose, and the path is what
+#: says so: a README, a changelog, a licence, a manual, a tutorial, an examples directory.
+DOC_PATH_MARKERS = ("/docs/", "/doc/", "/documentation/", "/manual/", "/help/", "/man/",
+                    "/readme", "readme.", "changelog", "changes.", "license", "licence",
+                    "copying", "notice", "authors", "contributing", "install.", "todo.",
+                    "/examples/", "/example/", "/samples/", "/tutorial", "/guide")
+
+
+def provenance_class(display_path: str) -> str:
+    """What a passage is: `vendored`, `documentation`, `markup`, `code`, `data`, `prose`,
+    `other`.
+
+    Precedence is deliberate. `vendored` first, because a path that arrived with something
+    else is the strongest statement available. Then the *path* markers, because a README in a
+    `docs/` tree is documentation whatever its suffix. Then the suffix groups, and only then
+    `prose` — which means an extensionless file with nothing else to say about it is called
+    prose, because that is what the corpus's free prose mostly looks like.
+
+    A judgement, and it decides nothing on its own: it appears on the hit line so a reader —
+    or the citation audit — can see what was cited instead of inferring it from a path.
+    """
+    lowered = "/" + str(display_path or "").lower().lstrip("/")
+    if is_vendored(str(display_path or "")):
+        return "vendored"
+    if any(marker in lowered for marker in DOC_PATH_MARKERS):
+        return "documentation"
+    suffix = Path(str(display_path or "")).suffix.lower()
+    if suffix in MARKUP_EXTENSIONS:
+        return "markup"
+    if suffix in CODE_EXTENSIONS:
+        return "code"
+    if suffix in DATA_EXTENSIONS:
+        return "data"
+    if suffix in PROSE_EXTENSIONS or not suffix:
+        return "prose"
+    return "other"
+
+
+def provenance_label(display_path: str) -> str | None:
+    """The label to show on a hit line, or None for prose.
+
+    Prose is the unremarkable case and stays unlabelled: a label on every line is noise, and
+    the finding this exists for is *documentation and markup being cited as if it were prose*.
+    """
+    klass = provenance_class(display_path)
+    return None if klass == "prose" else klass
+
+
 def chunk_ranges(
     data: bytes,
     *,
@@ -1145,6 +1217,12 @@ def format_hits(result: SearchResult, texts: list[str], *, width: int = 200) -> 
             labels.append(f"derived:{hit.engine or 'unknown'}")
         if hit.vendored:
             labels.append("vendored")
+        # What the passage *is*, when it is not free prose: the owner's finding of
+        # 2026-09-22 was that prose questions were answered from in-tree documentation and
+        # markup, and nothing on the line said so.
+        provenance = provenance_label(hit.source)
+        if provenance:
+            labels.append(provenance)
         covered, total = term_coverage(text, terms)
         best_covered = max(best_covered, covered)
         if total:

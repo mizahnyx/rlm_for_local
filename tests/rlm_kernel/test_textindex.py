@@ -63,7 +63,75 @@ SUBTITLE = (
 )
 
 
-class TestSamplingProse:
+class TestProvenanceIsVisibleOnTheHitLine:
+    """The owner's finding (2026-09-22): prose questions were answered from in-tree
+    documentation and markup, and the hit line said only "vendored" or nothing.
+
+    Measured on that set: 84 distinct addresses served, 30 of them markup, 23 carrying a
+    documentation word in the path, and 5 plain `.txt`. A label is not a filter — which
+    passages a search returns stays the owner's call — but naming what came back is
+    checkable, and it was only visible after reading 15 rendered pages.
+    """
+
+    def test_the_classes_are_named_by_path_and_suffix(self) -> None:
+        from rlm_kernel.textindex import provenance_class as pc
+        assert pc("node_modules/lib/index.js") == "vendored"
+        assert pc("project/docs/manual.htm") == "documentation"
+        assert pc("project/README") == "documentation"
+        assert pc("site/pages/about.html") == "markup"
+        assert pc("src/engine/core.cpp") == "code"
+        assert pc("data/config.yaml") == "data"
+        assert pc("notes/letter.txt") == "prose"
+        assert pc("letter with no extension") == "prose"
+        assert pc("archive/thing.stl") == "other"
+
+    def test_a_vendored_path_outranks_its_suffix(self) -> None:
+        """The strongest statement available wins, whatever the file looks like."""
+        from rlm_kernel.textindex import provenance_class as pc
+        assert pc("vendor/site-packages/pkg/docs/readme.md") == "vendored"
+        assert pc("build/docs/index.html") == "vendored", (
+            "`build` is a vendored marker here, so this is vendored before it is anything "
+            "else — the first version of this test asserted `documentation` and was wrong"
+        )
+        assert pc("project/docs/index.html") == "documentation", (
+            "a documentation path is documentation even when the file is markup"
+        )
+
+    def test_prose_is_not_labelled_and_the_rest_are(self) -> None:
+        from rlm_kernel.textindex import provenance_label
+        assert provenance_label("notes/letter.txt") is None, (
+            "a label on every hit is noise; the unremarkable case stays unlabelled"
+        )
+        assert provenance_label("project/docs/manual.htm") == "documentation"
+        assert provenance_label("site/index.html") == "markup"
+        assert provenance_label("src/a.py") == "code"
+
+    def test_the_label_reaches_the_formatted_hits(self) -> None:
+        from rlm_kernel.textindex import TextIndex  # noqa: F401 - the line under test
+
+        class Row:
+            def __init__(self, source: str) -> None:
+                self.address = f"{source}#L0-9"
+                self.source = source
+                self.origin = "file"
+                self.derived = False
+                self.engine = None
+                self.vendored = False
+                self.covers = None
+                self.band = None
+                self.snippet = "text"
+
+        class Result:
+            query = "what happened"
+            hits = [Row("project/docs/manual.htm")]
+            hidden_vendored = 0
+            coverage_note = None
+
+        line = format_hits(Result(), ["the manual says nothing happened"])
+        assert "documentation" in line, line
+        # The band label is parsed back off this same line by the harness, so a new token
+        # must not disturb it.
+        assert "covers" in line and line.index("documentation") != line.index("covers")
     """Sampling must prioritise prose (owner, 2026-09-22).
 
     The setting: a question devised from minified JavaScript, a JSON dump or a subtitle
@@ -95,6 +163,8 @@ class TestSamplingProse:
         assert non_prose_extension("MEMORY.DMP") is None
         assert ".srt" in NON_PROSE_EXTENSIONS
 
+
+class TestSamplingProse:
     def test_a_name_rejected_candidate_is_never_read(
         self, index: TextIndex, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
