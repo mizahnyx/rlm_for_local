@@ -810,10 +810,13 @@ def _index_display(rel: str) -> str:
 MAX_SUMMARY_INPUT_BYTES = 32 * 1024
 SUMMARY_MAX_TOKENS = 400
 
-#: Below this a document *is* its own description: paying ten minutes of a 4B model on this
-#: machine to re-state five hundred bytes is the absurdity this floor exists to prevent. The
-#: floor is deliberately well under the cap (guarded by `TestTheBoundsAreThePoint`), because
-#: the two bounds answer different questions — one is cost, the other is value.
+#: Below this a document *is* its own description, and the floor is a **value** judgement, not
+#: a cost one. That distinction was measured rather than assumed, and the first version of
+#: this comment got it wrong: at these bounds a small document is not much cheaper than a
+#: large one — a short reply is bounded by decode at ~3.0 tok/s while 512 bytes of prompt
+#: costs ~2 s at ~6.6 tok/s — so a floor defended as a saving would be defended falsely. It
+#: says instead that describing five hundred bytes costs more attention than they are worth
+#: (`docs/20260923-1800-ro6-the-handler-and-the-arithmetic-that-bounds-it.md`).
 MIN_SUMMARY_INPUT_BYTES = 512
 
 
