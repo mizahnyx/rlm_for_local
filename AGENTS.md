@@ -179,6 +179,13 @@ uv run python -m rlm_local.cli mine run --corpus-root /srv/corpus \
                                                     # a window in a chain: skip the
                                                     # ~16 min scan; publish once at the end
 uv run python -m rlm_local.cli mine pause     # stop after the item in flight
+uv run python -m rlm_local.cli summarise --corpus-root /srv/corpus \
+    --corpus-index ~/rlm-derived/corpus.sqlite --limit 3 --cited-only
+                                                    # RO6 by value: describe three cited
+                                                    # documents with the configured model.
+                                                    # Aggregates only (the log quotes nothing);
+                                                    # --dry-run shows the set and its cost
+                                                    # without calling a model
 uv run python -m rlm_local.cli ask "…" --corpus-root /srv/corpus \
     --corpus-index ~/rlm-derived/corpus.sqlite     # corpus_find/read/search/… in a cell
 

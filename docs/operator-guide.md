@@ -500,15 +500,71 @@ capped at 20,000 members, members recorded for search), **`extract_text`**
 (pdftotext, or zip+XML for OOXML/ODF/EPUB; an empty text layer is recorded as
 `needs_ocr`, never as a failure), and **`index_text`** (a plain text file's own
 bytes go into the text index — no conversion needed, and this is the largest class
-at 2,882,822 files). `vlm_describe`, `asr_transcribe`, `ocr_page`, `summarise` and
-`synthesise` are queued names with no handler yet, and the worker records them as
-`no_handler` rather than pretending to do them.
+at 2,882,822 files). `vlm_describe`, `asr_transcribe`, `ocr_page` and `synthesise`
+are queued names with no handler yet, and the worker records them as `no_handler`
+rather than pretending to do them. **`summarise` has one now and is still absent from
+that list on purpose**: a mining window must not pick generation up before an engine
+is wired and its cost measured, so descriptions are made by `rlm summarise` below and
+by nothing else.
 
 **Measured rates on the owner's corpus**, so a window can be planned: text
 extraction 5.3 items/s; archive listing and indexing ~33 items/s (with the claim
 fixed — see below). Indexing all 2.88M text files is therefore ~24 hours of
 windows, and every hour of it is independently useful because the queue commits
 per item.
+
+### `rlm summarise` — describing documents by value (RO6)
+
+The corpus cannot be uniformly summarised on this hardware: at ~6.6 tok/s prompt and
+~3.0 tok/s decode a 10 KB document costs ~9 minutes, so 100 000 of them is years of
+inference. RO6 is the answer to that arithmetic — *select* the fraction worth a
+generation pass, then describe only that.
+
+```bash
+# What would be described, and what it would cost — no model is called
+uv run python -m rlm_local.cli summarise \
+    --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite \
+    --limit 5 --cited-only --dry-run
+
+# Describe three of the documents an answer has actually cited
+uv run python -m rlm_local.cli summarise \
+    --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite \
+    --limit 3 --cited-only
+
+# The same documents described by a different model, for comparison
+uv run python -m rlm_local.cli summarise … --model Qwen3.5-2B-Instruct
+```
+
+The set comes from the **enrichment plan** (`scripts/enrich_plan.py`), which ranks
+documents by evidence the harness already recorded: cited first, then served.
+`--cited-only` keeps the documents an answer actually cited — the cheapest defensible
+set. `--limit` defaults to **3**, because each document costs minutes and a large
+default would spend a night without being asked. A plan row that is malformed is
+dropped and **counted** in the output rather than padded: a plan is the list a run
+spends hours on, and a silently shortened list is one nobody can audit.
+
+The model defaults to **the configured one** — `--model` / `--endpoint`, `RLM_MODEL` /
+`RLM_ENDPOINT`, else the profile's root tier — and a different one can be named per
+invocation. The model is part of the derivation key, so pointing this at a second model
+re-describes documents instead of serving the first model's descriptions as cache hits.
+**Run one model at a time**: the router keeps what it has served resident, this box has
+15 GiB, and the owner's constraint is one text model (or one text plus a small
+auxiliary multimodal model) at most; restart the router between models
+(`systemctl --user restart llama-router.service`).
+
+What it prints is **aggregates only** — counts, seconds, ratios — and the log it writes
+(`~/rlm-derived/summaries.jsonl`, 0600, one JSON line per call) contains no document
+text by construction: a description is the document's own prose, so it stays where the
+corpus is (`AGENTS.md` §1.9). The metrics are deliberately weak signals and each says
+what it cannot see: `groundedness` catches a description built from words the document
+does not contain, and also punishes a legitimate paraphrase; boilerplate is flagged,
+never judged; token counts are *estimated* at ~4 characters each. `min` and `max`
+seconds appear beside the median because a router loads models on demand, so the first
+call of a run can include the model load.
+
+Described documents are indexed as **derived** text, so a later search can find the
+description; re-running the same documents costs nothing, because a description already
+paid for is a cache hit keyed on the document, the bounds **and the model**.
 
 ### A second, dynamic corpus (a scraped library, a notebook)
 
