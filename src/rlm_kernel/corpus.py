@@ -567,6 +567,23 @@ CORPUS_VENDORED_HIDDEN = (
     "[{n:,} further matches are hidden by the vendored filter; search again with "
     "include_vendored=True if the answer may be in dependency or build output]"
 )
+CORPUS_VENDORED_HIDDEN_AT_LEAST = (
+    "[at least {n:,} further matches are hidden by the vendored filter — the exact number is "
+    "not counted, because counting it costs the same as the search; search again with "
+    "include_vendored=True if the answer may be in dependency or build output]"
+)
+
+
+def vendored_hidden_note(result: Any) -> str:
+    """The line about hidden vendored matches, saying "at least" when it is a bound.
+
+    The count was unbounded until 2026-09-23 and measured **202 s** on a one-word query; it is
+    capped now, and a capped number has to be reported as a bound. One helper so the two
+    callers cannot drift into one saying "412" and the other "at least 200".
+    """
+    if getattr(result, "hidden_vendored_at_least", False):
+        return CORPUS_VENDORED_HIDDEN_AT_LEAST.format(n=result.hidden_vendored)
+    return CORPUS_VENDORED_HIDDEN.format(n=result.hidden_vendored)
 CORPUS_NOT_REREADABLE = "    (cannot re-read this chunk: {error})"
 CORPUS_INCOMPLETE = (
     "[warning: the path index is INCOMPLETE — {entries} entries as of its last "
@@ -910,7 +927,7 @@ class CorpusBridge:
             if terms:
                 lines.append(match_note(0, len(terms)))
             if result.hidden_vendored:
-                lines.append(CORPUS_VENDORED_HIDDEN.format(n=result.hidden_vendored))
+                lines.append(vendored_hidden_note(result))
             # The published snapshot, never a scan: counting the chunk table takes
             # ~16 minutes on the real index, and this runs inside a 120 s cell.
             snapshot = text_index.published_coverage()
@@ -953,7 +970,7 @@ class CorpusBridge:
             snippet = " ".join(text.split())[:300]
             hits.append(f"{hit.address}  [{', '.join(labels)}]\n    {snippet}")
         if result.hidden_vendored:
-            hits.append(CORPUS_VENDORED_HIDDEN.format(n=result.hidden_vendored))
+            hits.append(vendored_hidden_note(result))
         # The match quality rides on every hit rather than in a footer: this list is
         # the contract (`len(hits)`, `hits[0]`, iteration), and a footer would corrupt
         # exactly the thing the first live run was broken by. A set-level sentence is

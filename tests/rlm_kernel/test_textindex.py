@@ -179,6 +179,85 @@ class TestProvenanceIsVisibleOnTheHitLine:
         assert ".srt" in NON_PROSE_EXTENSIONS
 
 
+class TestTheHiddenVendoredCountIsBounded:
+    """The line about hidden vendored matches may not cost what the search costs.
+
+    Measured 2026-09-23 on the queries a live run actually issued: the count was **0.1 s** on a
+    selective query and **202 s** on a one-word query matching 704 801 chunks — unbounded in
+    the size of the match set, and paid to print one informational line. It is capped now, and
+    a capped number must be reported as a bound.
+    """
+
+    def test_a_small_count_is_exact_and_not_a_bound(self, index: TextIndex) -> None:
+        index.add_text(raw=b"own.txt", display="own.txt", source_hash="h1",
+                       text=b"needle in a haystack\n")
+        index.add_text(raw=b"vendored/lib.js", display="node_modules/lib.js",
+                       source_hash="h2", text=b"needle again\n")
+        result = index.search("needle", k=5)
+        assert result.hidden_vendored == 1
+        assert result.hidden_vendored_at_least is False, (
+            "one hidden match is a count, and saying 'at least one' would be noise"
+        )
+
+    def test_the_count_query_is_bounded_in_sql(self, index: TextIndex) -> None:
+        """Cost is invisible in the answer, so the guard reads the statement.
+
+        The clamp (`hidden = VENDORED_COUNT_CAP`) makes the *number* look capped even when the
+        query counts every row, so a behavioural assertion cannot see whether the bound is real
+        — the mutation table proved that by calling a clamp-only version green. This is the
+        same trace-based shape the container-member guard uses for the same reason: when the
+        cost is not in the output, assert on what was executed.
+        """
+        for i in range(5):
+            index.add_text(raw=f"v{i}.js".encode(), display=f"node_modules/v{i}.js",
+                           source_hash=f"h{i}", text=b"needle here\n")
+        index.add_text(raw=b"own.txt", display="own.txt", source_hash="own",
+                       text=b"needle here\n")
+        statements: list[str] = []
+        index._conn.set_trace_callback(statements.append)  # noqa: SLF001
+        try:
+            index.search("needle", k=5)
+        finally:
+            index._conn.set_trace_callback(None)  # noqa: SLF001
+        counting = [s for s in statements if "vendored = 1" in s]
+        assert counting, f"no counting statement was issued: {statements}"
+        assert all("LIMIT" in s.upper() for s in counting), (
+            "the hidden-vendored count must be bounded in SQL: it measured 202 s on a common "
+            f"query, and a clamp in Python still pays that. Statements: {counting}"
+        )
+
+    def test_a_count_past_the_cap_says_at_least(
+        self, index: TextIndex, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """And the number it reports is the cap, reported as a bound."""
+        from rlm_kernel import textindex as module
+        monkeypatch.setattr(module, "VENDORED_COUNT_CAP", 2)
+        for i in range(5):
+            index.add_text(raw=f"v{i}.js".encode(), display=f"node_modules/v{i}.js",
+                           source_hash=f"h{i}", text=b"needle here\n")
+        index.add_text(raw=b"own.txt", display="own.txt", source_hash="own",
+                       text=b"needle here\n")
+        result = index.search("needle", k=5)
+        assert result.hidden_vendored == 2, "the count must stop at the cap"
+        assert result.hidden_vendored_at_least is True
+
+    def test_both_callers_say_at_least_the_same_way(self) -> None:
+        """Two call sites, one wording — the failure this helper exists to prevent."""
+        from rlm_kernel.corpus import vendored_hidden_note
+
+        class Capped:
+            hidden_vendored = 200
+            hidden_vendored_at_least = True
+
+        class Exact:
+            hidden_vendored = 7
+            hidden_vendored_at_least = False
+
+        assert "at least 200" in vendored_hidden_note(Capped())
+        assert "at least" not in vendored_hidden_note(Exact())
+        assert "7" in vendored_hidden_note(Exact())
+
+
 class TestSamplingProse:
     def test_a_name_rejected_candidate_is_never_read(
         self, index: TextIndex, monkeypatch: pytest.MonkeyPatch,

@@ -353,7 +353,20 @@ class Hit:
 class SearchResult:
     hits: list[Hit]
     hidden_vendored: int
+    hidden_vendored_at_least: bool = False
+    """True when `hidden_vendored` is the *cap* rather than the count, so a reader is told
+    "at least N" instead of a number the search did not compute."""
     coverage_note: str | None = None
+
+
+#: How many vendored matches a search will count before it stops and says "at least this
+#: many". The count exists only to print one informational line, and it is **unbounded in the
+#: size of the match set** — measured 2026-09-23 on the queries a live run actually issued:
+#: 0.1 s for a selective query, **202 s** for a one-word query matching 704 801 chunks. The
+#: cap makes the line cost the same whatever the question's words are; `at_least` keeps it
+#: honest, because a number the harness cannot afford must be reported as a bound, never as a
+#: count (§1.8).
+VENDORED_COUNT_CAP = 200
 
 
 #: The columns every `Hit` is built from, in the order `_hit_from_row` reads them.
@@ -639,14 +652,22 @@ class TextIndex:
         rows = self._conn.execute(sql, (*params, max(1, int(k)))).fetchall()
         hits = [_hit_from_row(r[:-1], score=float(r[-1])) for r in rows]
         hidden = 0
+        hidden_at_least = False
         if not include_vendored:
+            # Bounded by the cap: the subquery stops after CAP+1 rows, so a common word costs
+            # the same as a rare one. `+1` is what distinguishes "exactly CAP" from "at least".
             row = self._conn.execute(
-                "SELECT COUNT(*) FROM text_fts JOIN text_chunks c"
-                " ON c.id = text_fts.rowid WHERE text_fts MATCH ? AND c.vendored = 1",
-                (expression,),
+                "SELECT COUNT(*) FROM (SELECT 1 FROM text_fts"
+                " JOIN text_chunks c ON c.id = text_fts.rowid"
+                " WHERE text_fts MATCH ? AND c.vendored = 1 LIMIT ?)",
+                (expression, VENDORED_COUNT_CAP + 1),
             ).fetchone()
             hidden = int(row[0]) if row else 0
-        return SearchResult(hits=hits, hidden_vendored=hidden)
+            hidden_at_least = hidden > VENDORED_COUNT_CAP
+            if hidden_at_least:
+                hidden = VENDORED_COUNT_CAP
+        return SearchResult(hits=hits, hidden_vendored=hidden,
+                            hidden_vendored_at_least=hidden_at_least)
 
     # ── Reading a hit back ────────────────────────────────────────────────
 
@@ -1240,8 +1261,11 @@ def format_hits(result: SearchResult, texts: list[str], *, width: int = 200) -> 
         lines.append(f"{hit.address}  [{', '.join(labels)}]")
         lines.append(f"    {snippet}")
     if result.hidden_vendored:
+        # The count is capped, so say "at least" when the cap was reached rather than
+        # presenting a bound as a count.
+        prefix = "at least " if getattr(result, "hidden_vendored_at_least", False) else ""
         lines.append(
-            f"[{result.hidden_vendored:,} further matches hidden by the vendored "
+            f"[{prefix}{result.hidden_vendored:,} further matches hidden by the vendored "
             "filter; search again with include_vendored=True]"
         )
     if result.coverage_note:

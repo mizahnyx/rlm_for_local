@@ -3366,6 +3366,19 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_an_address_classifies_like_the_path_it_names",
         ],
     ),
+    # ── RO31: the hidden-vendored count is bounded (2026-09-23) ───────────────
+    (
+        "RO31 the vendored count stops being bounded",
+        "src/rlm_kernel/textindex.py",
+        "                \" WHERE text_fts MATCH ? AND c.vendored = 1 LIMIT ?)\",\n"
+        "                (expression, VENDORED_COUNT_CAP + 1),",
+        "                \" WHERE text_fts MATCH ? AND c.vendored = 1)\",\n"
+        "                (expression,),",
+        [
+            "tests/rlm_kernel/test_textindex.py::TestTheHiddenVendoredCountIsBounded"
+            "::test_the_count_query_is_bounded_in_sql",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
