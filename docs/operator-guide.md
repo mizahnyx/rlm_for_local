@@ -623,6 +623,55 @@ measured rather than assumed (`docs/20260922-0946-rar-and-7z-what-is-measured.md
 sampled members, so a `.7z` member could be found by name and never read. Those 39 files
 stay in the terminal skip set, recorded as `no_listing_engine`.
 
+### Drafting a question set from prose, where the corpus is
+
+A question set is the instrument the evaluation loop runs on, and it has to be drawn from
+*this* corpus while the corpus itself never travels (`AGENTS.md` §1.9). Those two
+requirements fix the shape of the pipeline: passages are drawn locally, a **local** model
+drafts one question per passage, and only counts come back.
+
+```bash
+cd ~/Misc/rlm_for_local
+# 1. Draft. Writes <name>.tsv and <name>.sources.tsv beside the corpus, both 0600.
+.venv/bin/python scripts/draft_question_set.py --n 6 --seed 20260922 \
+    --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite \
+    --out-dir ~/rlm-derived/questions --name prose-drafted
+# 2. Read the set and the addresses it came from. Edit or delete any question you disagree
+#    with; a drafted question is a model's idea of a question, not a verdict.
+less ~/rlm-derived/questions/prose-drafted.tsv
+less ~/rlm-derived/questions/prose-drafted.sources.tsv
+# 3. Run it, then render the trajectories beside the corpus.
+.venv/bin/python scripts/run_question_probe.py \
+    --questions ~/rlm-derived/questions/prose-drafted.tsv \
+    --out-dir ~/rlm-derived/questions --corpus-root /srv/corpus \
+    --corpus-index ~/rlm-derived/corpus.sqlite \
+    --profile laptop --max-turns 6 --cell-timeout 60 --cell-timeout-hard 1200
+.venv/bin/python -m rlm_local.cli trace render ~/rlm-derived/questions \
+    --out-dir ~/rlm-derived/questions/traces \
+    --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite
+```
+
+Four things are worth knowing before you run it.
+
+- **One model at a time.** The router keeps every model it has served resident, and naming a
+  second one on a 15 GiB box is how the machine starts swapping — measured 2026-09-22, it
+  made `lunacode` unresponsive for over half an hour. `draft_question_set.py` now asks the
+  router what is loaded and **refuses** when drafting would mean a second model, naming the
+  resident one; `--allow-second-model` is the explicit override. To draft with a different
+  model, restart the router first (`systemctl --user restart llama-router.service`) and let
+  only that one load.
+- **Draft with a different model than you answer with, or write down why not.** If the same
+  model writes the questions and answers them, a low citation rate says as much about the
+  drafter as about the harness. The drafting model is printed and goes in the set's header.
+- **Budget hours, not minutes.** Six passage questions took roughly ten minutes *per turn*
+  on this box, because each turn searches and reads and the model decodes at 3–6 tok/s. Set
+  `--cell-timeout-hard 1200` so a cold read finishes instead of killing the cell, and expect
+  to leave it running.
+- **A drafted question can be bad.** The tool rejects the shapes it can see (commentary, a
+  statement, no question mark) and marks unusable drafts in `.sources.tsv`; it cannot tell
+  whether a question is *interesting*. That judgement is yours, and it is why the set is
+  written beside the corpus for you to read rather than straight into a run.
+
 ### `rlm corpus sample` — passages to devise questions from
 
 Probe questions that matter are the ones drawn from *this* corpus, not invented. This
