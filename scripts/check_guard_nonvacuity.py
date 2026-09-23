@@ -3379,6 +3379,18 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_the_count_query_is_bounded_in_sql",
         ],
     ),
+    # ── RO32: the load gate may not write inside the corpus (2026-09-23) ─────
+    (
+        "RO32 the load gate may write inside the corpus",
+        "tests/load/test_load.py",
+        "    probe = root / \"meta.sqlite\"\n"
+        "    assert_derived_outside_corpus(corpus_path, probe)",
+        "    _ = root",
+        [
+            "tests/load/test_load.py"
+            "::test_a_derived_root_inside_the_corpus_is_refused",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

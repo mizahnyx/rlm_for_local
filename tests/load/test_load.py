@@ -152,6 +152,49 @@ def _get_organic_corpus() -> Path | None:
     return p
 
 
+def derived_root(corpus_path: Path) -> Path:
+    """Where a load gate is allowed to write, asserted **outside** the corpus.
+
+    The first version of Tier 2 built `LocalVault(corpus_path)` and wrote the index to
+    `<corpus>/.index/meta.sqlite` — inside the corpus root, which `AGENTS.md` §1.8 layer 3
+    forbids and which the read-only mount would refuse. On a writable copy it would have
+    succeeded silently, which is the worse failure because nothing reports it. Layer 3 says
+    fail hard rather than proceed, so this asserts before returning.
+
+    `RLM_KERNEL_LOAD_DERIVED` names the root; unset means a temporary directory of its own, so
+    a gate run cannot leave derived state behind by accident.
+    """
+    from rlm_kernel.mounts import assert_derived_outside_corpus
+
+    configured = os.environ.get("RLM_KERNEL_LOAD_DERIVED")
+    root = Path(configured) if configured else Path(tempfile.mkdtemp(prefix="rlm-load-"))
+    root.mkdir(parents=True, exist_ok=True)
+    probe = root / "meta.sqlite"
+    assert_derived_outside_corpus(corpus_path, probe)
+    return root
+
+
+def test_a_derived_root_inside_the_corpus_is_refused(tmp_path: Path) -> None:
+    """The guard, without needing a corpus or a model: an inside-corpus root must fail hard."""
+    from rlm_kernel.mounts import ReadOnlyViolation
+
+    corpus = tmp_path / "corpus"
+    (corpus / "docs").mkdir(parents=True)
+    (corpus / "docs" / "page.md").write_text("# a page\n", encoding="utf-8")
+    os.environ["RLM_KERNEL_LOAD_DERIVED"] = str(corpus / ".index")
+    try:
+        with pytest.raises(ReadOnlyViolation):
+            derived_root(corpus)
+    finally:
+        del os.environ["RLM_KERNEL_LOAD_DERIVED"]
+    # And the sound case does not raise: outside the corpus, or a temp root of its own.
+    os.environ["RLM_KERNEL_LOAD_DERIVED"] = str(tmp_path / "derived")
+    try:
+        assert derived_root(corpus) == tmp_path / "derived"
+    finally:
+        del os.environ["RLM_KERNEL_LOAD_DERIVED"]
+
+
 class TestLoadTier2:
     """Load tests against an organic corpus (optional, env-var gated)."""
 
@@ -164,11 +207,13 @@ class TestLoadTier2:
 
     @pytest.fixture(scope="class")
     def vault(self, corpus_path):
+        # The corpus is a **read-only source**, not a vault: it is read here and the gate's
+        # derived state goes to `derived_root`, which refuses to be inside it.
         return LocalVault(corpus_path, init_git=False)
 
     def test_build_index(self, vault, corpus_path):
-        """Index build on organic corpus."""
-        idx_path = corpus_path / ".index" / "meta.sqlite"
+        """Index build on organic corpus. The index is written *outside* the corpus."""
+        idx_path = derived_root(corpus_path) / "meta.sqlite"
         t0 = time.perf_counter()
         idx = rebuild_index(vault, idx_path)
         elapsed = time.perf_counter() - t0
@@ -179,7 +224,7 @@ class TestLoadTier2:
 
     def test_search_latency(self, vault, corpus_path):
         """FTS search latency on organic corpus."""
-        idx_path = corpus_path / ".index" / "meta.sqlite"
+        idx_path = derived_root(corpus_path) / "meta.sqlite"
         idx = Index(idx_path)
 
         queries = ["error", "function", "system", "data", "process",
