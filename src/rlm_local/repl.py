@@ -956,7 +956,7 @@ class REPLSandbox:
     def __init__(
         self,
         cell_timeout: float = 60.0,
-        cell_timeout_hard: float = 1200.0,
+        cell_timeout_hard: float = 3600.0,
         stdout_cap: int = 256 * 1024,
         restart_after_consecutive_timeouts: int = 2,
         alias_table: AliasTable | None = None,

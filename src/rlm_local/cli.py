@@ -69,9 +69,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("RLM_CELL_TIMEOUT_HARD"),
         help="Seconds one REPL cell may run in total, after the soft limit has "
              "signalled that the cell is doing work (default: the profile's value — "
-             "1200 s; env RLM_CELL_TIMEOUT_HARD). Set it equal to --cell-timeout to "
-             "switch the second limit off: a cell then stops at the soft limit "
-             "whether or not it was working.",
+             "3600 s; env RLM_CELL_TIMEOUT_HARD). Raised from 1200 s on 2026-09-23 "
+             "because a search on this corpus measured p95 ≥ 60 s and one cell was "
+             "stopped at the old limit while running one. Set it equal to "
+             "--cell-timeout to switch the second limit off: a cell then stops at the "
+             "soft limit whether or not it was working.",
     )
     p_ask.add_argument("--log-path", type=Path, default=None,
                        help="Write trajectory JSONL to this path")

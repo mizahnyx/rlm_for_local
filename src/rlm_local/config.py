@@ -41,7 +41,18 @@ class Profile:
     # operation has started and lets the cell continue, the hard limit stops it
     # (owner, 2026-09-17 — old hardware makes some legitimate operations slow).
     cell_timeout: float = 60.0
-    cell_timeout_hard: float = 1200.0
+    cell_timeout_hard: float = 3600.0
+    """The *hard* limit: a cell that has asked the harness for something is extended to this,
+    and one that asked for nothing is stopped at the soft limit.
+
+    Raised from 1 200 s to 3 600 s on the owner's call (2026-09-23), after the load gate
+    measured what a search costs on this corpus: **p95 ≥ 60 s over the queries a live run
+    actually issued, with seven of fifteen not finishing inside 60 s**, and one cell
+    demonstrably stopped at the old 1 200 s limit *while running `corpus_search`*. The owner's
+    reasoning, which the numbers support: this is old hardware running small models, and an
+    hour of waiting is acceptable where a killed cell is not. The soft limit is unchanged, so a
+    cell that asks for nothing is still stopped promptly.
+    """
 
     # Context store
     context_spill_threshold: int = 1_000_000
