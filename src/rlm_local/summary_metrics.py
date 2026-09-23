@@ -201,6 +201,8 @@ def aggregate(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
             "boilerplate": sum(1 for record in group if record.get("boilerplate")),
             "cap_hits": sum(1 for record in group if record.get("cap_hit")),
             "seconds_median": _median(seconds),
+            "seconds_min": round(min(seconds), 1) if seconds else None,
+            "seconds_max": round(max(seconds), 1) if seconds else None,
             "seconds_total": round(sum(seconds), 1),
             "input_chars_median": _median(inputs),
             "output_chars_median": _median(
@@ -279,7 +281,8 @@ def render(agg: dict[str, Any], *, scale: str = "", sets: dict[str, int] | None 
         if entry["seconds_median"] is not None:
             lines.append(
                 f"    median {entry['seconds_median']}s per document "
-                f"({entry['seconds_per_kib']}s per KiB in, "
+                f"(min {entry['seconds_min']}s, max {entry['seconds_max']}s; "
+                f"{entry['seconds_per_kib']}s per KiB in, "
                 f"{entry['input_chars_median']} chars in / "
                 f"{entry['output_chars_median']} chars out)"
             )

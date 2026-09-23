@@ -12,7 +12,8 @@ import json
 from pathlib import Path
 
 from rlm_kernel.enrich import (
-    Candidate, iter_trajectories, rank_candidates, read_usage, render_plan, write_plan,
+    Candidate, iter_trajectories, rank_candidates, read_plan, read_plan_with_drops, read_usage,
+    render_plan, select_documents, write_plan,
 )
 
 
@@ -121,3 +122,81 @@ def test_the_rank_key_is_a_total_order() -> None:
     b = Candidate("b.txt", "prose", 1, 0)
     assert a.rank_key != b.rank_key
     assert sorted([b, a], key=lambda c: c.rank_key) == [a, b]
+
+
+class TestThePlanIsReadBack:
+    """A plan is the list a generation pass spends inference on, so it must round-trip."""
+
+    def _write(self, tmp_path: Path) -> Path:
+        path = tmp_path / "enrich-plan.tsv"
+        write_plan(
+            [
+                Candidate("cited.txt", "prose", 3, 2),
+                Candidate("served.txt", "code", 9, 0),
+            ],
+            path,
+        )
+        return path
+
+    def test_a_written_plan_reads_back_identically(self, tmp_path: Path) -> None:
+        candidates, dropped = read_plan_with_drops(self._write(tmp_path))
+        assert dropped == 0
+        assert [(c.source, c.provenance, c.served, c.cited) for c in candidates] == [
+            ("cited.txt", "prose", 3, 2),
+            ("served.txt", "code", 9, 0),
+        ]
+
+    def test_the_header_is_not_a_document(self, tmp_path: Path) -> None:
+        assert all(not c.source.startswith("#") for c in read_plan(self._write(tmp_path)))
+
+    def test_a_malformed_row_is_dropped_and_counted(self, tmp_path: Path) -> None:
+        """Dropped, never guessed at: a silently shortened plan is one nobody can audit."""
+        path = tmp_path / "plan.tsv"
+        path.write_text(
+            "# rank\tsource\tserved\tcited\tprovenance\n"
+            "1\tshort.txt\n"
+            "2\tgood.txt\t1\t1\tprose\n"
+            "3\t\t2\t0\tcode\n",
+            encoding="utf-8",
+        )
+        candidates, dropped = read_plan_with_drops(path)
+        assert [c.source for c in candidates] == ["good.txt"]
+        assert dropped == 2, "the truncated row and the row with no document"
+
+    def test_an_unparsable_count_costs_the_count_not_the_document(self, tmp_path: Path) -> None:
+        path = tmp_path / "plan.tsv"
+        path.write_text("1\todd.txt\tlots\tmany\tprose\n", encoding="utf-8")
+        candidates, dropped = read_plan_with_drops(path)
+        assert dropped == 0
+        assert (candidates[0].source, candidates[0].served, candidates[0].cited) == (
+            "odd.txt", 0, 0,
+        )
+
+
+class TestTheSelection:
+    """What gets spent on, which is the only decision in RO6 that costs real time."""
+
+    def _candidates(self) -> list[Candidate]:
+        return [
+            Candidate("cited-one.txt", "prose", 4, 3),
+            Candidate("cited-two.txt", "code", 2, 1),
+            Candidate("served.txt", "markup", 11, 0),
+        ]
+
+    def test_the_order_is_the_plans_order(self) -> None:
+        """No re-ranking: sorting again here would disagree with the plan a reader is holding."""
+        chosen = select_documents(self._candidates(), limit=2)
+        assert [c.source for c in chosen] == ["cited-one.txt", "cited-two.txt"]
+
+    def test_cited_only_keeps_the_documents_an_answer_used(self) -> None:
+        chosen = select_documents(self._candidates(), cited_only=True)
+        assert [c.source for c in chosen] == ["cited-one.txt", "cited-two.txt"]
+
+    def test_no_limit_means_all_of_it_deliberately(self) -> None:
+        assert len(select_documents(self._candidates())) == 3
+
+    def test_a_limit_of_zero_selects_nothing(self) -> None:
+        assert select_documents(self._candidates(), limit=0) == []
+
+    def test_a_limit_beyond_the_set_is_not_an_error(self) -> None:
+        assert len(select_documents(self._candidates(), limit=99)) == 3

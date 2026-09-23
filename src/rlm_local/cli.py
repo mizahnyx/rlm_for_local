@@ -481,6 +481,46 @@ def build_parser() -> argparse.ArgumentParser:
              "skip recorded it could not (required with --task)",
     )
 
+    # ── RO6: describe the documents that are worth describing ─────────────
+    #
+    # Not a `mine` subcommand, deliberately. `mine run` works a task across the whole queue;
+    # this spends *generation* on one hand-picked set — the head of the enrichment plan — and
+    # reports what it cost. Generation is the expensive half: ~23 minutes per document at the
+    # kernel's bounds, so the corpus cannot be summarised uniformly and something has to choose.
+    p_sum = sub.add_parser(
+        "summarise",
+        help="Describe the documents the value set selects, by value (RO6)",
+    )
+    _add_corpus_flags(p_sum, require_root=True, require_index=True)
+    _add_model_server_flags(p_sum)
+    p_sum.add_argument("--profile", default="laptop")
+    p_sum.add_argument(
+        "--plan", type=Path, default=None,
+        help="Enrichment plan TSV to read (default: enrich-plan.tsv beside the index)",
+    )
+    p_sum.add_argument(
+        "--limit", type=int, default=3,
+        help="How many documents to describe, from the head of the ranking (default 3: each "
+             "one costs minutes, so the default is small on purpose)",
+    )
+    p_sum.add_argument(
+        "--cited-only", action="store_true",
+        help="Only documents an answer has actually cited (the cheapest defensible set)",
+    )
+    p_sum.add_argument(
+        "--max-tokens", type=int, default=None,
+        help="Output bound for one description (default: the kernel's SUMMARY_MAX_TOKENS)",
+    )
+    p_sum.add_argument("--cache-root", type=Path, default=None)
+    p_sum.add_argument(
+        "--log", type=Path, default=None,
+        help="Metrics log, one JSON line per call (default: summaries.jsonl beside the index)",
+    )
+    p_sum.add_argument(
+        "--dry-run", action="store_true",
+        help="Report what would be described and stop: enqueues nothing, calls no model",
+    )
+
     return parser
 
 
@@ -536,6 +576,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_trace(args)
     elif args.command == "mine":
         return _cmd_mine(args)
+    elif args.command == "summarise":
+        return _cmd_summarise(args)
     else:
         parser.print_help()
         return 0
@@ -1754,6 +1796,119 @@ def _open_mine(args: argparse.Namespace):
     store = index.mining()
     store.ensure()
     return index, store
+
+
+def _cmd_summarise(args: argparse.Namespace) -> int:
+    """Describe the head of the enrichment plan, and report what it cost (RO6, by value).
+
+    The plan ranks what retrieval has reached and what an answer has cited; this spends
+    inference on the head of that ranking and never on the corpus, because the arithmetic says
+    uniform summarisation is impossible here (~23 minutes per document at the kernel's bounds,
+    so ~4.4 years for 100 000 of them — `docs/20260923-1800-…`).
+
+    Two deliberate properties. The model defaults to **what every other command uses**
+    (`--model` / `--endpoint`, `RLM_MODEL` / `RLM_ENDPOINT`) and can be another one, because the
+    decision gate needs to know whether a second model's description is worth its own cost. And
+    the report is **aggregates only** — counts, seconds, ratios — since a description is the
+    document's own prose and may not travel (`AGENTS.md` §1.9); what the run cost may travel,
+    what it said may not.
+    """
+    from rlm_kernel.enrich import read_plan_with_drops, render_plan, select_documents
+    from rlm_kernel.mine import (
+        PRIORITY_SUMMARISE, SUMMARISE, acquire_lock, release_lock, run_queue,
+    )
+    from rlm_local.summary_metrics import aggregate, read_log, render
+
+    opened = _open_mine(args)
+    if opened is None:
+        return 2
+    index, store = opened
+    try:
+        base = Path(args.corpus_index).parent
+        plan_path = Path(args.plan) if args.plan else base / "enrich-plan.tsv"
+        if not plan_path.exists():
+            print(f"Error: no enrichment plan at {plan_path}. Build one with "
+                  "scripts/enrich_plan.py.", file=sys.stderr)
+            return 2
+
+        candidates, dropped = read_plan_with_drops(plan_path)
+        chosen = select_documents(candidates, limit=args.limit, cited_only=args.cited_only)
+        print(render_plan(candidates))
+        if dropped:
+            print(f"  {dropped} plan row(s) dropped as malformed")
+        print(f"selected {len(chosen)} of {len(candidates)} document(s)"
+              + (", cited only" if args.cited_only else ""))
+        if not chosen:
+            print("nothing selected: nothing to summarise")
+            return 0
+        if args.dry_run:
+            print("dry run: nothing enqueued, no model called")
+            return 0
+
+        cache_root = Path(args.cache_root) if args.cache_root else base / "cache"
+        log_path = Path(args.log) if args.log else base / "summaries.jsonl"
+        lock_path = base / "mine.lock"
+
+        holder = acquire_lock(lock_path)
+        if holder is None:
+            print(f"Error: another mining worker holds {lock_path}. Stop it, or remove the "
+                  "file if it is stale.", file=sys.stderr)
+            return 2
+        try:
+            from rlm_kernel.mounts import LocalTreeMount, ReadOnlyViolation
+            from rlm_local.config import load_config
+            from rlm_local.model_backend import HTTPModelBackend
+            from rlm_local.summarise import make_summarise_engine
+
+            try:
+                mount = LocalTreeMount(args.corpus_root)
+            except ReadOnlyViolation as e:
+                print(f"Error: {e}", file=sys.stderr)
+                return 2
+
+            config = load_config(getattr(args, "profile", "laptop"),
+                                **_model_server_overrides(args))
+            backend = HTTPModelBackend(
+                root_endpoint=config.root_endpoint, root_model=config.root_model, verify=False,
+            )
+            try:
+                engine = make_summarise_engine(
+                    backend, model=config.root_model, endpoint=config.root_endpoint,
+                    log_path=log_path, max_tokens=args.max_tokens,
+                )
+                print(f"model {engine.engine_tag}")
+                print(f"metrics log {log_path}")
+                store.enqueue([
+                    (candidate.source.encode("utf-8", "surrogateescape"),
+                     SUMMARISE, PRIORITY_SUMMARISE)
+                    for candidate in chosen
+                ])
+                text_index = index.text()
+                text_index.ensure()
+                run = run_queue(
+                    store=store, conn=index._conn, mount=mount, cache_root=cache_root,
+                    tasks=[SUMMARISE], engines={"summarise": engine}, text_index=text_index,
+                    max_items=len(chosen), lock_file=lock_path, coverage_scan=False,
+                )
+                print(f"stopped: {run.stop_reason} after {run.seconds:,.1f}s")
+                print(f"  done {run.stats.done:,}, skipped {run.stats.skipped:,}, "
+                      f"failed {run.stats.failed:,}, cache hits {run.stats.cache_hits:,}")
+                # The scale travels with the numbers (AGENTS.md §1.7): a median seconds-per-
+                # document from a different model, cache state or host means nothing.
+                print(render(
+                    aggregate(read_log(log_path)),
+                    scale=f"{engine.engine_tag}, cache {cache_root}, descriptions indexed "
+                          "as derived text",
+                    sets={"value set": len(candidates),
+                          "cited set": sum(1 for candidate in candidates if candidate.cited)},
+                ))
+            finally:
+                backend.close()
+        finally:
+            release_lock(lock_path)
+        return 0
+    finally:
+        index.close()
 
 
 def _cmd_mine(args: argparse.Namespace) -> int:

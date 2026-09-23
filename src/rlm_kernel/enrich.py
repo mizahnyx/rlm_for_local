@@ -176,3 +176,73 @@ def iter_trajectories(root: Path) -> Iterator[Path]:
     for path in sorted(Path(root).rglob("*.jsonl")):
         if "traces" not in path.parts:
             yield path
+
+
+def _as_count(value: str) -> int:
+    """A plan's count field, or 0 when it is not a number.
+
+    A malformed count must not raise inside a run that is about to spend hours of inference: the
+    row keeps its document and loses only its evidence, and the caller is told how many rows were
+    dropped in total by `read_plan_with_drops`.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def read_plan_with_drops(path: Path) -> tuple[list[Candidate], int]:
+    """Read a plan written by `write_plan`; return the candidates and how many rows were dropped.
+
+    Header and blank lines are not rows. A row without all five tab-separated fields is dropped
+    and **counted** rather than guessed at, because a plan is the list of documents a generation
+    pass will spend time on: a silently shortened list is a plan nobody can audit.
+    """
+    candidates: list[Candidate] = []
+    dropped = 0
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) < 5:
+            dropped += 1
+            continue
+        _rank, source, served, cited, provenance = fields[:5]
+        if not source:
+            dropped += 1
+            continue
+        candidates.append(
+            Candidate(
+                source=source,
+                provenance=provenance or provenance_class(source),
+                served=_as_count(served),
+                cited=_as_count(cited),
+            )
+        )
+    return candidates, dropped
+
+
+def read_plan(path: Path) -> list[Candidate]:
+    """The candidates in a plan, ignoring how many rows were dropped — see
+    `read_plan_with_drops` when the difference matters, which it does for a run that spends
+    inference."""
+    return read_plan_with_drops(path)[0]
+
+
+def select_documents(
+    candidates: Iterable[Candidate], *, limit: int | None = None, cited_only: bool = False,
+) -> list[Candidate]:
+    """The top of the ranking to spend inference on — the value set, narrowed on request.
+
+    `cited_only` keeps the documents an answer actually cited (13 of them, measured on
+    2026-09-23), which is the cheapest defensible set; the default is everything retrieval has
+    reached. The ranking is already cited-first, and this **does not re-rank**: the order is the
+    evidence, and sorting it again here would quietly disagree with the plan a reader is looking
+    at. `limit=None` means all of it, which is a deliberate choice by the caller and never a
+    default that spends a night of inference by accident.
+    """
+    chosen = [candidate for candidate in candidates if candidate.cited] if cited_only \
+        else list(candidates)
+    if limit is not None:
+        chosen = chosen[: max(0, int(limit))]
+    return chosen

@@ -3488,6 +3488,27 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_the_system_message_names_the_injection_boundary",
         ],
     ),
+    (
+        "RO6 cited-only selects everything anyway",
+        "src/rlm_kernel/enrich.py",
+        "    chosen = [candidate for candidate in candidates if candidate.cited] if cited_only \\\n"
+        "        else list(candidates)",
+        "    chosen = list(candidates)",
+        [
+            "tests/rlm_kernel/test_enrich.py::TestTheSelection"
+            "::test_cited_only_keeps_the_documents_an_answer_used",
+        ],
+    ),
+    (
+        "RO6 a malformed plan row is padded and kept",
+        "src/rlm_kernel/enrich.py",
+        '        if len(fields) < 5:\n            dropped += 1\n            continue',
+        '        if len(fields) < 5:\n            fields = fields + [""] * (5 - len(fields))',
+        [
+            "tests/rlm_kernel/test_enrich.py::TestThePlanIsReadBack"
+            "::test_a_malformed_row_is_dropped_and_counted",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
