@@ -513,6 +513,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_sum.add_argument("--cache-root", type=Path, default=None)
     p_sum.add_argument(
+        "--timeout", type=float, default=None,
+        help="Seconds one description may take (default: derived from the kernel's input cap and "
+             "output bound — a 32 KiB document is ~21 minutes of prompt on this host, so the "
+             "HTTP client's own 300 s default kills exactly the largest documents)",
+    )
+    p_sum.add_argument(
         "--log", type=Path, default=None,
         help="Metrics log, one JSON line per call (default: summaries.jsonl beside the index)",
     )
@@ -1858,7 +1864,7 @@ def _cmd_summarise(args: argparse.Namespace) -> int:
             from rlm_kernel.mounts import LocalTreeMount, ReadOnlyViolation
             from rlm_local.config import load_config
             from rlm_local.model_backend import HTTPModelBackend
-            from rlm_local.summarise import make_summarise_engine
+            from rlm_local.summarise import make_summarise_engine, summarise_timeout_seconds
 
             try:
                 mount = LocalTreeMount(args.corpus_root)
@@ -1868,8 +1874,16 @@ def _cmd_summarise(args: argparse.Namespace) -> int:
 
             config = load_config(getattr(args, "profile", "laptop"),
                                 **_model_server_overrides(args))
+            # The timeout is derived, not defaulted: the kernel's input cap is what decides how
+            # long one call may take (~21 min of prompt for 32 KiB on this host), and a client
+            # timeout below that kills the largest documents — measured 2026-09-23.
+            from rlm_kernel.mine import MAX_SUMMARY_INPUT_BYTES, SUMMARY_MAX_TOKENS
+
+            timeout = args.timeout or summarise_timeout_seconds(
+                MAX_SUMMARY_INPUT_BYTES, args.max_tokens or SUMMARY_MAX_TOKENS)
             backend = HTTPModelBackend(
                 root_endpoint=config.root_endpoint, root_model=config.root_model, verify=False,
+                timeout=timeout,
             )
             try:
                 engine = make_summarise_engine(
@@ -1897,8 +1911,8 @@ def _cmd_summarise(args: argparse.Namespace) -> int:
                 # document from a different model, cache state or host means nothing.
                 print(render(
                     aggregate(read_log(log_path)),
-                    scale=f"{engine.engine_tag}, cache {cache_root}, descriptions indexed "
-                          "as derived text",
+                    scale=f"{engine.engine_tag}, timeout {timeout:g}s, cache {cache_root}, "
+                          "descriptions indexed as derived text",
                     sets={"value set": len(candidates),
                           "cited set": sum(1 for candidate in candidates if candidate.cited)},
                 ))

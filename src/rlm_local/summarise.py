@@ -25,8 +25,41 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from rlm_local.model_backend import ModelBackend
-from rlm_local.summary_metrics import measure
+from rlm_local.summary_metrics import CHARS_PER_TOKEN, measure
 from rlm_local.templates import SUMMARY_PROMPT, SUMMARY_SYSTEM
+
+#: Published host throughput (`AGENTS.md` §4), and the reason the timeout below is computed
+#: rather than chosen: ~6.6 tok/s prompt, ~3.0 tok/s decode, one model at a time.
+PROMPT_TOKENS_PER_SECOND = 6.6
+DECODE_TOKENS_PER_SECOND = 3.0
+
+#: Room left on top of the modelled cost: the throughput above is a published average, and a box
+#: that is also mining — or swapping, which this one does — is slower.
+SUMMARY_TIMEOUT_SAFETY = 1.5
+
+#: The HTTP client's own default, named so the difference is visible where it is argued about.
+BACKEND_DEFAULT_TIMEOUT = 300.0
+
+
+def summarise_timeout_seconds(max_input_bytes: int, max_tokens: int) -> float:
+    """Seconds one description may take: the input cap's prompt plus the output bound's decode.
+
+    This exists because two reasonable bounds turned out to contradict each other, and the
+    contradiction cost a real run. The kernel caps a summary's input at 32 KiB, which at ~6.6
+    tok/s prompt and ~4 characters per token is **~21 minutes** of processing before the first
+    output token — while `HTTPModelBackend` defaults to a 300 s timeout and retries twice. So the
+    largest documents the handler will ever send are exactly the ones guaranteed to die.
+
+    Measured 2026-09-23: the first live call raised `ReadTimeout` after **901.9 s** on a
+    30 838-character document — three 300 s attempts. It was diagnosable at all only because the
+    engine logs a failing call as a row rather than as an absence.
+
+    The timeout is therefore *derived* from the cap and the output bound (×the safety factor),
+    and `tests/test_summarise_engine.py` fails if the two ever drift apart again.
+    """
+    prompt_seconds = (max_input_bytes / CHARS_PER_TOKEN) / PROMPT_TOKENS_PER_SECOND
+    decode_seconds = max_tokens / DECODE_TOKENS_PER_SECOND
+    return round((prompt_seconds + decode_seconds) * SUMMARY_TIMEOUT_SAFETY, 1)
 
 
 def append_record(path: Path, record: dict[str, Any]) -> None:

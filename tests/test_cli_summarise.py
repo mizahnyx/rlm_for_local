@@ -8,6 +8,7 @@ report is aggregates, and nothing is enqueued until the operator asks for it.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from rlm_kernel.classify import classify_entries
@@ -16,6 +17,7 @@ from rlm_kernel.enrich import Candidate, write_plan
 from rlm_kernel.mine import PENDING, SUMMARISE, MineStore
 from rlm_kernel.mounts import LocalTreeMount
 from rlm_local.cli import main
+from rlm_local.summarise import BACKEND_DEFAULT_TIMEOUT
 
 
 def _corpus(tmp_path: Path) -> tuple[Path, Path]:
@@ -101,6 +103,108 @@ class TestTheDryRun:
         """The plan's own arithmetic, so the operator sees what the selection implies."""
         _code, output = _run(tmp_path, "--dry-run")
         assert "hours of inference" in output
+
+
+class TestTheCommandWithAStubBackend:
+    """The whole path minus the model: plan → enqueue → engine → cache → derived index → report.
+
+    The backend is stubbed at the module the command imports it from, so no server is needed while
+    the wiring that spends real minutes on real hardware is still exercised — including the
+    derived timeout reaching the client, which is the bug the first live run found.
+    """
+
+    def test_one_document_is_described_logged_and_indexed(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        import io
+        from contextlib import redirect_stdout
+
+        corpus, index_path = _corpus(tmp_path)
+        plan = _plan(tmp_path)
+        seen: dict = {}
+        reply = "A description of a text document, with words of its own."
+
+        class StubBackend:
+            def __init__(self, **kwargs):
+                seen["kwargs"] = kwargs
+
+            def chat(self, messages, **kwargs):
+                seen["messages"] = messages
+                return reply
+
+            def close(self):
+                seen["closed"] = True
+
+        monkeypatch.setattr("rlm_local.model_backend.HTTPModelBackend", StubBackend)
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = main([
+                "summarise", "--corpus-root", str(corpus), "--corpus-index", str(index_path),
+                "--plan", str(plan), "--limit", "1", "--cited-only",
+                "--model", "Stub-Model", "--endpoint", "https://stub:1/v1",
+            ])
+        output = buffer.getvalue()
+        assert code == 0
+        assert "Stub-Model@stub:1" in output, "the named model must be the engine's identity"
+        assert seen["closed"] is True, "the backend is closed even on the happy path"
+        assert seen["kwargs"]["timeout"] > BACKEND_DEFAULT_TIMEOUT, (
+            "the derived timeout must reach the client; 300 s is what killed the first live run"
+        )
+        assert reply not in output, (
+            "the report is aggregates: a description is the document's own prose and may not "
+            "be printed (AGENTS.md §1.9)"
+        )
+
+        records = [
+            json.loads(line)
+            for line in (tmp_path / "derived" / "summaries.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        assert len(records) == 1
+        assert records[0]["model"] == "Stub-Model@stub:1"
+        assert records[0]["output_chars"] == len(reply)
+        assert _pending(tmp_path) == 0, "the item was worked, not left queued"
+
+        index = CorpusIndex(index_path)
+        try:
+            derived = index._conn.execute(  # noqa: SLF001
+                "SELECT COUNT(*) FROM text_chunks WHERE derived = 1"
+            ).fetchone()[0]
+        finally:
+            index.close()
+        assert derived > 0, "a description nobody can search for is a description nobody reads"
+
+    def test_a_second_run_costs_no_model_call(self, tmp_path: Path, monkeypatch) -> None:
+        """A description already paid for is a cache hit — the whole point of a derivation key."""
+        import io
+        from contextlib import redirect_stdout
+
+        corpus, index_path = _corpus(tmp_path)
+        plan = _plan(tmp_path)
+        calls: list[int] = []
+
+        class StubBackend:
+            def __init__(self, **kwargs):
+                pass
+
+            def chat(self, messages, **kwargs):
+                calls.append(1)
+                return "A description of a text document."
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("rlm_local.model_backend.HTTPModelBackend", StubBackend)
+        argv = [
+            "summarise", "--corpus-root", str(corpus), "--corpus-index", str(index_path),
+            "--plan", str(plan), "--limit", "1", "--cited-only",
+            "--model", "Stub-Model", "--endpoint", "https://stub:1/v1",
+        ]
+        with redirect_stdout(io.StringIO()):
+            assert main(argv) == 0
+            assert main(argv) == 0
+        assert len(calls) == 1, "the second run must be served from the cache"
 
 
 class TestThePlanIsReadTolerantlyAndReported:

@@ -3509,6 +3509,27 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_malformed_row_is_dropped_and_counted",
         ],
     ),
+    # ── RO6: the client timeout must cover the kernel's input cap (2026-09-23) ────────
+    (
+        "RO6 the summariser timeout is left at the client's default",
+        "src/rlm_local/summarise.py",
+        "    return round((prompt_seconds + decode_seconds) * SUMMARY_TIMEOUT_SAFETY, 1)",
+        "    return BACKEND_DEFAULT_TIMEOUT",
+        [
+            "tests/test_summarise_engine.py::TestTheTimeoutCoversTheCap"
+            "::test_it_is_derived_from_the_kernels_cap_and_bound",
+        ],
+    ),
+    (
+        "RO6 the derived timeout never reaches the client",
+        "src/rlm_local/cli.py",
+        "                timeout=timeout,",
+        "                timeout=300.0,",
+        [
+            "tests/test_cli_summarise.py::TestTheCommandWithAStubBackend"
+            "::test_one_document_is_described_logged_and_indexed",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

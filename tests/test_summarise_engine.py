@@ -14,7 +14,16 @@ from pathlib import Path
 
 import pytest
 
-from rlm_local.summarise import append_record, engine_tag_for, make_summarise_engine
+from rlm_local.summarise import (
+    BACKEND_DEFAULT_TIMEOUT,
+    DECODE_TOKENS_PER_SECOND,
+    PROMPT_TOKENS_PER_SECOND,
+    append_record,
+    engine_tag_for,
+    make_summarise_engine,
+    summarise_timeout_seconds,
+)
+from rlm_local.summary_metrics import CHARS_PER_TOKEN
 
 DOCUMENT = (
     "Zanzibaricum ferromagnetic sprocket calibration notes, revision nine. "
@@ -40,6 +49,51 @@ class FakeBackend:
         if self.error is not None:
             raise self.error
         return self.reply
+
+
+class TestTheTimeoutCoversTheCap:
+    """Two bounds that contradicted each other, and the run it cost.
+
+    The kernel caps a summary's input; the HTTP client caps how long one call may take. Each is
+    reasonable alone, and together they guaranteed that the largest documents — the ones most
+    worth describing — would fail.
+    """
+
+    def _modelled(self, input_chars: int, max_tokens: int) -> float:
+        return (
+            (input_chars / CHARS_PER_TOKEN) / PROMPT_TOKENS_PER_SECOND
+            + max_tokens / DECODE_TOKENS_PER_SECOND
+        )
+
+    def test_it_is_derived_from_the_kernels_cap_and_bound(self) -> None:
+        from rlm_kernel.mine import MAX_SUMMARY_INPUT_BYTES, SUMMARY_MAX_TOKENS
+
+        derived = summarise_timeout_seconds(MAX_SUMMARY_INPUT_BYTES, SUMMARY_MAX_TOKENS)
+        assert derived > self._modelled(MAX_SUMMARY_INPUT_BYTES, SUMMARY_MAX_TOKENS), (
+            "the safety factor must leave room above the modelled cost"
+        )
+        assert derived > BACKEND_DEFAULT_TIMEOUT, (
+            "the client's own default is exactly what killed the first live call"
+        )
+
+    def test_it_would_have_covered_the_first_live_call(self) -> None:
+        """Measured 2026-09-23: `ReadTimeout` after 901.9 s on a 30 838-character document.
+
+        Two things are pinned here. The incident must be *explained* by these constants — three
+        300 s attempts were not enough for a document that size — and the derived default must
+        cover it. If someone changes the throughput figures, the explanation stops holding and
+        this test says so rather than leaving a story that no longer adds up.
+        """
+        from rlm_kernel.mine import MAX_SUMMARY_INPUT_BYTES, SUMMARY_MAX_TOKENS
+
+        modelled = self._modelled(30_838, SUMMARY_MAX_TOKENS)
+        assert modelled > BACKEND_DEFAULT_TIMEOUT * 3, (
+            "the incident is only explained if three 300 s attempts were too few"
+        )
+        assert summarise_timeout_seconds(MAX_SUMMARY_INPUT_BYTES, SUMMARY_MAX_TOKENS) > modelled
+
+    def test_a_smaller_cap_means_a_shorter_timeout(self) -> None:
+        assert summarise_timeout_seconds(4096, 400) < summarise_timeout_seconds(32768, 400)
 
 
 class TestWhatItSends:
