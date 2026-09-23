@@ -845,6 +845,47 @@ def _engine_tag(engine: Any) -> str:
     return str(tag) if tag else "default"
 
 
+def _index_summary(
+    ctx: TaskContext, rel: str, source_hash: str, key: str, summary: str, engine_name: str,
+) -> TaskOutcome:
+    """Store a description in the text index, under the **cache** origin.
+
+    `ORIGIN_CACHE` is this repository's convention for a derived artefact, and here it is what
+    makes the description exist at all: `add_text` is idempotent on `(raw, origin)` and defaults
+    to the *file* origin, so a description of a document the mining windows had already indexed
+    as plain text was silently dropped — and then recorded as an empty reply. Measured
+    2026-09-23: two descriptions were paid for, cached, and never stored, and the queue said
+    `empty_summary` about both. A lie in the queue about work that did happen is worse than a
+    failure, because nothing goes red.
+
+    A reply too short to become a chunk is not an error either: the description happened and is
+    cached, so it is a `done` row carrying the reason rather than a skip that suggests nothing
+    occurred.
+    """
+    if ctx.text_index is None:
+        return TaskOutcome(DONE, "not_indexed")
+    try:
+        chunks = ctx.text_index.add_text(
+            raw=_bytes_of(rel),
+            display=_index_display(rel),
+            source_hash=source_hash,
+            text=summary.encode("utf-8"),
+            origin=ORIGIN_CACHE,
+            cache_task=SUMMARISE,
+            cache_key=key,
+            derived=True,
+            engine=engine_name,
+        )
+    except (UnicodeEncodeError, sqlite3.Error) as e:
+        return TaskOutcome(FAILED, type(e).__name__)
+    if chunks:
+        return TaskOutcome(DONE, None, None, chunks)
+    # Nothing written, and the description was not empty (that is rejected before we get here):
+    # the only way `add_text` returns nothing for non-empty text is that this `(raw, origin)`
+    # pair is already stored, so say that rather than inventing a second explanation.
+    return TaskOutcome(DONE, "already_indexed")
+
+
 def task_summarise(ctx: TaskContext, rel: str, size: int, source_hash: str) -> TaskOutcome:
     """Describe one document, so the corpus can be *navigated* rather than read (RO6).
 
@@ -855,10 +896,12 @@ def task_summarise(ctx: TaskContext, rel: str, size: int, source_hash: str) -> T
     description, and never a silent zero.
 
     A summary already paid for is a cache hit and costs no model call; the reply is indexed
-    as **derived** text under the document's own display, so `corpus_search` can find the
-    description and the address it is filed under still resolves to the document. Indexing is
-    skipped when there is no text index, but *the summary is still made and cached* — the
-    description is the deliverable, the index is how it becomes reachable.
+    as **derived** text under the cache origin, so `corpus_search` can find the description
+    while the document's own chunks stay its own. A cache hit still *ensures* the description
+    is findable, because the index can be rebuilt or an earlier version of this task can have
+    failed to store it: a description that was paid for and cannot be searched for is the
+    failure this path exists to prevent. Indexing is skipped when there is no text index, but
+    *the summary is still made and cached*.
     """
     engine = ctx.engines.get("summarise")
     if engine is None:
@@ -866,6 +909,13 @@ def task_summarise(ctx: TaskContext, rel: str, size: int, source_hash: str) -> T
     cache = DerivationCache(ctx.cache_root, SUMMARISE)
     key = cache.key(source_hash, params=f"summary<=v1,400tok,{_engine_tag(engine)}")
     if cache.has(key):
+        cached = cache.get(key)
+        if cached is not None:
+            summary, meta = cached
+            outcome = _index_summary(ctx, rel, source_hash, key, summary,
+                                    str((meta or {}).get("engine", "cache")))
+            if outcome.state == FAILED:
+                return outcome
         return TaskOutcome(DONE, "cache")
     if size < MIN_SUMMARY_INPUT_BYTES:
         return TaskOutcome(SKIPPED, "too_short_to_summarise")
@@ -899,22 +949,8 @@ def task_summarise(ctx: TaskContext, rel: str, size: int, source_hash: str) -> T
     )
     if ctx.text_index is None:
         return TaskOutcome(DONE, "not_indexed")
-    try:
-        chunks = ctx.text_index.add_text(
-            raw=_bytes_of(rel),
-            display=_index_display(rel),
-            source_hash=source_hash,
-            text=summary.encode("utf-8"),
-            cache_task=SUMMARISE,
-            cache_key=key,
-            derived=True,
-            engine=str((meta or {}).get("engine", "summarise")),
-        )
-    except (UnicodeEncodeError, sqlite3.Error) as e:
-        return TaskOutcome(FAILED, type(e).__name__)
-    if not chunks:
-        return TaskOutcome(SKIPPED, "empty_summary")
-    return TaskOutcome(DONE, None, None, chunks)
+    return _index_summary(ctx, rel, source_hash, key, summary,
+                          str((meta or {}).get("engine", "summarise")))
 
 
 def task_index_text(ctx: TaskContext, rel: str, size: int, source_hash: str) -> TaskOutcome:

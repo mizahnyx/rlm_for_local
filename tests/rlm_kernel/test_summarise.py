@@ -171,6 +171,66 @@ class TestItSummarisesByValue:
         assert len(second.calls) == 1, "the second model must actually do the work"
 
 
+    def test_a_description_is_stored_even_when_the_document_is_already_indexed(self, context) -> None:
+        """The bug the first live run found (2026-09-23).
+
+        `add_text` is idempotent on `(raw, origin)` and defaults to the **file** origin, so for a
+        document the mining windows had already indexed as plain text, the description collided
+        with the document's own bytes and was never stored — and the item was recorded as
+        `empty_summary`, a lie about work that had actually happened. Two descriptions were paid
+        for and vanished that way before this test existed.
+        """
+        from rlm_kernel.textindex import ORIGIN_CACHE, TextIndex
+
+        ctx, store, _index, corpus = context
+        ctx.engines["summarise"] = Fake()
+        ctx.text_index = TextIndex(store._conn)  # noqa: SLF001
+        ctx.text_index.ensure()
+        # The document's own text, indexed as a *file* — what a mining window does.
+        ctx.text_index.add_text(
+            raw=b"long.txt", display="long.txt", source_hash="hash-long",
+            text=(corpus / "long.txt").read_bytes(),
+        )
+        size = (corpus / "long.txt").stat().st_size
+        outcome = task_summarise(ctx, "long.txt", size, "hash-long")
+        assert outcome.state == DONE, outcome.note
+        assert outcome.note is None, "a stored description is not an empty reply"
+        stored = store._conn.execute(  # noqa: SLF001
+            "SELECT COUNT(*) FROM text_chunks WHERE source_hash = ? AND origin = ?",
+            ("hash-long", ORIGIN_CACHE),
+        ).fetchone()[0]
+        assert stored > 0, "the description must be findable under the cache origin"
+
+    def test_a_cache_hit_still_puts_the_description_in_the_index(self, context) -> None:
+        """A description that was paid for must not stay unreachable.
+
+        The first call here has no index attached, so the description is cached and not stored —
+        exactly the state that an index rebuilt, or a task that failed to store, leaves behind.
+        The second call is a cache hit that must still make it findable, and must still *count*
+        as a cache hit, because that count is how a run reports what it saved.
+        """
+        from rlm_kernel.textindex import ORIGIN_CACHE, TextIndex
+
+        ctx, store, _index, corpus = context
+        engine = Fake()
+        ctx.engines["summarise"] = engine
+        size = (corpus / "long.txt").stat().st_size
+        first = task_summarise(ctx, "long.txt", size, "hash-long")
+        assert first.state == DONE and first.note == "not_indexed"
+        assert len(engine.calls) == 1
+
+        ctx.text_index = TextIndex(store._conn)  # noqa: SLF001
+        ctx.text_index.ensure()
+        second = task_summarise(ctx, "long.txt", size, "hash-long")
+        assert second.note == "cache", "it is still a cache hit: no model call was made"
+        assert len(engine.calls) == 1
+        stored = store._conn.execute(  # noqa: SLF001
+            "SELECT COUNT(*) FROM text_chunks WHERE source_hash = ? AND origin = ?",
+            ("hash-long", ORIGIN_CACHE),
+        ).fetchone()[0]
+        assert stored > 0, "the cached description is now stored, not merely paid for"
+
+
 class TestTheQueueHandsTheEngineOver:
     """The wiring that did not exist until now."""
 

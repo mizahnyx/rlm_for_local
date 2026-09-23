@@ -161,6 +161,14 @@ class TestAggregatesAndProjections:
         assert entry["seconds_median"] == 90.0
         assert entry["seconds_total"] == 180.0
 
+    def test_the_spread_is_reported_because_the_first_call_is_not_like_the_rest(self) -> None:
+        """A router loads a model on demand, so the first description of a run can include the
+        load. A median of three can hide exactly that, and a cost the operator plans with must
+        not hide it."""
+        entry = aggregate(self._records())["models"]["m"]
+        assert entry["seconds_min"] == 60.0
+        assert entry["seconds_max"] == 120.0
+
     def test_projections_are_arithmetic_on_the_measurement(self) -> None:
         entry = aggregate(self._records())["models"]["m"]
         projection = projections(entry, documents=240)

@@ -3530,6 +3530,27 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_one_document_is_described_logged_and_indexed",
         ],
     ),
+    # ── RO6: a description must actually be stored (2026-09-23, found live) ────────────
+    (
+        "RO6 a description is stored under the file origin, so it collides and vanishes",
+        "src/rlm_kernel/mine.py",
+        "            origin=ORIGIN_CACHE,\n            cache_task=SUMMARISE,",
+        "            cache_task=SUMMARISE,",
+        [
+            "tests/rlm_kernel/test_summarise.py::TestItSummarisesByValue"
+            "::test_a_description_is_stored_even_when_the_document_is_already_indexed",
+        ],
+    ),
+    (
+        "RO6 a cache hit leaves the description out of the index",
+        "src/rlm_kernel/mine.py",
+        "        cached = cache.get(key)\n        if cached is not None:",
+        "        cached = None\n        if cached is not None:",
+        [
+            "tests/rlm_kernel/test_summarise.py::TestItSummarisesByValue"
+            "::test_a_cache_hit_still_puts_the_description_in_the_index",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
