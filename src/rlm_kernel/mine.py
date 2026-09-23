@@ -549,6 +549,13 @@ class TaskContext:
     engines: dict[str, Callable[..., tuple[str, dict[str, Any]]]] = field(
         default_factory=dict
     )
+    """Injected engines by name — `pdf`, `zip_document`, `libarchive_members`,
+    `libarchive_text`, `summarise`. A task falls back to its own built-in when its name is
+    absent; `summarise` has no built-in and reports `no_summarise_engine` rather than
+    inventing a description. An engine whose output is cached under a derivation key should
+    carry `engine_tag` (the model that produced it): the tag is part of the key, so without
+    one a second model is served the first model's work in silence.
+    """
     text_index: Any = None
     """The `TextIndex`, when one is attached. Tasks that produce or find text
     feed it; a run without one still extracts, and says so rather than pretending
@@ -820,6 +827,24 @@ SUMMARY_MAX_TOKENS = 400
 MIN_SUMMARY_INPUT_BYTES = 512
 
 
+def _engine_tag(engine: Any) -> str:
+    """The identity of an injected engine, as it belongs in a derivation key.
+
+    A description written by one model must never be served as another's. Configure the
+    summariser to a second model and, without this, every document the first model already
+    described would be a **cache hit** — the run would look like a success, the summaries
+    would be the old model's, and nothing would go red. That is the same silent substitution
+    the mnemonic aliases exist to prevent, one layer down: a wrong answer that arrives fast.
+
+    So the engine carries its own identity (`engine_tag`, set by whoever builds it) and the
+    key names it. An engine without one is `default`, which is the honest answer — from here
+    two untagged engines are indistinguishable, and pretending otherwise would be a
+    different costume on the same failure.
+    """
+    tag = getattr(engine, "engine_tag", "")
+    return str(tag) if tag else "default"
+
+
 def task_summarise(ctx: TaskContext, rel: str, size: int, source_hash: str) -> TaskOutcome:
     """Describe one document, so the corpus can be *navigated* rather than read (RO6).
 
@@ -839,7 +864,7 @@ def task_summarise(ctx: TaskContext, rel: str, size: int, source_hash: str) -> T
     if engine is None:
         return TaskOutcome(SKIPPED, "no_summarise_engine")
     cache = DerivationCache(ctx.cache_root, SUMMARISE)
-    key = cache.key(source_hash, params="summary<=v1,400tok")
+    key = cache.key(source_hash, params=f"summary<=v1,400tok,{_engine_tag(engine)}")
     if cache.has(key):
         return TaskOutcome(DONE, "cache")
     if size < MIN_SUMMARY_INPUT_BYTES:
@@ -1279,6 +1304,7 @@ def run_queue(
     mount: LocalTreeMount,
     cache_root: Path,
     tasks: Iterable[str] = IMPLEMENTED_TASKS,
+    engines: dict[str, Any] | None = None,
     budget_seconds: float | None = None,
     deadline: float | None = None,
     max_items: int | None = None,
@@ -1307,7 +1333,7 @@ def run_queue(
     started = now()
     stats = MineStats()
     ctx = TaskContext(mount=mount, store=store, cache_root=Path(cache_root),
-                      text_index=text_index)
+                      engines=dict(engines or {}), text_index=text_index)
     wanted = [task for task in tasks]
     stop_reason = "queue_empty"
 

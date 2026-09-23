@@ -3437,6 +3437,26 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_cache_hit_costs_no_model_call",
         ],
     ),
+    (
+        "RO6 a second model is served the first model's summaries",
+        "src/rlm_kernel/mine.py",
+        'params=f"summary<=v1,400tok,{_engine_tag(engine)}"',
+        'params="summary<=v1,400tok,default"',
+        [
+            "tests/rlm_kernel/test_summarise.py::TestItSummarisesByValue"
+            "::test_one_model_is_not_served_another_models_description",
+        ],
+    ),
+    (
+        "RO6 a window cannot be handed an engine",
+        "src/rlm_kernel/mine.py",
+        "engines=dict(engines or {})",
+        "engines={}",
+        [
+            "tests/rlm_kernel/test_summarise.py::TestTheQueueHandsTheEngineOver"
+            "::test_run_queue_reaches_the_summarise_engine",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
