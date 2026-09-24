@@ -3551,6 +3551,37 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_cache_hit_still_puts_the_description_in_the_index",
         ],
     ),
+    # ── RO6: a call in flight must be visible, and must not count as a call (2026-09-24) ──
+    (
+        "RO6 a call in flight leaves no record behind",
+        "src/rlm_local/summarise.py",
+        "        if log_path is not None:\n"
+        "            # Written *before* the call. A cold prompt on this host runs for tens of "
+        "minutes, and\n"
+        "            # a log that only receives a line at the end makes a call in flight "
+        "indistinguishable\n"
+        "            # from a call that never happened (`summary_metrics.start_record`).",
+        "        if False:\n"
+        "            # Written *before* the call. A cold prompt on this host runs for tens of "
+        "minutes, and\n"
+        "            # a log that only receives a line at the end makes a call in flight "
+        "indistinguishable\n"
+        "            # from a call that never happened (`summary_metrics.start_record`).",
+        [
+            "tests/test_summarise_engine.py::TestACallInFlightIsVisible"
+            "::test_a_start_row_is_written_before_the_call",
+        ],
+    ),
+    (
+        "RO6 a start row is counted as a call",
+        "src/rlm_local/summary_metrics.py",
+        '        group = [record for record in all_records if record.get("kind") != "start"]',
+        "        group = list(all_records)",
+        [
+            "tests/test_summary_metrics.py::TestACallInFlightIsVisible"
+            "::test_a_start_row_is_not_counted_as_a_call",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

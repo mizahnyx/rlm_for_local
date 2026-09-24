@@ -160,8 +160,9 @@ class TestTheCommandWithAStubBackend:
             for line in (tmp_path / "derived" / "summaries.jsonl").read_text(
                 encoding="utf-8"
             ).splitlines()
+            if json.loads(line).get("kind") != "start"
         ]
-        assert len(records) == 1
+        assert len(records) == 1, "one completed call"
         assert records[0]["model"] == "Stub-Model@stub:1"
         assert records[0]["output_chars"] == len(reply)
         assert _pending(tmp_path) == 0, "the item was worked, not left queued"

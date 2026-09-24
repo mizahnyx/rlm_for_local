@@ -107,6 +107,21 @@ class TestTheIndexReadsTheSpread:
         assert [trace["call"] for trace in traces] == [1, 2]
         assert traces[1]["server"]["cache_n"] == 4996
 
+    def test_a_start_row_does_not_become_a_page(self, tmp_path: Path) -> None:
+        """A call in flight is reported by the aggregate, not rendered as a call of its own."""
+        from rlm_local.summary_metrics import start_record
+
+        log = tmp_path / "summaries.jsonl"
+        start = start_record(model="qwen@host:9010", started_at="2026-09-23T19:00:00+00:00",
+                             source=SOURCE, max_tokens=400)
+        log.write_text(json.dumps(start) + "\n" + json.dumps(_cold()) + "\n", encoding="utf-8")
+        out = tmp_path / "traces"
+        assert main(["--log", str(log), "--out-dir", str(out)]) == 0
+        assert (out / "call-001.md").exists()
+        assert not (out / "call-002.md").exists(), "a start row is not a call"
+        traces = (out / "traces.jsonl").read_text(encoding="utf-8").strip().splitlines()
+        assert len(traces) == 1
+
     def test_an_out_dir_inside_the_corpus_is_refused(self, tmp_path: Path) -> None:
         log = tmp_path / "summaries.jsonl"
         log.write_text(json.dumps(_cold()) + "\n", encoding="utf-8")

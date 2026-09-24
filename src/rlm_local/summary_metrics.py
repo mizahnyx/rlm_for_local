@@ -183,6 +183,7 @@ def measure(
     call in time beside the run it belongs to.
     """
     return {
+        "kind": "end",
         "model": str(model),
         "seconds": round(float(seconds), 3),
         "started_at": started_at,
@@ -200,6 +201,29 @@ def measure(
         "error": error,
         "server": _server_block(usage, timings),
         "client_residual_seconds": _residual(seconds, timings),
+    }
+
+
+def start_record(
+    *, model: str, started_at: str, source: str, max_tokens: int,
+) -> dict[str, Any]:
+    """A row written **before** a call, so a call in flight is visible while it runs.
+
+    The first live run made this necessary rather than tidy: the log only received a line when a
+    call ended, so a 30-minute cold prompt looked exactly like a call that had never started, and
+    the only way to tell was to watch the server's CPU. The cold probe then sat in that state for
+    17 minutes with nothing in the log to say so.
+
+    It carries the same identifiers as its completion — model, `started_at`, input size, bound —
+    so a reader pairs them by `(model, started_at)`, and a start with no completion is a call that
+    is still running, or one that was killed. It quotes nothing, like everything else here.
+    """
+    return {
+        "kind": "start",
+        "model": str(model),
+        "started_at": started_at,
+        "input_chars": len(source),
+        "max_tokens": int(max_tokens),
     }
 
 
@@ -237,12 +261,24 @@ def aggregate(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
     documents in three has a cost per *answer*, not per attempt.
     """
     materialised = list(records)
+    # A `start` row is not a call: it says one *began*. Counting it as a call would put a 0.0 s
+    # duration into the medians and a phantom empty reply into the failure counts — and a start
+    # with no completion is the interesting row, because it is a call still running or killed.
+    starts = [record for record in materialised if record.get("kind") == "start"]
+    completed = [record for record in materialised if record.get("kind") != "start"]
+    finished = {(str(r.get("model", "unknown")), r.get("started_at")) for r in completed}
+    in_flight: collections.Counter[str] = collections.Counter(
+        str(record.get("model", "unknown"))
+        for record in starts
+        if (str(record.get("model", "unknown")), record.get("started_at")) not in finished
+    )
     by_model: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
     for record in materialised:
         by_model[str(record.get("model", "unknown"))].append(record)
 
     models: dict[str, Any] = {}
-    for model, group in sorted(by_model.items()):
+    for model, all_records in sorted(by_model.items()):
+        group = [record for record in all_records if record.get("kind") != "start"]
         usable = [
             record
             for record in group
@@ -252,6 +288,7 @@ def aggregate(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
         inputs = [float(record.get("input_chars", 0)) for record in usable]
         entry: dict[str, Any] = {
             "attempted": len(group),
+            "in_flight": int(in_flight.get(model, 0)),
             "usable": len(usable),
             "failed": sum(1 for record in group if record.get("error")),
             "torn": sum(1 for record in group if record.get("torn")),
@@ -333,7 +370,7 @@ def aggregate(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
             entry["seconds_per_kib"] = None
         models[model] = entry
 
-    return {"models": models, "records": len(materialised)}
+    return {"models": models, "records": len(materialised), "in_flight": sum(in_flight.values())}
 
 
 def projections(entry: dict[str, Any], *, documents: int) -> dict[str, Any]:
@@ -367,6 +404,11 @@ def render(agg: dict[str, Any], *, scale: str = "", sets: dict[str, int] | None 
             f"    attempted {entry['attempted']}, usable {entry['usable']}, "
             f"failed {entry['failed']}, empty {entry['empty']}, torn {entry['torn']}"
         )
+        if entry.get("in_flight"):
+            lines.append(
+                f"    **{entry['in_flight']} call(s) started with no completion** — running now, "
+                "or killed before they ended"
+            )
         if entry["seconds_median"] is not None:
             lines.append(
                 f"    median {entry['seconds_median']}s per document "

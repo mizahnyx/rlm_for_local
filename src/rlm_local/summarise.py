@@ -26,7 +26,7 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from rlm_local.model_backend import ModelBackend
-from rlm_local.summary_metrics import CHARS_PER_TOKEN, measure
+from rlm_local.summary_metrics import CHARS_PER_TOKEN, measure, start_record
 from rlm_local.templates import SUMMARY_PROMPT, SUMMARY_SYSTEM
 
 #: Published host throughput (`AGENTS.md` §4), and the reason the timeout below is computed
@@ -135,6 +135,17 @@ def make_summarise_engine(
                 "content": SUMMARY_PROMPT.format(document=text, max_tokens=max_tokens),
             },
         ]
+        if log_path is not None:
+            # Written *before* the call. A cold prompt on this host runs for tens of minutes, and
+            # a log that only receives a line at the end makes a call in flight indistinguishable
+            # from a call that never happened (`summary_metrics.start_record`).
+            append_record(
+                log_path,
+                start_record(
+                    model=resolved_tag, started_at=started_at, source=text,
+                    max_tokens=max_tokens,
+                ),
+            )
         try:
             detailed = getattr(backend, "chat_detailed", None)
             if detailed is not None:

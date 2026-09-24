@@ -23,6 +23,7 @@ from rlm_local.summary_metrics import (
     projections,
     read_log,
     render,
+    start_record,
 )
 
 SOURCE = (
@@ -61,6 +62,42 @@ class TestItCarriesNoText:
         assert record["output_chars"] == len("Replytoken describes a turbine retrofit.")
         assert record["seconds"] == 12.5
         assert record["compression"] > 0
+
+
+class TestACallInFlightIsVisible:
+    """A call that has not finished is a fact, not an absence — and not a zero."""
+
+    def test_a_start_row_is_not_counted_as_a_call(self) -> None:
+        start = start_record(model="m", started_at="2026-09-23T19:00:00+00:00", source=SOURCE,
+                             max_tokens=400)
+        end = measure(model="m", seconds=10.0, source=SOURCE, summary="turbine notes",
+                      max_tokens=400, started_at="2026-09-23T19:00:00+00:00",
+                      finished_at="2026-09-23T19:00:10+00:00")
+        agg = aggregate([start, end])
+        assert agg["records"] == 2
+        assert agg["models"]["m"]["attempted"] == 1, "the start row is not a second call"
+        assert agg["models"]["m"]["usable"] == 1
+        assert agg["models"]["m"]["seconds_median"] == 10.0, (
+            "a start row counted as a call would drag the median toward zero"
+        )
+        assert agg["models"]["m"]["in_flight"] == 0
+
+    def test_a_start_with_no_completion_is_reported_as_in_flight(self) -> None:
+        start = start_record(model="m", started_at="2026-09-23T19:00:00+00:00", source=SOURCE,
+                             max_tokens=400)
+        agg = aggregate([start])
+        assert agg["in_flight"] == 1
+        assert agg["models"]["m"]["in_flight"] == 1
+        assert agg["models"]["m"]["attempted"] == 0
+        assert "started with no completion" in render(agg)
+
+    def test_a_start_row_quotes_nothing(self) -> None:
+        record = start_record(model="m", started_at="2026-09-23T19:00:00+00:00", source=SOURCE,
+                              max_tokens=400)
+        serialised = json.dumps(record)
+        for word in content_words(SOURCE):
+            if len(word) >= 6:
+                assert word.lower() not in serialised.lower()
 
 
 class TestTheServersOwnAccount:

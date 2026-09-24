@@ -194,7 +194,7 @@ class TestItRecordsWhatTheServerSaid:
         assert meta["server"]["prompt_n"] == 4
         assert meta["server"]["cache_n"] == 4996
         assert meta["client_residual_seconds"] is not None
-        record = json.loads(log.read_text(encoding="utf-8").strip())
+        record = json.loads(log.read_text(encoding="utf-8").strip().splitlines()[-1])
         assert record["server"]["predicted_ms"] == 25000.0
         assert record["started_at"] and record["finished_at"], "a trace must place the call in time"
 
@@ -203,7 +203,45 @@ class TestItRecordsWhatTheServerSaid:
         engine = make_summarise_engine(FakeBackend(), model="qwen", log_path=log)
         _summary, meta = engine(DOCUMENT, 400)
         assert meta["server"] is None, "a backend that reports nothing must not look measured"
-        assert json.loads(log.read_text(encoding="utf-8").strip())["server"] is None
+        end = json.loads(log.read_text(encoding="utf-8").strip().splitlines()[-1])
+        assert end["server"] is None
+
+
+class TestACallInFlightIsVisible:
+    """A cold prompt runs for tens of minutes; the log has to say a call began."""
+
+    def test_a_start_row_is_written_before_the_call(self, tmp_path: Path) -> None:
+        log = tmp_path / "summaries.jsonl"
+        engine = make_summarise_engine(FakeBackend(), model="qwen", log_path=log)
+        engine(DOCUMENT, 400)
+        text = log.read_text(encoding="utf-8")
+        records = [json.loads(line) for line in text.splitlines()]
+        assert [record["kind"] for record in records] == ["start", "end"], (
+            "a completion alone cannot be told apart from a call that never started"
+        )
+        assert records[0]["started_at"] == records[1]["started_at"], (
+            "start and completion are paired by (model, started_at)"
+        )
+        assert records[0]["input_chars"] == len(DOCUMENT)
+        assert records[0]["max_tokens"] == 400
+
+    def test_the_start_row_quotes_nothing_either(self, tmp_path: Path) -> None:
+        log = tmp_path / "summaries.jsonl"
+        make_summarise_engine(FakeBackend(), model="qwen", log_path=log)(DOCUMENT, 400)
+        text = log.read_text(encoding="utf-8").lower()
+        for word in ("zanzibaricum", "ferromagnetic", "calibration", "turbine"):
+            assert word not in text
+
+    def test_a_failing_call_still_leaves_its_start_behind(self, tmp_path: Path) -> None:
+        """The case the first run needed: the call was running when the client gave up."""
+        log = tmp_path / "summaries.jsonl"
+        engine = make_summarise_engine(FakeBackend(error=RuntimeError("router down")),
+                                       model="qwen", log_path=log)
+        with pytest.raises(RuntimeError):
+            engine(DOCUMENT, 400)
+        records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+        assert [record["kind"] for record in records] == ["start", "end"]
+        assert records[1]["error"] == "RuntimeError"
 
 
 class TestTheLogQuotesNothing:
@@ -214,8 +252,11 @@ class TestTheLogQuotesNothing:
                                        model="qwen", log_path=log)
         engine(DOCUMENT, 400)
         text = log.read_text(encoding="utf-8")
-        assert len(text.strip().splitlines()) == 1
-        record = json.loads(text.strip())
+        lines = text.strip().splitlines()
+        assert [json.loads(line)["kind"] for line in lines] == ["start", "end"], (
+            "two rows per call: one saying it began, one saying what it cost"
+        )
+        record = json.loads(lines[-1])
         assert record["model"] == "qwen"
         assert record["input_chars"] == len(DOCUMENT)
         for word in ("Zanzibaricum", "ferromagnetic", "calibration", "turbine"):
@@ -230,7 +271,7 @@ class TestTheLogQuotesNothing:
                                        model="qwen", log_path=log)
         with pytest.raises(RuntimeError):
             engine(DOCUMENT, 400)
-        record = json.loads(log.read_text(encoding="utf-8").strip())
+        record = json.loads(log.read_text(encoding="utf-8").strip().splitlines()[-1])
         assert record["error"] == "RuntimeError"
         assert record["output_chars"] == 0
 

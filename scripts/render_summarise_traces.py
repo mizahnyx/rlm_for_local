@@ -173,7 +173,11 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     records = read_log(args.log)
-    traces = [call_trace(record, index + 1) for index, record in enumerate(records)]
+    # `start` rows are not calls: each is paired with its completion by (model, started_at), and
+    # one with no completion is reported as in flight by the aggregate block rather than becoming
+    # a page of its own.
+    calls = [record for record in records if record.get("kind") != "start"]
+    traces = [call_trace(record, index + 1) for index, record in enumerate(calls)]
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     try:
