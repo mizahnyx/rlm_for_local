@@ -73,18 +73,21 @@ mutation to the guard's current text, then re-run to red:
 | `RO6 a summary already paid for is paid for again` | the cache-hit branch grew a body — it now also ensures the description is indexed |
 | `RO6 the metrics record carries a snippet of the document` | `measure`'s return dict gained `kind`, `server` and the residual |
 
-**Five remain outstanding.** None is established as coming from this session's work; each needs its
-guard located in the current code before the entry can be repaired, which is real work and not a
-guess:
+**The other five are repaired too**, each by locating its guard in the code that exists today and
+moving the mutation there — and each re-run to red on its own:
 
-- `RO3 mining: text files get queued for extraction they do not need` (`mine.py`)
-- `RO3 text: vendored matches stop being counted` (`textindex.py`)
-- `RO10 the band stops travelling with the address` (`repl.py`)
-- `the sample stops being reproducible from its seed` (`textindex.py` — target now appears twice)
-- `RO15 content routing is skipped for an unknown extension` (`mine.py`)
+| entry | why it went stale, where the mutation moved |
+|---|---|
+| `RO3 mining: text files get queued for extraction they do not need` | the extraction claim now uses `extract_like`/`extract_patterns` (`.rar` is claimed for both tasks), not `doc_like`/`patterns` |
+| `RO3 text: vendored matches stop being counted` | a comment was inserted between `if not include_vendored:` and the bounded count query, so the two-line target no longer sat together |
+| `RO10 the band stops travelling with the address` | the served payload gained a `provenance` key, so the three-line target became four lines |
+| `the sample stops being reproducible from its seed` | the target line now appears in two samplers; the mutation carries the following comment as context so it addresses one of them |
+| `RO15 content routing is skipped for an unknown extension` | routing gained `rar` → `libarchive`, so the routing dict in the target was a key out of date |
 
-Until each is repaired or deleted with a stated reason, those five guards are **unverified**, and
-the table's green line cannot be claimed.
+That is eight of eight, and **every repaired entry was run alone and went red**. What is *not* yet
+claimed is the table's green line: the full 281-guard run that found these predates the repairs, and
+a fresh full run is in flight. Until it returns clean, the honest statement is "eight problems
+found, eight repaired and individually verified" — not "the table is green".
 
 ## Not done, and why
 

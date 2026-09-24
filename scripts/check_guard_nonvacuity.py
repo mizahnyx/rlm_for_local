@@ -1434,8 +1434,8 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO3 mining: text files get queued for extraction they do not need",
         "src/rlm_kernel/mine.py",
-        "        f\"c.kind IN ('document', 'archive') AND ({doc_like})\", patterns,",
-        "        f\"c.kind IN ('document', 'archive', 'text') AND ({doc_like})\", patterns,",
+        "        f\"c.kind IN ('document', 'archive') AND ({extract_like})\", extract_patterns,",
+        "        f\"c.kind IN ('document', 'archive', 'text') AND ({extract_like})\", extract_patterns,",
         [
             "tests/rlm_kernel/test_mine.py::TestPlanningFromTheMap"
             "::test_it_queues_documents_and_archives_only",
@@ -1520,9 +1520,9 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         "RO3 text: vendored matches stop being counted",
         "src/rlm_kernel/textindex.py",
         "        if not include_vendored:\n"
-        "            row = self._conn.execute(",
+        "            # Bounded by the cap: the subquery stops after CAP+1 rows, so a common word costs",
         "        if False:\n"
-        "            row = self._conn.execute(",
+        "            # Bounded by the cap: the subquery stops after CAP+1 rows, so a common word costs",
         [
             "tests/rlm_kernel/test_textindex.py::TestVendoredRanking"
             "::test_vendored_matches_are_filtered_and_counted",
@@ -2043,10 +2043,12 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         "RO10 the band stops travelling with the address",
         "src/rlm_local/repl.py",
         "        payload = [{\"address\": address, \"band\": bands.get(address),\n"
-        "                    \"alias\": aliases.get(address)}\n"
+        "                    \"alias\": aliases.get(address),\n"
+        "                    \"provenance\": provenance_label(address)}\n"
         "                   for address in addresses]",
         "        payload = [{\"address\": address, \"band\": None,\n"
-        "                    \"alias\": aliases.get(address)}\n"
+        "                    \"alias\": aliases.get(address),\n"
+        "                    \"provenance\": provenance_label(address)}\n"
         "                   for address in addresses]",
         [
             "tests/test_corpus_repl.py::TestTheSandboxReportsWhatItServed"
@@ -2394,8 +2396,10 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "the sample stops being reproducible from its seed",
         "src/rlm_kernel/textindex.py",
-        "        picker = rng if rng is not None else random.Random()",
-        "        picker = random.Random()",
+        "        picker = rng if rng is not None else random.Random()\n"
+        "        # Two single-ended seeks rather than `MIN(id), MAX(id)`: see the docstring.",
+        "        picker = random.Random()\n"
+        "        # Two single-ended seeks rather than `MIN(id), MAX(id)`: see the docstring.",
         [
             "tests/rlm_kernel/test_textindex.py::TestRandomPassages"
             "::test_a_draw_is_reproducible_from_its_seed",
@@ -2934,7 +2938,8 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         "            return TaskOutcome(FAILED, type(e).__name__)\n"
         "        if by_content is None:\n"
         "            return TaskOutcome(SKIPPED, \"no_listing_engine\")\n"
-        "        engine = {\"zip\": \"zip\", \"tar\": \"tar\"}.get(by_content, \"stream\")",
+        "        engine = {\"zip\": \"zip\", \"tar\": \"tar\", \"rar\": \"libarchive\"}"
+        ".get(by_content, \"stream\")",
         "    else:\n"
         "        return TaskOutcome(SKIPPED, \"no_listing_engine\")",
         [
