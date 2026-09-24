@@ -84,10 +84,11 @@ moving the mutation there — and each re-run to red on its own:
 | `the sample stops being reproducible from its seed` | the target line now appears in two samplers; the mutation carries the following comment as context so it addresses one of them |
 | `RO15 content routing is skipped for an unknown extension` | routing gained `rar` → `libarchive`, so the routing dict in the target was a key out of date |
 
-That is eight of eight, and **every repaired entry was run alone and went red**. What is *not* yet
-claimed is the table's green line: the full 281-guard run that found these predates the repairs, and
-a fresh full run is in flight. Until it returns clean, the honest statement is "eight problems
-found, eight repaired and individually verified" — not "the table is green".
+That is eight of eight, and every repaired entry was run alone and went red. **The full table is
+green: 289 guards checked, 0 problems** — the count rose from 281 because this session added eight
+entries of its own. The order matters and is deliberate: the run that found the problems predates
+the repairs, so each repair was verified on its own first and the whole table re-run afterwards,
+rather than the table being assumed to have fixed itself by having been edited.
 
 ## Not done, and why
 
