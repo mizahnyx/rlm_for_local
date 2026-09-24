@@ -204,6 +204,23 @@ def measure(
     }
 
 
+def _served_from_cache(server: dict[str, Any] | None, *, threshold: float = 0.9) -> bool:
+    """True when the server reused **most** of the prompt, not merely a common prefix.
+
+    The distinction is the whole finding, so the test has to be strict. A *cold* call on this host
+    still reuses ~87 tokens — the system message — and pays 9 431 fresh ones at 5.38 tok/s: 29.6
+    minutes. Counting that as "served from the cache" would put a 29-minute call in the same column
+    as a 20-second one, which is the error this instrumentation exists to stop making (measured
+    2026-09-23). No server block answers False: absent evidence is not evidence of a hit.
+    """
+    if not server:
+        return False
+    fresh = float(server.get("prompt_n") or 0)
+    reused = float(server.get("cache_n") or server.get("cached_tokens") or 0)
+    total = fresh + reused
+    return total > 0 and reused >= threshold * total
+
+
 def start_record(
     *, model: str, started_at: str, source: str, max_tokens: int,
 ) -> dict[str, Any]:
@@ -301,13 +318,7 @@ def aggregate(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
             "seconds_total": round(sum(seconds), 1),
             "server_calls": sum(1 for record in usable if record.get("server")),
             "cached_prompt_calls": sum(
-                1
-                for record in usable
-                if record.get("server")
-                and (
-                    (record["server"].get("cache_n") or 0) > 0
-                    or (record["server"].get("cached_tokens") or 0) > 0
-                )
+                1 for record in usable if _served_from_cache(record.get("server"))
             ),
             "prompt_ms_median": _median(
                 [

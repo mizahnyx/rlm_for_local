@@ -66,10 +66,21 @@ def call_trace(record: dict[str, Any], position: int) -> dict[str, Any]:
     }
 
 
-def _served_from_cache(server: dict[str, Any] | None) -> bool:
+def _served_from_cache(server: dict[str, Any] | None, *, threshold: float = 0.9) -> bool:
+    """True when the server reused **most** of the prompt, not merely a common prefix.
+
+    The test has to be strict, because this column is the finding. A *cold* call on this host
+    still reuses ~87 tokens — the system message — and pays 9 431 fresh ones at 5.38 tok/s: 29.6
+    minutes. Counting that as cache-served would put a 29-minute call in the same column as a
+    20-second one, which is the error this instrumentation exists to stop making. Not knowing
+    (no server block) answers False: absent evidence is not evidence of a hit.
+    """
     if not server:
         return False
-    return bool((server.get("cache_n") or 0) > 0 or (server.get("cached_tokens") or 0) > 0)
+    fresh = float(server.get("prompt_n") or 0)
+    reused = float(server.get("cache_n") or server.get("cached_tokens") or 0)
+    total = fresh + reused
+    return total > 0 and reused >= threshold * total
 
 
 def render_page(trace: dict[str, Any], *, model: str = "") -> str:

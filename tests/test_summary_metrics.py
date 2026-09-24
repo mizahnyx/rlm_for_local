@@ -139,6 +139,21 @@ class TestTheServersOwnAccount:
         assert record["server"] is None
         assert record["client_residual_seconds"] is None
 
+    def test_a_reused_prefix_is_not_a_cache_hit(self) -> None:
+        """A cold call still reuses the system message — 87 tokens against 9 431 fresh ones.
+
+        Counting that as cache-served would put a 29.6-minute call in the same column as a
+        20-second one. This is the cold probe's own shape.
+        """
+        prefix_only = measure(
+            model="m", seconds=1773.3, source=SOURCE, summary="turbine notes", max_tokens=400,
+            timings={"prompt_ms": 1751603.0, "prompt_n": 9431, "cache_n": 87,
+                     "predicted_ms": 21213.0, "predicted_n": 45},
+        )
+        entry = aggregate([prefix_only])["models"]["m"]
+        assert entry["server_calls"] == 1
+        assert entry["cached_prompt_calls"] == 0
+
     def test_the_aggregate_counts_the_calls_the_cache_answered(self) -> None:
         cached = measure(
             model="m", seconds=30.0, source=SOURCE, summary="turbine calibration notes",

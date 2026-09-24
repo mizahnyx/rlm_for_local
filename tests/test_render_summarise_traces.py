@@ -92,6 +92,19 @@ class TestTheIndexReadsTheSpread:
         )
         assert "**1 served from the prompt cache** and 1 paid for a fresh prompt" in text
 
+    def test_a_reused_prefix_does_not_read_as_a_cache_hit(self) -> None:
+        """The cold probe's shape: 87 reused tokens against 9 431 fresh, 29.6 minutes."""
+        from rlm_local.summary_metrics import measure as measure_call
+
+        cold = measure_call(
+            model="qwen@host:9010", seconds=1773.3, source=SOURCE,
+            summary="Turbine calibration notes.", max_tokens=400,
+            timings={"prompt_ms": 1751603.0, "prompt_n": 9431, "cache_n": 87,
+                     "predicted_ms": 21213.0, "predicted_n": 45},
+        )
+        text = render_index([call_trace(cold, 1)], scale="s", summary="1 record(s)")
+        assert "**0 served from the prompt cache** and 1 paid for a fresh prompt" in text
+
     def test_it_writes_pages_and_a_jsonl_beside_the_corpus(self, tmp_path: Path) -> None:
         log = tmp_path / "summaries.jsonl"
         log.write_text(
