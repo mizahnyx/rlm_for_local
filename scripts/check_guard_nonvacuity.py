@@ -3582,6 +3582,17 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_start_row_is_not_counted_as_a_call",
         ],
     ),
+    # ── RO6: a summarise run must honour the same pause flag as the queue worker (2026-09-24) ──
+    (
+        "RO6 a summarise run ignores the pause flag the queue worker honours",
+        "src/rlm_local/cli.py",
+        "                    max_items=len(chosen), lock_file=lock_path, pause_file=pause_path,\n",
+        "                    max_items=len(chosen), lock_file=lock_path,\n",
+        [
+            "tests/test_cli_summarise.py::TestTheCommandWithAStubBackend"
+            "::test_a_paused_run_stops_before_any_model_call",
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

@@ -176,6 +176,47 @@ class TestTheCommandWithAStubBackend:
             index.close()
         assert derived > 0, "a description nobody can search for is a description nobody reads"
 
+    def test_a_paused_run_stops_before_any_model_call(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """`rlm mine pause` must stop this command too: both take the same mining lock.
+
+        The pause flag is how the queue worker is asked to stop between items, and a summarise
+        run holds the same lock — so a pause that stopped the worker while leaving this running
+        would be a promise the harness does not keep.
+        """
+        import io
+        from contextlib import redirect_stdout
+
+        corpus, index_path = _corpus(tmp_path)
+        plan = _plan(tmp_path)
+        calls: list[int] = []
+
+        class StubBackend:
+            def __init__(self, **kwargs):
+                pass
+
+            def chat(self, messages, **kwargs):
+                calls.append(1)
+                return "A description of a text document."
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("rlm_local.model_backend.HTTPModelBackend", StubBackend)
+        (tmp_path / "derived" / "mine.pause").write_text("paused\n", encoding="utf-8")
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = main([
+                "summarise", "--corpus-root", str(corpus), "--corpus-index", str(index_path),
+                "--plan", str(plan), "--limit", "1", "--cited-only",
+                "--model", "Stub-Model", "--endpoint", "https://stub:1/v1",
+            ])
+        assert code == 0
+        assert "stopped: paused" in buffer.getvalue()
+        assert calls == [], "a paused run must not call the model"
+        assert _pending(tmp_path) == 1, "the item is left queued, not worked"
+
     def test_a_second_run_costs_no_model_call(self, tmp_path: Path, monkeypatch) -> None:
         """A description already paid for is a cache hit — the whole point of a derivation key."""
         import io

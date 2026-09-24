@@ -513,6 +513,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_sum.add_argument("--cache-root", type=Path, default=None)
     p_sum.add_argument(
+        "--pause-file", type=Path, default=None,
+        help="Stop between items when this file exists (default: mine.pause beside the index — "
+             "the file `rlm mine pause` writes, which this command honours because it takes the "
+             "same mining lock)",
+    )
+    p_sum.add_argument(
         "--timeout", type=float, default=None,
         help="Seconds one description may take (default: derived from the kernel's input cap and "
              "output bound — a 32 KiB document is ~21 minutes of prompt on this host, so the "
@@ -1851,9 +1857,12 @@ def _cmd_summarise(args: argparse.Namespace) -> int:
             print("dry run: nothing enqueued, no model called")
             return 0
 
-        cache_root = Path(args.cache_root) if args.cache_root else base / "cache"
+        # The same three paths `mine run` uses, from the same helper: a summarise run takes the
+        # *mining* lock, so it has to honour the same pause flag. Otherwise `rlm mine pause`
+        # stops the queue worker and silently leaves this one running — a stop signal that works
+        # for one command and not the other is worse than none, because it is trusted.
+        cache_root, lock_path, pause_path = _mine_paths(args)
         log_path = Path(args.log) if args.log else base / "summaries.jsonl"
-        lock_path = base / "mine.lock"
 
         holder = acquire_lock(lock_path)
         if holder is None:
@@ -1902,7 +1911,8 @@ def _cmd_summarise(args: argparse.Namespace) -> int:
                 run = run_queue(
                     store=store, conn=index._conn, mount=mount, cache_root=cache_root,
                     tasks=[SUMMARISE], engines={"summarise": engine}, text_index=text_index,
-                    max_items=len(chosen), lock_file=lock_path, coverage_scan=False,
+                    max_items=len(chosen), lock_file=lock_path, pause_file=pause_path,
+                    coverage_scan=False,
                 )
                 print(f"stopped: {run.stop_reason} after {run.seconds:,.1f}s")
                 print(f"  done {run.stats.done:,}, skipped {run.stats.skipped:,}, "
