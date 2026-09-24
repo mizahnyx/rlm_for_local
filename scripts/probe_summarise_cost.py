@@ -47,6 +47,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--corpus-index", required=True)
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--n", type=int, default=3, help="documents to describe twice")
+    parser.add_argument(
+        "--offset", type=int, default=0,
+        help="skip this many ranked documents. Needed because every *readable* cited document "
+             "has already been described, so only a document further down the ranking is a "
+             "genuinely cold prompt",
+    )
+    parser.add_argument(
+        "--any", action="store_true",
+        help="draw from the whole value set rather than the cited documents only",
+    )
     parser.add_argument("--profile", default="laptop")
     parser.add_argument("--model", default=os.environ.get("RLM_MODEL"))
     parser.add_argument("--endpoint", default=os.environ.get("RLM_ENDPOINT"))
@@ -72,9 +82,14 @@ def main(argv: list[str] | None = None) -> int:
     max_tokens = args.max_tokens or SUMMARY_MAX_TOKENS
     timeout = args.timeout or summarise_timeout_seconds(MAX_SUMMARY_INPUT_BYTES, max_tokens)
 
-    candidates = [candidate for candidate in read_plan(args.plan) if candidate.cited][: args.n]
-    print(render_plan(read_plan(args.plan)))
-    print(f"probe: {len(candidates)} document(s), two calls each, timeout {timeout:g}s")
+    plan = read_plan(args.plan)
+    pool = plan if args.any else [candidate for candidate in plan if candidate.cited]
+    candidates = pool[args.offset: args.offset + args.n]
+    print(render_plan(plan))
+    print(
+        f"probe: {len(candidates)} document(s) (offset {args.offset} of {len(pool)} "
+        f"{'ranked' if args.any else 'cited'}), two calls each, timeout {timeout:g}s"
+    )
 
     mount = LocalTreeMount(args.corpus_root)
     backend = HTTPModelBackend(
