@@ -164,6 +164,48 @@ class TestTheEngineHasAnIdentity:
         assert meta["seconds"] >= 0.0
 
 
+class TestItRecordsWhatTheServerSaid:
+    """The cost spread is only explicable per call: how many prompt tokens were *fresh*."""
+
+    def test_a_backend_that_reports_timings_is_asked_for_them(self, tmp_path: Path) -> None:
+        from rlm_local.model_backend import ChatResult
+
+        class DetailedBackend:
+            def __init__(self) -> None:
+                self.calls: list[dict] = []
+
+            def chat_detailed(self, messages, **kwargs):
+                self.calls.append(kwargs)
+                return ChatResult(
+                    "Calibration notes for a turbine retrofit.",
+                    {"prompt_tokens": 5000, "completion_tokens": 33,
+                     "prompt_tokens_details": {"cached_tokens": 4996}},
+                    {"prompt_ms": 100.0, "prompt_n": 4, "predicted_ms": 25000.0,
+                     "predicted_n": 33, "cache_n": 4996},
+                )
+
+            def chat(self, *args, **kwargs):
+                raise AssertionError("chat() must not be used when the metadata is available")
+
+        log = tmp_path / "summaries.jsonl"
+        backend = DetailedBackend()
+        engine = make_summarise_engine(backend, model="qwen", log_path=log)
+        _summary, meta = engine(DOCUMENT, 400)
+        assert meta["server"]["prompt_n"] == 4
+        assert meta["server"]["cache_n"] == 4996
+        assert meta["client_residual_seconds"] is not None
+        record = json.loads(log.read_text(encoding="utf-8").strip())
+        assert record["server"]["predicted_ms"] == 25000.0
+        assert record["started_at"] and record["finished_at"], "a trace must place the call in time"
+
+    def test_a_backend_without_timings_records_unknown(self, tmp_path: Path) -> None:
+        log = tmp_path / "summaries.jsonl"
+        engine = make_summarise_engine(FakeBackend(), model="qwen", log_path=log)
+        _summary, meta = engine(DOCUMENT, 400)
+        assert meta["server"] is None, "a backend that reports nothing must not look measured"
+        assert json.loads(log.read_text(encoding="utf-8").strip())["server"] is None
+
+
 class TestTheLogQuotesNothing:
     def test_a_call_writes_one_record_and_no_document_text(self, tmp_path: Path) -> None:
         """§1.9 again, at the engine: the metrics log is the artefact that travels."""

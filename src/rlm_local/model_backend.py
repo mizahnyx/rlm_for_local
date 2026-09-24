@@ -61,6 +61,33 @@ class ModelBackendError(RuntimeError):
         self.body = body
 
 
+class ChatResult:
+    """A completion as the server described it: the text, and its own measurements.
+
+    `usage` and `timings` are `None` when the backend or the server does not report them. That is
+    not an error, and it must never become a zero: a missing measurement that reads as "0 ms of
+    prompt processing" is precisely the confident wrong answer this project keeps meeting
+    (`AGENTS.md` §1.8 corollary — a check that cannot see the truth must say unknown).
+    """
+
+    __slots__ = ("content", "usage", "timings")
+
+    def __init__(
+        self,
+        content: str,
+        usage: dict[str, Any] | None = None,
+        timings: dict[str, Any] | None = None,
+    ) -> None:
+        self.content = content
+        self.usage = usage
+        self.timings = timings
+
+    def __repr__(self) -> str:  # pragma: no cover - a debugging aid
+        return (f"ChatResult(content=<{len(self.content)} chars>, "
+                f"usage={'yes' if self.usage else 'no'}, "
+                f"timings={'yes' if self.timings else 'no'})")
+
+
 class ModelBackend(Protocol):
     """Protocol for model inference backends (§5.1)."""
 
@@ -220,7 +247,7 @@ class HTTPModelBackend:
         resp.raise_for_status()
         return resp
 
-    def chat(
+    def chat_detailed(
         self,
         messages: list[dict[str, str]],
         *,
@@ -228,24 +255,18 @@ class HTTPModelBackend:
         max_tokens: int = 1500,
         temperature: float = 0.0,
         response_schema: dict[str, Any] | None = None,
-    ) -> str:
-        """Send a chat completion request.
+    ) -> ChatResult:
+        """Send a chat completion and return the content **plus what the server measured**.
 
-        Args:
-            messages: List of {"role": ..., "content": ...} dicts.
-            tier: "root" or "sub" — selects endpoint/model.
-            max_tokens: Max completion tokens.
-            temperature: Sampling temperature (0 = deterministic).
-            response_schema: Optional JSON schema for constrained decoding.
+        `chat` throws away everything but the text, which is right for a run and wrong for a
+        measurement: llama-server reports `usage` (including `prompt_tokens_details.cached_tokens`)
+        and `timings` (`prompt_ms`/`prompt_n`, `predicted_ms`/`predicted_n`, `cache_n`) per
+        request. Those numbers are the only way to tell **prompt processing from decode**, and
+        therefore the only way to explain why describing two documents of the same size can take
+        29 s and 803 s — measured 2026-09-23, and unexplained until this was recorded.
 
-        Returns:
-            The assistant message content.
-
-        Raises:
-            ModelBackendError: the server answered but the payload had no
-                usable completion.
-            httpx.HTTPStatusError: the server returned an error status.
-            httpx.TransportError: the request never completed.
+        Nothing is added to the protocol: a caller that wants the metadata asks for it by name and
+        falls back to `chat` when the backend does not offer it.
         """
         endpoint = self._root_endpoint if tier == "root" else self._sub_endpoint
         model = self._root_model if tier == "root" else self._sub_model
@@ -280,7 +301,31 @@ class HTTPModelBackend:
                 body=resp.text,
             ) from e
 
-        return _extract_content(data, status=resp.status_code, body=resp.text)
+        usage = data.get("usage") if isinstance(data, dict) else None
+        timings = data.get("timings") if isinstance(data, dict) else None
+        return ChatResult(
+            content=_extract_content(data, status=resp.status_code, body=resp.text),
+            usage=usage if isinstance(usage, dict) else None,
+            timings=timings if isinstance(timings, dict) else None,
+        )
+
+    def chat(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        tier: str = "root",
+        max_tokens: int = 1500,
+        temperature: float = 0.0,
+        response_schema: dict[str, Any] | None = None,
+    ) -> str:
+        """Send a chat completion request and return the assistant message content.
+
+        See `chat_detailed` for the same call with the server's own measurements attached.
+        """
+        return self.chat_detailed(
+            messages, tier=tier, max_tokens=max_tokens, temperature=temperature,
+            response_schema=response_schema,
+        ).content
 
     def close(self) -> None:
         self._client.close()

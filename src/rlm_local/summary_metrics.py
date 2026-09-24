@@ -113,6 +113,54 @@ def cap_hit(summary: str, max_tokens: int, *, threshold: float = 0.9) -> bool:
     return estimated_tokens(summary) >= threshold * max_tokens
 
 
+def _server_block(
+    usage: dict[str, Any] | None, timings: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """The server's own account of a call, or `None` when it gave none.
+
+    llama-server reports `usage` (with `prompt_tokens_details.cached_tokens`) and a `timings`
+    object splitting prompt processing from decode. Fields are copied **by name and never
+    invented**: a missing field stays `None` rather than becoming a zero, because "0 ms of prompt
+    processing" is a confident wrong answer (`AGENTS.md` §1.8 corollary).
+
+    This is what makes a cost spread explicable at all. Without it, a call that took 29 s and one
+    that took 803 s look like the same event at different speeds; with it, one is 4 fresh prompt
+    tokens and the other is several thousand (measured 2026-09-23).
+    """
+    if not usage and not timings:
+        return None
+    usage = usage or {}
+    timings = timings or {}
+    details = usage.get("prompt_tokens_details") or {}
+    return {
+        "prompt_tokens": usage.get("prompt_tokens"),
+        "cached_tokens": details.get("cached_tokens"),
+        "completion_tokens": usage.get("completion_tokens"),
+        "prompt_ms": timings.get("prompt_ms"),
+        "prompt_n": timings.get("prompt_n"),
+        "prompt_tokens_per_second": timings.get("prompt_per_second"),
+        "predicted_ms": timings.get("predicted_ms"),
+        "predicted_n": timings.get("predicted_n"),
+        "predicted_tokens_per_second": timings.get("predicted_per_second"),
+        "cache_n": timings.get("cache_n"),
+    }
+
+
+def _residual(seconds: float, timings: dict[str, Any] | None) -> float | None:
+    """Client-observed seconds minus what the server says it spent, or `None` without timings.
+
+    A large residual is the interesting case: time the model did not account for, which on this
+    host has meant a request waiting on the router rather than being computed. It is reported as a
+    number and **not explained here** — the number is the finding, the mechanism is not.
+    """
+    if not timings:
+        return None
+    spent = (
+        float(timings.get("prompt_ms") or 0.0) + float(timings.get("predicted_ms") or 0.0)
+    ) / 1000.0
+    return round(float(seconds) - spent, 3)
+
+
 def measure(
     *,
     model: str,
@@ -121,16 +169,24 @@ def measure(
     summary: str,
     max_tokens: int,
     error: str | None = None,
+    started_at: str | None = None,
+    finished_at: str | None = None,
+    usage: dict[str, Any] | None = None,
+    timings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One metrics record for one model call — **counts and ratios, never text**.
 
     This is the only place a run's numbers are assembled, and it is deliberately blind to
     content: the log it feeds stays on the machine that holds the corpus and its aggregates are
-    safe to quote, both because nothing in it is a word of anyone's document.
+    safe to quote, because nothing in it is a word of anyone's document. The server's own
+    timings ride along in a nested `server` object; the timestamps are what let a trace place a
+    call in time beside the run it belongs to.
     """
     return {
         "model": str(model),
         "seconds": round(float(seconds), 3),
+        "started_at": started_at,
+        "finished_at": finished_at,
         "input_chars": len(source),
         "output_chars": len(summary),
         "output_words": len(summary.split()),
@@ -142,6 +198,8 @@ def measure(
         "cap_hit": cap_hit(summary, max_tokens),
         "empty": not summary.strip(),
         "error": error,
+        "server": _server_block(usage, timings),
+        "client_residual_seconds": _residual(seconds, timings),
     }
 
 
@@ -204,6 +262,37 @@ def aggregate(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
             "seconds_min": round(min(seconds), 1) if seconds else None,
             "seconds_max": round(max(seconds), 1) if seconds else None,
             "seconds_total": round(sum(seconds), 1),
+            "server_calls": sum(1 for record in usable if record.get("server")),
+            "cached_prompt_calls": sum(
+                1
+                for record in usable
+                if record.get("server")
+                and (
+                    (record["server"].get("cache_n") or 0) > 0
+                    or (record["server"].get("cached_tokens") or 0) > 0
+                )
+            ),
+            "prompt_ms_median": _median(
+                [
+                    float(record["server"].get("prompt_ms") or 0.0)
+                    for record in usable
+                    if record.get("server")
+                ]
+            ),
+            "predicted_ms_median": _median(
+                [
+                    float(record["server"].get("predicted_ms") or 0.0)
+                    for record in usable
+                    if record.get("server")
+                ]
+            ),
+            "residual_seconds_median": _median(
+                [
+                    float(record["client_residual_seconds"])
+                    for record in usable
+                    if record.get("client_residual_seconds") is not None
+                ]
+            ),
             "input_chars_median": _median(inputs),
             "output_chars_median": _median(
                 [float(record.get("output_chars", 0)) for record in usable]
@@ -286,6 +375,18 @@ def render(agg: dict[str, Any], *, scale: str = "", sets: dict[str, int] | None 
                 f"{entry['input_chars_median']} chars in / "
                 f"{entry['output_chars_median']} chars out)"
             )
+        if entry.get("server_calls"):
+            lines.append(
+                f"    server: {entry['server_calls']} call(s) with timings, "
+                f"{entry['cached_prompt_calls']} served from the prompt cache "
+                f"(prompt ms median {entry['prompt_ms_median']}, "
+                f"decode ms median {entry['predicted_ms_median']})"
+            )
+            if entry.get("residual_seconds_median") is not None:
+                lines.append(
+                    f"    client seconds the server did not account for: median "
+                    f"{entry['residual_seconds_median']}s"
+                )
         lines.append(
             f"    groundedness median {entry['groundedness_median']}, "
             f"min {entry['groundedness_min']}, "

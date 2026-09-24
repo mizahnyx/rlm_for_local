@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -89,6 +90,15 @@ def engine_tag_for(model: str, endpoint: str | None = None) -> str:
     return f"{model}@{host}" if host else model
 
 
+def _now_iso() -> str:
+    """Wall-clock UTC, second resolution — enough to place a call beside a run, and no more.
+
+    `time.monotonic` measures the duration; this says *when*, which is what lets a trace line up
+    with the server's own log, the run it belonged to, and the machine's state at that moment.
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def make_summarise_engine(
     backend: ModelBackend,
     *,
@@ -117,19 +127,30 @@ def make_summarise_engine(
 
     def engine(text: str, max_tokens: int) -> tuple[str, dict[str, Any]]:
         started = time.monotonic()
+        started_at = _now_iso()
+        messages = [
+            {"role": "system", "content": SUMMARY_SYSTEM},
+            {
+                "role": "user",
+                "content": SUMMARY_PROMPT.format(document=text, max_tokens=max_tokens),
+            },
+        ]
         try:
-            summary = backend.chat(
-                [
-                    {"role": "system", "content": SUMMARY_SYSTEM},
-                    {
-                        "role": "user",
-                        "content": SUMMARY_PROMPT.format(document=text, max_tokens=max_tokens),
-                    },
-                ],
-                tier="root",
-                max_tokens=max_tokens,
-                temperature=resolved_temperature,
-            )
+            detailed = getattr(backend, "chat_detailed", None)
+            if detailed is not None:
+                result = detailed(
+                    messages, tier="root", max_tokens=max_tokens,
+                    temperature=resolved_temperature,
+                )
+                summary, usage, timings = result.content, result.usage, result.timings
+            else:
+                # A backend without the metadata hook is still usable, and the record then says
+                # `server: null` — the truth, rather than a zero that looks like a measurement.
+                summary = backend.chat(
+                    messages, tier="root", max_tokens=max_tokens,
+                    temperature=resolved_temperature,
+                )
+                usage, timings = None, None
         except Exception as exc:
             # Log before re-raising: the kernel records `RuntimeError` as a failed item, and the
             # metrics log should show the same event from the model's side — a model that fails
@@ -144,6 +165,8 @@ def make_summarise_engine(
                         summary="",
                         max_tokens=max_tokens,
                         error=type(exc).__name__,
+                        started_at=started_at,
+                        finished_at=_now_iso(),
                     ),
                 )
             raise
@@ -154,6 +177,10 @@ def make_summarise_engine(
             source=text,
             summary=summary,
             max_tokens=max_tokens,
+            started_at=started_at,
+            finished_at=_now_iso(),
+            usage=usage,
+            timings=timings,
         )
         if log_path is not None:
             append_record(log_path, record)
@@ -165,6 +192,10 @@ def make_summarise_engine(
             "output_chars": record["output_chars"],
             "estimated_output_tokens": record["estimated_output_tokens"],
             "groundedness": record["groundedness"],
+            # What the server said it spent, and the client's unexplained remainder: the two
+            # numbers that turn "this call was slow" into "this call processed N fresh tokens".
+            "server": record["server"],
+            "client_residual_seconds": record["client_residual_seconds"],
         }
 
     engine.engine_tag = resolved_tag  # type: ignore[attr-defined]

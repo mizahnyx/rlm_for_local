@@ -63,6 +63,62 @@ class TestItCarriesNoText:
         assert record["compression"] > 0
 
 
+class TestTheServersOwnAccount:
+    """What separates 'slow' from 'did a lot of work': the server's own split of a call."""
+
+    def test_timings_are_carried_and_the_residual_is_the_difference(self) -> None:
+        record = measure(
+            model="m", seconds=100.0, source=SOURCE, summary="turbine calibration notes",
+            max_tokens=400,
+            started_at="2026-09-23T15:00:00+00:00", finished_at="2026-09-23T15:01:40+00:00",
+            usage={"prompt_tokens": 5000, "completion_tokens": 40,
+                   "prompt_tokens_details": {"cached_tokens": 4996}},
+            timings={"prompt_ms": 3000.0, "prompt_n": 4, "predicted_ms": 20000.0,
+                     "predicted_n": 40, "cache_n": 4996},
+        )
+        assert record["server"]["cached_tokens"] == 4996
+        assert record["server"]["prompt_n"] == 4
+        assert record["client_residual_seconds"] == 77.0, (
+            "100 s observed, 23 s the server accounts for: the rest is the finding"
+        )
+        assert record["started_at"] == "2026-09-23T15:00:00+00:00"
+        assert record["finished_at"] == "2026-09-23T15:01:40+00:00"
+
+    def test_the_server_block_carries_no_document_text_either(self) -> None:
+        record = measure(
+            model="m", seconds=10.0, source=SOURCE, summary="turbine calibration notes",
+            max_tokens=400,
+            usage={"prompt_tokens": 1, "completion_tokens": 2},
+            timings={"prompt_ms": 1.0, "predicted_ms": 2.0},
+        )
+        serialised = json.dumps(record)
+        for word in content_words(SOURCE):
+            if len(word) >= 6:
+                assert word.lower() not in serialised.lower()
+
+    def test_no_timings_says_unknown_rather_than_zero(self) -> None:
+        """A backend that reports nothing must not look like a measured 0 ms of work."""
+        record = measure(model="m", seconds=5.0, source=SOURCE, summary="notes", max_tokens=400)
+        assert record["server"] is None
+        assert record["client_residual_seconds"] is None
+
+    def test_the_aggregate_counts_the_calls_the_cache_answered(self) -> None:
+        cached = measure(
+            model="m", seconds=30.0, source=SOURCE, summary="turbine calibration notes",
+            max_tokens=400, timings={"prompt_ms": 1000.0, "prompt_n": 4, "cache_n": 4996,
+                                     "predicted_ms": 20000.0},
+        )
+        fresh = measure(
+            model="m", seconds=600.0, source=SOURCE, summary="turbine calibration notes",
+            max_tokens=400, timings={"prompt_ms": 500000.0, "prompt_n": 5000, "cache_n": 0,
+                                     "predicted_ms": 20000.0},
+        )
+        entry = aggregate([cached, fresh])["models"]["m"]
+        assert entry["server_calls"] == 2
+        assert entry["cached_prompt_calls"] == 1
+        assert entry["prompt_ms_median"] == 250500.0
+
+
 class TestGroundednessIsAFloorDetector:
     def test_the_documents_own_words_score_high(self) -> None:
         assert groundedness("Ferromagnetic sprocket calibration notes", SOURCE) == 1.0
