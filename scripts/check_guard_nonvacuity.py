@@ -282,8 +282,8 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "R9 extraction goes back to raw indexing",
         "src/rlm_local/model_backend.py",
-        "        return _extract_content(data, status=resp.status_code, body=resp.text)",
-        "        return data[\"choices\"][0][\"message\"][\"content\"]",
+        "            content=_extract_content(data, status=resp.status_code, body=resp.text),",
+        "            content=data[\"choices\"][0][\"message\"][\"content\"],",
         ["tests/test_model_backend.py::TestResponseGuarding"],
     ),
     (
@@ -3430,8 +3430,8 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO6 a summary already paid for is paid for again",
         "src/rlm_kernel/mine.py",
-        '    if cache.has(key):\n        return TaskOutcome(DONE, "cache")',
-        '    if False:\n        return TaskOutcome(DONE, "cache")',
+        "    if cache.has(key):\n        cached = cache.get(key)",
+        "    if False:\n        cached = cache.get(key)",
         [
             "tests/rlm_kernel/test_summarise.py::TestItSummarisesByValue"
             "::test_a_cache_hit_costs_no_model_call",
@@ -3461,8 +3461,9 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO6 the metrics record carries a snippet of the document",
         "src/rlm_local/summary_metrics.py",
-        '        "error": error,\n    }',
-        '        "snippet": summary[:120],\n        "error": error,\n    }',
+        '        "error": error,\n        "server": _server_block(usage, timings),',
+        '        "snippet": summary[:120],\n        "error": error,\n'
+        '        "server": _server_block(usage, timings),',
         [
             "tests/test_summary_metrics.py::TestItCarriesNoText"
             "::test_a_record_contains_no_document_word_and_no_reply",
