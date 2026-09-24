@@ -1084,7 +1084,7 @@ A cell has **two** time limits, both configurable. The *soft* one (`cell_timeout
 on `tiny`/`laptop`, 120 s on `workstation`) is reached first and **signals**: if the cell
 has asked the harness for something — a corpus helper, a sub-call — it is demonstrably
 working, so it is allowed to continue up to the *hard* limit (`cell_timeout_hard`,
-default 3 600 s = 60 min). A cell that has asked for nothing at its soft limit is stuck,
+default 5 400 s = 90 min). A cell that has asked for nothing at its soft limit is stuck,
 and is stopped there. When a cell dies on either limit that is a **harness limit, not a
 verdict on the model** — and the two used to look identical in a trajectory, because the
 only trace was stderr prose that the harness then reported like a code error. Now:

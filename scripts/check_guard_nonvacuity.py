@@ -3599,6 +3599,24 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_a_paused_run_stops_before_any_model_call",
         ],
     ),
+    # ── Gate 5: the cell budgets are set from measurements, not taste (2026-09-24) ────
+    (
+        "the hard cell limit drops back below the slowest recorded question",
+        "src/rlm_local/config.py",
+        "    cell_timeout_hard: float = 5400.0",
+        "    cell_timeout_hard: float = 3600.0",
+        ["tests/test_cell_budget_default.py::test_the_hard_cell_limit_is_ninety_minutes"],
+    ),
+    (
+        "the soft cell limit drops back under the recorded search p95",
+        "src/rlm_local/config.py",
+        "        max_concurrent_subcalls=2,\n        cell_timeout=300.0,",
+        "        max_concurrent_subcalls=2,\n        cell_timeout=60.0,",
+        [
+            "tests/test_cell_budget_default.py"
+            "::test_the_soft_limit_no_longer_flags_an_ordinary_search"
+        ],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

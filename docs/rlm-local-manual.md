@@ -345,8 +345,8 @@ The complete reference:
 | `max_subcalls` | `int` | 30 | 60 | 100 | Hard limit on total sub-calls |
 | `max_subcall_chars` | `int` | 1M | 4M | 12M | Hard limit on total sub-call prompt characters |
 | `max_depth` | `int` | 1 | 1 | 1 | Recursion depth (1 = root + flat sub-calls) |
-| `cell_timeout` | `float` | 60.0 | 60.0 | 120.0 | Per-REPL-cell *soft* wall-clock limit (seconds): reached it, the cell is extended to `cell_timeout_hard` if it has asked the harness for something |
-| `cell_timeout_hard` | `float` | 1200.0 | 1200.0 | 1200.0 | *Hard* limit for one REPL cell (seconds). Equal to `cell_timeout` means no extension: every cell stops at the soft limit |
+| `cell_timeout` | `float` | 180.0 | 300.0 | 600.0 | Per-REPL-cell *soft* wall-clock limit (seconds): reached it, the cell is extended to `cell_timeout_hard` if it has asked the harness for something |
+| `cell_timeout_hard` | `float` | 5400.0 | 5400.0 | 5400.0 | *Hard* limit for one REPL cell (seconds). Equal to `cell_timeout` means no extension: every cell stops at the soft limit |
 | `context_spill_threshold` | `int` | 500K | 1M | 1M | Context size above which disk spill activates |
 | `max_consecutive_errors` | `int` | 3 | 3 | 3 | stderr errors before forced finalization |
 | `max_consecutive_nudges` | `int` | 2 | 2 | 2 | Parse nudges before counting as error |
@@ -666,7 +666,7 @@ promise a different limit than the one enforced.
 ```python
 class REPLSandbox:
     def __init__(self, cell_timeout: float = 60.0,
-                 cell_timeout_hard: float = 1200.0,
+                 cell_timeout_hard: float = 5400.0,
                  stdout_cap: int = 256 * 1024,
                  restart_after_consecutive_timeouts: int = 2): ...
     def start(self, context: Any, subcall_manager: Any,
@@ -2248,7 +2248,7 @@ class REPLResult:
 
 class REPLSandbox:
     def __init__(self, cell_timeout: float = 60.0,
-                 cell_timeout_hard: float = 1200.0,
+                 cell_timeout_hard: float = 5400.0,
                  stdout_cap: int = 256 * 1024,
                  restart_after_consecutive_timeouts: int = 2) -> None: ...
     def start(self, context: Any, subcall_manager: Any,

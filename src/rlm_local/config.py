@@ -41,17 +41,21 @@ class Profile:
     # operation has started and lets the cell continue, the hard limit stops it
     # (owner, 2026-09-17 — old hardware makes some legitimate operations slow).
     cell_timeout: float = 60.0
-    cell_timeout_hard: float = 3600.0
+    cell_timeout_hard: float = 5400.0
     """The *hard* limit: a cell that has asked the harness for something is extended to this,
     and one that asked for nothing is stopped at the soft limit.
 
-    Raised from 1 200 s to 3 600 s on the owner's call (2026-09-23), after the load gate
-    measured what a search costs on this corpus: **p95 ≥ 60 s over the queries a live run
-    actually issued, with seven of fifteen not finishing inside 60 s**, and one cell
-    demonstrably stopped at the old 1 200 s limit *while running `corpus_search`*. The owner's
-    reasoning, which the numbers support: this is old hardware running small models, and an
-    hour of waiting is acceptable where a killed cell is not. The soft limit is unchanged, so a
-    cell that asks for nothing is still stopped promptly.
+    Raised 1 200 s → 3 600 s → **5 400 s**, and the soft limits with it, on the owner's calls. The
+    first raise followed the load gate: **p95 ≥ 60 s over the queries a live run actually issued,
+    with seven of fifteen not finishing inside 60 s**, and one cell stopped at 1 200 s *while
+    running `corpus_search`*. The second followed the search-latency brief, which records that a
+    question on this corpus costs **10–65 minutes**: at 3 600 s the only limit that actually stops
+    anything sat *below the slowest legitimate question*, so "accept the latency" was not something
+    the harness could honour. The decision (owner, 2026-09-24) was to resize the budgets rather
+    than reshape what search returns — so the reshaping options in that brief (affordable terms, a
+    rare-term prefilter, a cheaper ranking) remain untried, deliberately.
+
+    Old hardware running small models: waiting is cheaper than a killed cell.
     """
 
     # Context store
@@ -87,7 +91,7 @@ PROFILES: dict[str, Profile] = {
         max_concurrent_subcalls=1,
         max_subcalls=30,
         max_subcall_chars=1_000_000,
-        cell_timeout=60.0,
+        cell_timeout=180.0,
         context_spill_threshold=500_000,
     ),
     "laptop": Profile(
@@ -100,7 +104,7 @@ PROFILES: dict[str, Profile] = {
         repl_output_char_cap=4000,
         max_turns=15,
         max_concurrent_subcalls=2,
-        cell_timeout=60.0,
+        cell_timeout=300.0,
     ),
     "workstation": Profile(
         name="workstation",
@@ -114,7 +118,7 @@ PROFILES: dict[str, Profile] = {
         max_concurrent_subcalls=4,
         max_subcalls=100,
         max_subcall_chars=12_000_000,
-        cell_timeout=120.0,
+        cell_timeout=600.0,
     ),
 }
 

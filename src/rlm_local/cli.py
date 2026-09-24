@@ -58,20 +58,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_ask.add_argument(
         "--cell-timeout", type=float,
         default=os.environ.get("RLM_CELL_TIMEOUT"),
-        help="Seconds one REPL cell may run (default: the profile's value — 60 s on "
-             "tiny/laptop, 120 s on workstation; env RLM_CELL_TIMEOUT). Raise it when "
-             "a legitimate corpus call exceeds the budget on a loaded host: a cell "
-             "stopped by the harness is not a model failure, and the trajectory "
-             "records it as a `cell_timeout` event naming the budget and the helper.",
+        help="Seconds one REPL cell may run (default: the profile's value — 180 s on "
+             "tiny, 300 s on laptop, 600 s on workstation; env RLM_CELL_TIMEOUT). Raised "
+             "with the hard limit on 2026-09-24 because half the recorded searches crossed "
+             "the old 60 s: a signal that a routine search always trips is a signal that is "
+             "always on. Raise it further when a legitimate corpus call exceeds the budget on "
+             "a loaded host: a cell stopped by the harness is not a model failure, and the "
+             "trajectory records it as a `cell_timeout` event naming the budget and helper.",
     )
     p_ask.add_argument(
         "--cell-timeout-hard", type=float,
         default=os.environ.get("RLM_CELL_TIMEOUT_HARD"),
         help="Seconds one REPL cell may run in total, after the soft limit has "
              "signalled that the cell is doing work (default: the profile's value — "
-             "3600 s; env RLM_CELL_TIMEOUT_HARD). Raised from 1200 s on 2026-09-23 "
+             "5400 s; env RLM_CELL_TIMEOUT_HARD). Raised from 1200 s on 2026-09-23 "
              "because a search on this corpus measured p95 ≥ 60 s and one cell was "
-             "stopped at the old limit while running one. Set it equal to "
+             "stopped at the old limit while running one, and from 3600 s on 2026-09-24 "
+             "because a question here is recorded at 10–65 minutes: the only limit that "
+             "stops anything sat below the slowest legitimate question. Set it equal to "
              "--cell-timeout to switch the second limit off: a cell then stops at the "
              "soft limit whether or not it was working.",
     )

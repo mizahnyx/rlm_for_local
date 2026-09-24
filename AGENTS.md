@@ -332,9 +332,9 @@ that dies on a time limit writes its own `cell_timeout` event naming the limit t
 fired, the budget behind it, `activity=` (the gate's own input) and `last_helper=`
 (the verb it was running); the model is told the budget it actually hit, rather than
 a bug. There are **two limits, both per-invocation configurable** (RO16): a *soft*
-one (`--cell-timeout`, `RLM_CELL_TIMEOUT`, else the profile's 60 s / 120 s) that
+one (`--cell-timeout`, `RLM_CELL_TIMEOUT`, else the profile's 180 s / 300 s / 600 s) that
 **signals**, extending a cell which has asked the harness for something to the
-*hard* one (`--cell-timeout-hard`, `RLM_CELL_TIMEOUT_HARD`, default 3 600 s), which
+*hard* one (`--cell-timeout-hard`, `RLM_CELL_TIMEOUT_HARD`, default 5 400 s), which
 stops it. A granted extension is announced on the operator's warning sink while the
 cell runs and recorded as a `cell_extended` event; equal limits switch the second
 stage off. Diagnose from the counts, not
