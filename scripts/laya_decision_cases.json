@@ -1,0 +1,104 @@
+{
+  "note": "Synthetic cards for the Laya admission-controller probe (Gate 6, phase B1). Hand-written, not derived from any corpus, so this file is safe to read anywhere. 'expected' is MY judgement of the right action, not ground truth: cases where the right answer is genuinely unclear carry expected: null and are reported but not scored.",
+  "actions": ["expand", "summarise", "one_line", "drop"],
+  "cases": [
+    {
+      "id": "answer-in-the-card",
+      "question": "What is the sprocket tolerance at governed speed?",
+      "card": "Calibration note, revision 9: with the turbine governing at 3000 revolutions the sprocket tolerance is 0.02 millimetres.",
+      "expected": "expand",
+      "why": "The card states the answer; anything shorter risks losing the number."
+    },
+    {
+      "id": "answer-in-a-large-manual",
+      "question": "What is the sprocket tolerance at governed speed?",
+      "card": "Turbine service manual, 240 pages: assembly sequence, lubrication schedule, alignment procedure, tolerance tables for the sprocket, control-loop gains, and a fault index.",
+      "expected": "summarise",
+      "why": "The answer is somewhere inside, but expanding a 240-page manual costs more context than the description it replaces."
+    },
+    {
+      "id": "pointer-only",
+      "question": "What is the sprocket tolerance at governed speed?",
+      "card": "Index of documents that mention the Markhausen retrofit: 14 entries with titles and dates.",
+      "expected": "one_line",
+      "why": "It says where to look, not what the answer is; the title line is the whole value."
+    },
+    {
+      "id": "irrelevant",
+      "question": "What is the sprocket tolerance at governed speed?",
+      "card": "Canteen menu for the week beginning Monday: soup, two mains, one vegetarian option.",
+      "expected": "drop",
+      "why": "No bearing on the question; including it costs context and buys nothing."
+    },
+    {
+      "id": "decisive-and-short",
+      "question": "Is the corpus mounted read-only?",
+      "card": "Mount options recorded for the corpus: ro,noatime.",
+      "expected": "expand",
+      "why": "Two tokens that answer the question completely."
+    },
+    {
+      "id": "incident-report",
+      "question": "Which team owns the export service?",
+      "card": "Incident report: the export page returns HTTP 500 and the team cannot finish its work. Assigned after triage to the software-failures group.",
+      "expected": "expand",
+      "why": "The ownership answer is in the body."
+    },
+    {
+      "id": "org-chart",
+      "question": "Which team owns the export service?",
+      "card": "Organisation chart revision 9: every team, its remit and its lead, 40 rows.",
+      "expected": "summarise",
+      "why": "A long list whose shape is more useful than its contents."
+    },
+    {
+      "id": "counts-in-a-plan",
+      "question": "How many documents does the value set contain, and how many were cited?",
+      "card": "Enrichment plan summary: 143 documents considered, 13 of them cited by an answer.",
+      "expected": "expand",
+      "why": "The two numbers are the answer."
+    },
+    {
+      "id": "same-plan-header",
+      "question": "How many documents does the value set contain, and how many were cited?",
+      "card": "Enrichment plan, header row: rank, source, served, cited, provenance.",
+      "expected": "one_line",
+      "why": "The header proves the plan exists; the counts are elsewhere and the header cannot supply them."
+    },
+    {
+      "id": "procedure-step",
+      "question": "What does the calibration procedure require before measurement?",
+      "card": "Procedure step 4: warm the turbine for 20 minutes before taking any measurement.",
+      "expected": "expand",
+      "why": "Short and directly answering."
+    },
+    {
+      "id": "glossary-cross-reference",
+      "question": "What does the calibration procedure require before measurement?",
+      "card": "Glossary: 'warm-up' - see the calibration procedure, step 4.",
+      "expected": "one_line",
+      "why": "A cross-reference; expanding it yields a pointer, not the requirement."
+    },
+    {
+      "id": "absent-metadata",
+      "question": "Who wrote this document?",
+      "card": "Document metadata: title, date, revision; no author field is present.",
+      "expected": "drop",
+      "why": "It answers the question only by absence, which the model can report without the card."
+    },
+    {
+      "id": "conflicting-revisions",
+      "question": "What tolerance applies to the sprocket?",
+      "card": "Two tolerances appear in the record: 0.02 millimetres in revision 9 and 0.05 millimetres in revision 7. Which governs is not stated here.",
+      "expected": null,
+      "why": "Resolving it needs the change history, which the controller cannot see; expanding and summarising are both defensible, so this case is reported and not scored."
+    },
+    {
+      "id": "long-card-with-one-useful-line",
+      "question": "Which library versions are vendored?",
+      "card": "Third-party notice: 412 libraries with licence names, no version strings, followed by the full text of four licences.",
+      "expected": null,
+      "why": "The card is long and the question is only partly answerable from it - a summary may be enough or may drop the only useful line, and which one the model does is exactly what this probe is measuring rather than deciding."
+    }
+  ]
+}

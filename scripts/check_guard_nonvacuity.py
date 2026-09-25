@@ -3645,6 +3645,24 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         '            decision["seconds"] = round(time.monotonic() - started, 3)',
         ["tests/test_decisions.py::TestTheEngine::test_the_log_quotes_no_card_text"],
     ),
+    (
+        "a case with no expectation is scored anyway",
+        "scripts/probe_laya_decisions.py",
+        '            None if row["expected"] is None or row["error"] '
+        'else row["action"] == row["expected"]',
+        '            None if row["error"] else row["action"] == row["expected"]',
+        ["tests/test_probe_laya_decisions.py::TestTheScoring"
+         "::test_a_case_without_an_expectation_is_reported_not_scored"],
+    ),
+    (
+        "an errored decision is counted as a wrong answer",
+        "scripts/probe_laya_decisions.py",
+        '            None if row["expected"] is None or row["error"] '
+        'else row["action"] == row["expected"]',
+        '            None if row["expected"] is None else row["action"] == row["expected"]',
+        ["tests/test_probe_laya_decisions.py::TestTheScoring"
+         "::test_an_error_is_not_counted_as_a_wrong_answer"],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
