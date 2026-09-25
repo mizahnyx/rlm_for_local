@@ -3617,6 +3617,34 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
             "::test_the_soft_limit_no_longer_flags_an_ordinary_search"
         ],
     ),
+    # ── Gate 6: the admission client refuses rather than guesses (2026-09-24) ──────────
+    (
+        "an over-long card is shortened instead of refused",
+        "src/rlm_local/decisions.py",
+        "    if estimated_tokens(formatted) > MAX_QUESTION_TOKENS:\n        raise CardTooLarge(",
+        "    if False:\n        raise CardTooLarge(",
+        ["tests/test_decisions.py::TestTheBudgetIsARejection"
+         "::test_a_card_over_the_budget_is_refused_not_shortened"],
+    ),
+    (
+        "an action outside the vocabulary is mapped to a default",
+        "src/rlm_local/decisions.py",
+        '    if label not in ACTIONS:\n'
+        '        raise UnknownAction(f"model chose {label!r}, which is not one of {ACTIONS}")',
+        '    if label not in ACTIONS:\n        label = "expand"',
+        ["tests/test_decisions.py::TestTheAnswersAreCheckedNotDefaulted"
+         "::test_an_action_outside_the_vocabulary_is_refused"],
+    ),
+    (
+        "the decisions log quotes the card",
+        "src/rlm_local/decisions.py",
+        '            decision["card_chars"] = len(card)\n'
+        '            decision["seconds"] = round(time.monotonic() - started, 3)',
+        '            decision["card_chars"] = len(card)\n'
+        '            decision["card_text"] = card\n'
+        '            decision["seconds"] = round(time.monotonic() - started, 3)',
+        ["tests/test_decisions.py::TestTheEngine::test_the_log_quotes_no_card_text"],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
