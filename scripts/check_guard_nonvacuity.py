@@ -3663,6 +3663,15 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         ["tests/test_probe_laya_decisions.py::TestTheScoring"
          "::test_an_error_is_not_counted_as_a_wrong_answer"],
     ),
+    # ── the derived-text pass: descriptions are reachable or they are decoration (2026-09-25) ──
+    (
+        "the derived-text pass is switched off, so descriptions never surface",
+        "src/rlm_kernel/corpus.py",
+        "        derived_hits = []\n        if not derived_only:",
+        "        derived_hits = []\n        if False:",
+        ["tests/rlm_kernel/test_corpus_derived_pass.py::TestTheDerivedPass"
+         "::test_a_description_only_match_is_served_with_its_own_text"],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

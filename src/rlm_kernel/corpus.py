@@ -621,6 +621,14 @@ CORPUS_CONTAINER_NEEDS_MINING = (
 )
 
 
+#: How many derived-text hits a second, restricted search may contribute (owner's call,
+#: 2026-09-25). Descriptions are one chunk each, competing against whole files on bm25: measured on
+#: the live index, **6 of 6 descriptions were found when the search was restricted to derived text,
+#: and 0 of 6 in the ordinary ranking even at k=64**. A small bound keeps the pass from crowding the
+#: file hits an answer actually cites.
+DERIVED_PASS_K = 3
+
+
 @dataclass
 class CorpusBridge:
     """Answers the REPL's corpus verbs. Read-only, bounded, index-backed.
@@ -916,13 +924,28 @@ class CorpusBridge:
 
         result = text_index.search(query, k=k, include_vendored=include_vendored,
                                    derived_only=derived_only)
+        # Derived text gets its own bounded pass (owner's call, 2026-09-25). File hits come first,
+        # because they are the sources an answer cites while a description is a navigational aid;
+        # a description is stored under its document's own display, so its address can be identical
+        # to the file chunk's and is de-duplicated here rather than shown twice. The pass is
+        # best-effort: if it fails, the ordinary results stand and no search can break on it.
+        derived_hits = []
+        if not derived_only:
+            try:
+                derived = text_index.search(query, k=DERIVED_PASS_K, derived_only=True,
+                                            include_vendored=True)
+                already = {hit.address for hit in result.hits}
+                derived_hits = [hit for hit in derived.hits if hit.address not in already]
+            except Exception:  # noqa: BLE001 - a second pass must never break a search
+                derived_hits = []
+        ordered_hits = list(result.hits) + derived_hits
         # Every result carries how well its best hit answered the *question*, because
         # against a complete index the failure mode is not "no matches" — it is real
         # hits that do not answer it. Measured against the run's question, never
         # against the search expression: the expression is an AND, so a query-relative
         # number would be `strong` for every hit by construction.
         terms = content_terms(self.question or "")
-        if not result.hits:
+        if not ordered_hits:
             lines = [CORPUS_TEXT_NO_MATCHES]
             if terms:
                 lines.append(match_note(0, len(terms)))
@@ -941,7 +964,7 @@ class CorpusBridge:
 
         hits: list[str] = []
         best_covered = 0
-        for hit in result.hits:
+        for hit in ordered_hits:
             try:
                 # RO21: the snippet is 300 characters and the label counts the question's
                 # words in what the snippet shows, so reading the whole chunk here is a
