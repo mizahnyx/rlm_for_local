@@ -20,50 +20,51 @@ capability-by-capability reading; §2 gives the three gaps that matter structura
 
 | Spec | Capability | Verdict | Evidence / gap |
 |---|---|---|---|
-| §1–2 | `rlm-wikid` daemon, Box A/B split | **ABSENT** | no wiki process, no systemd unit; one host runs harness + kernel |
-| §3.1 F1 | Wiki as source of truth | **PARTIAL** | `schema.Page/Frontmatter`, `vault.LocalVault` (atomic writes, git, `resolve_wikilink`); no `sources/ media/ topics/ tools/` |
-| §3.2 N4 | Human-readable first | **EXISTS** | Markdown + frontmatter on disk; `rlm-kernel index` rebuilds from pages |
-| §3.2 N3 | 500K pages / 1M CAS / p95 | **PARTIAL** | `tests/load/test_load.py`, `gen_corpus.py`; no CAS, no hybrid envelope |
-| §3.2 N5 | TDD, typing, lint, ADRs | **PARTIAL** | broad suite, `ruff`, the mutation table; no mypy, coverage gate or ADRs |
-| §5.1 | Vault layout | **PARTIAL** | `<kind>/<name>.md` under one root; no `cache/ tools/ attachments/ objects/` |
-| §5.2 | Page anatomy | **PARTIAL** | id, kind, name, title, summary, tags, version, hash, status, timestamps, access_count; no `type: source/media/topic`, `source_uri`, `links`, `media[]`, `confidential`, `enrich_state` |
-| §5.3 | CAS `objects/ab/cd/<sha256>` | **ABSENT** | no `cas.py`, object layout, refcount, eviction or streamed blobs |
-| §5.3 | content-addressed **cache** | **EXISTS (substitute)** | `mine.DerivationCache`: sha256(source hash+version+params), atomic, 0600, space-checked, engine-tagged — text only |
-| §5.4 | batched committer, fsmonitor, sweep | **PARTIAL** | git per put; no debounce, fsmonitor, untrackedCache, commit-graph, startup sweep |
-| §5.5 | derived indexes | **PARTIAL** | `index.py` (pages/links/tags, `get_backlinks`), `textindex.py` (FTS5, BM25, provenance, coverage); no fts/vec split, trigram, embeddings |
-| §6.1 | `MountProvider` protocol | **PARTIAL** | `mounts.LocalTreeMount`: stat/open_readonly/read/iter, containment, **no write verb**, `assert_derived_outside_corpus`; no `mount://`, `fetchable()`, lazy fetch |
-| §6.2 | v1 providers | **ABSENT** | local tree only |
-| §7.1 | acquisition paths | **PARTIAL** | bulk only (`mine plan`); no push endpoint, scheduler, manual capture |
-| §7.2 | per-type extraction | **PARTIAL** | pdftotext, zip+XML, zip/tar/libarchive; no HTML, OCR, image, audio, video |
-| §7.3.1 | model classify | **ABSENT** | `classify.py` is a byte sniffer, not an LLM classifier |
-| §7.3.2 | summarize (map-reduce) | **PARTIAL** | `task_summarise` (injected engine, 32 KiB/400 tok, cached, indexed `ORIGIN_CACHE`), `rlm summarise --cited-only`; no map-reduce |
-| §7.3.3–4 | tag/link suggestion, wikify | **ABSENT** | **no clustering, no page generation, no link suggestion anywhere** (see §3) |
-| §7.3.5 | embed | **ABSENT** | not found in `src/` |
-| §7.4 | durable queue, resume, idempotency | **PARTIAL** | see §3 |
-| §7.4 | windows, self-tuning, backpressure | **ABSENT** | `run_queue` takes budget/deadline only |
-| §8.1 | task-typed models, breaker | **PARTIAL** | `model_backend`, `Profile`, `engine_tag_for`; no task table, backoff or breaker |
-| §8.2 | media upload | **ABSENT** | VLM/ASR/OCR are names with no handler |
-| §8.3 | federation / llama-swap | **ABSENT** | local router only; `assess_router_models.py` screens |
-| §9.1 | lexical retrieval, compact cards | **EXISTS** | `corpus.CorpusBridge` BM25 + bands + vendored count + coverage; `_make_card` ≤400 chars |
-| §9.1 | hybrid fusion, decay, filters | **ABSENT** | no RRF, trigram, vectors, age decay or confidentiality filters |
-| §9.2 | HTTP `/api` surface | **ABSENT** | see §2 |
-| §9.3 | `rlm_local` contract | **ABSENT** | `memory.*`, `wiki.*`, `tools.*`, `cache.get` absent; substitute is the `corpus_*` helpers + `KernelBridge` |
-| §9.4 | tool pages + quarantine gate | **PARTIAL** | `gate.propose/validate/promote/reject/demote`, AST allowlist; no `tools/*.md` schema |
-| §9.4 | authored extractors | **ABSENT** | no sandbox, fixture run or run audit; `gate.validate` says itself "a quality gate, not containment" |
-| §10 | web UI | **PARTIAL** | console exists (see §2); no editing, backlinks, graph, review queue |
-| §11 | security and privacy | **PARTIAL** | session cookie, origin check, loopback, read-only mount, `check_privacy.py`; no bearer auth, egress allowlist, hash-chained audit |
-| §12 | config, ops, observability | **PARTIAL** | profiles + TOML, uvicorn app; no wiki config schema, units, `/metrics` |
-| §13.1 | test pyramid | **PARTIAL** | broad unit suite; no API contract tests, no 200-item E2E |
-| §13.2 | fakes, fixtures, property tests | **ABSENT** | one `MockTransport`; no `hypothesis`, no fixtures tree |
-| §13.2 | load tests outside CI | **EXISTS** | `tests/load/`, `scripts/run_load_gate_100k.py` |
-| §13.3 | mutation spot-checks | **EXISTS** | `check_guard_nonvacuity.py` — **289 guards, 0 problems** |
-| §13.4/§14 | milestone gates M0–M8 | **ABSENT** | the roadmap's `RO*` ledger plays that role |
+| spec §1–2 | `rlm-wikid` daemon, Box A/B split | **ABSENT** | no wiki process, no systemd unit; one host runs harness + kernel |
+| spec §3.1 F1 | Wiki as source of truth | **PARTIAL** | `schema.Page/Frontmatter`, `vault.LocalVault` (atomic writes, git, `resolve_wikilink`); no `sources/ media/ topics/ tools/` |
+| spec §3.2 N4 | Human-readable first | **EXISTS** | Markdown + frontmatter on disk; `rlm-kernel index` rebuilds from pages |
+| spec §3.2 N3 | 500K pages / 1M CAS / p95 | **PARTIAL** | `tests/load/test_load.py`, `gen_corpus.py`; no CAS, no hybrid envelope |
+| spec §3.2 N5 | TDD, typing, lint, ADRs | **PARTIAL** | broad suite, `ruff`, the mutation table; no mypy, coverage gate or ADRs |
+| spec §5.1 | Vault layout | **PARTIAL** | `<kind>/<name>.md` under one root; no `cache/ tools/ attachments/ objects/` |
+| spec §5.2 | Page anatomy | **PARTIAL** | id, kind, name, title, summary, tags, version, hash, status, timestamps, access_count; no `type: source/media/topic`, `source_uri`, `links`, `media[]`, `confidential`, `enrich_state` |
+| spec §5.3 | CAS `objects/ab/cd/<sha256>` | **ABSENT** | no `cas.py`, object layout, refcount, eviction or streamed blobs |
+| spec §5.3 | content-addressed **cache** | **EXISTS (substitute)** | `mine.DerivationCache`: sha256(source hash+version+params), atomic, 0600, space-checked, engine-tagged — text only |
+| spec §5.4 | batched committer, fsmonitor, sweep | **PARTIAL** | git per put; no debounce, fsmonitor, untrackedCache, commit-graph, startup sweep |
+| spec §5.5 | derived indexes | **PARTIAL** | `index.py` (pages/links/tags, `get_backlinks`), `textindex.py` (FTS5, BM25, provenance, coverage); no fts/vec split, trigram, embeddings |
+| spec §6.1 | `MountProvider` protocol | **PARTIAL** | `mounts.LocalTreeMount`: stat/open_readonly/read/iter, containment, **no write verb**, `assert_derived_outside_corpus`; no `mount://`, `fetchable()`, lazy fetch |
+| spec §6.2 | v1 providers | **ABSENT** | local tree only |
+| spec §7.1 | acquisition paths | **PARTIAL** | bulk only (`mine plan`); no push endpoint, scheduler, manual capture |
+| spec §7.2 | per-type extraction | **PARTIAL** | pdftotext, zip+XML, zip/tar/libarchive; no HTML, OCR, image, audio, video |
+| spec §7.3.1 | model classify | **ABSENT** | `classify.py` is a byte sniffer, not an LLM classifier |
+| spec §7.3.2 | summarize (map-reduce) | **PARTIAL** | `task_summarise` (injected engine, 32 KiB/400 tok, cached, indexed `ORIGIN_CACHE`), `rlm summarise --cited-only`; no map-reduce |
+| spec §7.3.3–4 | tag/link suggestion, wikify | **ABSENT** | **no clustering, no page generation, no link suggestion anywhere** (see §3) |
+| spec §7.3.5 | embed | **ABSENT** | not found in `src/` |
+| spec §7.4 | durable queue, resume, idempotency | **PARTIAL** | see §3 |
+| spec §7.4 | windows, self-tuning, backpressure | **ABSENT** | `run_queue` takes budget/deadline only |
+| spec §8.1 | task-typed models, breaker | **PARTIAL** | `model_backend`, `Profile`, `engine_tag_for`; no task table, backoff or breaker |
+| spec §8.2 | media upload | **ABSENT** | VLM/ASR/OCR are names with no handler |
+| spec §8.3 | federation / llama-swap | **ABSENT** | local router only; `assess_router_models.py` screens |
+| spec §9.1 | lexical retrieval, compact cards | **EXISTS** | `corpus.CorpusBridge` BM25 + bands + vendored count + coverage; `_make_card` ≤400 chars |
+| spec §9.1 | hybrid fusion, decay, filters | **ABSENT** | no RRF, trigram, vectors, age decay or confidentiality filters |
+| spec §9.2 | HTTP `/api` surface | **ABSENT** | see §2 |
+| spec §9.3 | `rlm_local` contract | **ABSENT** | `memory.*`, `wiki.*`, `tools.*`, `cache.get` absent; substitute is the `corpus_*` helpers + `KernelBridge` |
+| spec §9.4 | tool pages + quarantine gate | **PARTIAL** | `gate.propose/validate/promote/reject/demote`, AST allowlist; no `tools/*.md` schema |
+| spec §9.4 | authored extractors | **ABSENT** | no sandbox, fixture run or run audit; `gate.validate` says itself "a quality gate, not containment" |
+| spec §10 | web UI | **PARTIAL** | console exists (see §2); no editing, backlinks, graph, review queue |
+| spec §11 | security and privacy | **PARTIAL** | session cookie, origin check, loopback, read-only mount, `check_privacy.py`; no bearer auth, egress allowlist, hash-chained audit |
+| spec §12 | config, ops, observability | **PARTIAL** | profiles + TOML, uvicorn app; no wiki config schema, units, `/metrics` |
+| spec §13.1 | test pyramid | **PARTIAL** | broad unit suite; no API contract tests, no 200-item E2E |
+| spec §13.2 | fakes, fixtures, property tests | **ABSENT** | one `MockTransport`; no `hypothesis`, no fixtures tree |
+| spec §13.2 | load tests outside CI | **EXISTS** | `tests/load/`, `scripts/run_load_gate_100k.py` |
+| spec §13.3 | mutation spot-checks | **EXISTS** | `check_guard_nonvacuity.py` — **289 guards, 0 problems** |
+| spec §13.4/§14 | milestone gates M0–M8 | **ABSENT** | the roadmap's `RO*` ledger plays that role |
 
 ## 2. The three gaps that decide the shape
 
 1. **No service, no API.** There is no `rlm-wikid` and **not one `/api` route**; `src/rlm_web/app.py`
    is an HTML/Jinja2 + SSE console over the vault (auth by session cookie, origin-checked POSTs,
-   read-only page view, Markdown ingest, job list with SSE). §9.2 is absent rather than partial.
+   read-only page view, Markdown ingest, job list with SSE). The spec's §9.2 is absent rather than
+   partial.
 2. **No generation stage.** Nothing clusters documents, emits pages or suggests links. What exists is
    generation's *input*: the injected-engine summariser, the served/cited value ranking in
    `enrich.py`, and per-call cost accounting.
@@ -79,7 +80,7 @@ A **local** OpenWiki instance is the closest existing product to RO7: wiki gener
 code and personal modes, providers, incremental updates, a CLI and a visualizer. Adopting it is a
 real third arm, and it collides with four things in this project — in order of severity:
 
-1. **§1.9 is absolute.** Corpus-derived text must not leave the machine. The OpenWiki docs offer
+1. **`AGENTS.md` §1.9 is absolute.** Corpus-derived text must not leave the machine. The OpenWiki docs offer
    tracing and provider integrations, so a local deployment would have to be *proved* to make no
    outbound calls, with telemetry disabled — a precondition to test, not a preference to assume.
    This is the one collision that can rule the arm out outright.
