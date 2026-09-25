@@ -37,6 +37,7 @@ from rlm_local.decisions import (  # noqa: E402
     ACTIONS,
     CardTooLarge,
     LayaClient,
+    LayaSdkClient,
     MalformedDecision,
     UnknownAction,
     make_admission_engine,
@@ -145,7 +146,10 @@ def main(argv: list[str] | None = None) -> int:
                         default=Path(__file__).resolve().parent / "laya_decision_cases.json")
     parser.add_argument("--endpoint", default=os.environ.get("LAYA_ENDPOINT",
                                                              "http://127.0.0.1:8000"))
-    parser.add_argument("--model", default="laya-typed-decisions")
+    parser.add_argument("--model", default="convaiinnovations/laya-typed-decisions")
+    parser.add_argument("--sdk", action="store_true",
+                        help="use the in-process `laya` package instead of an HTTP endpoint")
+    parser.add_argument("--device", default=None, help="e.g. cpu, for the SDK")
     parser.add_argument("--log", type=Path, default=None,
                         help="JSONL of decisions (no card text, ever)")
     parser.add_argument("--out", type=Path, default=None,
@@ -153,7 +157,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     cases = load_cases(args.cases)
-    client = LayaClient(args.endpoint)
+    if args.sdk:
+        client = LayaSdkClient(args.model, device=args.device)
+    else:
+        client = LayaClient(args.endpoint)
     engine = make_admission_engine(client, model=args.model, log_path=args.log)
     decisions: list[dict[str, Any]] = []
     try:

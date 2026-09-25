@@ -68,7 +68,9 @@ class TestTheRequestShape:
         assert list(action["criteria"]) == list(ACTIONS), "the order is the presented order"
         assert payload["questions"]["relevant"]["type"] == "noul"
         assert payload["questions"]["importance"]["type"] == "score"
-        assert len(payload["questions"]["importance"]["levels"]) == 4
+        assert len(payload["questions"]["importance"]["criteria"]) == 4, (
+            "the reference SDK spells the ordinal option list `criteria`"
+        )
 
     def test_the_question_and_the_position_reach_the_instructions(self) -> None:
         payload = build_request(question=QUESTION, card=CARD, turn=3, turns_left=5)
@@ -128,6 +130,61 @@ class TestTheAnswersAreCheckedNotDefaulted:
         payload["answers"]["importance"] = {"type": "choice", "choice": "expand"}
         with pytest.raises(MalformedDecision):
             parse_response(payload)
+
+
+class TestTheSdkClient:
+    """The reference package needs no server, and no `laya` install to test the wiring."""
+
+    def test_it_loads_the_package_and_calls_system_one(self, monkeypatch) -> None:
+        import sys
+        import types
+
+        from rlm_local.decisions import LayaSdkClient
+
+        seen: dict = {}
+
+        class FakeAgent:
+            def system_one(self, state, questions):
+                seen["state"] = state
+                seen["questions"] = questions
+                return _answers("one_line")
+
+        fake = types.ModuleType("laya")
+
+        def load(model, device=None):
+            seen["model"] = model
+            seen["device"] = device
+            return FakeAgent()
+
+        fake.load = load
+        monkeypatch.setitem(sys.modules, "laya", fake)
+
+        client = LayaSdkClient("some/model", device="cpu")
+        decision = parse_response(client.decide(build_request(question=QUESTION, card=CARD)))
+        assert seen["model"] == "some/model", "the checkpoint identity reaches the SDK"
+        assert seen["device"] == "cpu"
+        assert seen["state"] == CARD, "the card is the state, as the API shape requires"
+        assert set(seen["questions"]) == {"action", "relevant", "importance"}
+        assert decision["action"] == "one_line"
+
+    def test_a_load_without_device_still_works(self, monkeypatch) -> None:
+        """The package's own LAYA_DEVICE decides when no device is passed."""
+        import sys
+        import types
+
+        from rlm_local.decisions import LayaSdkClient
+
+        class FakeAgent:
+            def system_one(self, state, questions):
+                return _answers()
+
+        fake = types.ModuleType("laya")
+        fake.load = lambda model: FakeAgent()
+        monkeypatch.setitem(sys.modules, "laya", fake)
+
+        assert LayaSdkClient("some/model").decide(
+            build_request(question=QUESTION, card=CARD)
+        )["answers"]["action"]["choice"] == "expand"
 
 
 class TestTheEngine:

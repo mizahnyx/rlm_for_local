@@ -113,7 +113,7 @@ def build_request(
             "importance": {
                 "type": "score",
                 "instructions": importance_instructions,
-                "levels": [
+                "criteria": [
                     "No bearing on the question",
                     "Background only",
                     "Part of the answer",
@@ -165,6 +165,39 @@ def parse_response(payload: dict[str, Any] | str) -> dict[str, Any]:
         "importance": importance.get("score"),
         "importance_probabilities": importance.get("probabilities"),
     }
+
+
+class LayaSdkClient:
+    """In-process client for the reference `laya` package.
+
+    `laya.load(model).system_one(state, questions)` returns exactly the `answers` object
+    `parse_response` expects, so no server is needed — which matters, because the Mac-oriented
+    wrapper's HTTP shape is a *different* one (`/v1/decisions`, and it spells the ordinal option
+    list `levels`).
+
+    `laya` is imported when the client is constructed, never at module import, so this module stays
+    importable where the package is absent. With no `device`, the package's own `LAYA_DEVICE`
+    environment variable decides.
+    """
+
+    def __init__(
+        self, model: str = "convaiinnovations/laya-typed-decisions", device: str | None = None,
+    ) -> None:
+        import laya
+
+        if device:
+            try:
+                self._agent = laya.load(model, device=device)
+                return
+            except TypeError:  # a version whose load() takes no device
+                pass
+        self._agent = laya.load(model)
+
+    def decide(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._agent.system_one(payload["state"], payload["questions"])
+
+    def close(self) -> None:  # pragma: no cover - nothing to release in-process
+        """Present so the runner can close either client the same way."""
 
 
 class LayaClient:
