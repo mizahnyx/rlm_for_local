@@ -90,6 +90,31 @@ class TestTheDerivedPass:
         )
         assert "derived" in joined, "the description must be labelled as derived"
 
+    def test_the_pass_can_be_switched_off_for_an_ab_comparison(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """The knob exists so the same question can be run twice with nothing else changed.
+
+        There is no historical baseline to diff against: the earlier question sets' results are
+        recorded as aggregates, not as per-question trajectories. So the comparison is a fresh A/B,
+        and it only means something if the two runs differ by this flag alone.
+        """
+        bridge, index, _corpus = _bridge(tmp_path)
+        try:
+            monkeypatch.setenv("RLM_DERIVED_PASS", "0")
+            off = bridge.handle_search("zanzibaricum", k=8)
+            monkeypatch.setenv("RLM_DERIVED_PASS", "1")
+            on = bridge.handle_search("zanzibaricum", k=8)
+        finally:
+            index.close()
+
+        def derived_lines(lines: list[str]) -> list[str]:
+            return [line for line in lines
+                    if "#L" in line.split("  [")[0] and "cache" in line.split("  [")[1]]
+
+        assert not derived_lines(off), "with the pass off, the description must not be served"
+        assert derived_lines(on), "with the pass on, it must be — that is the whole comparison"
+
     def test_file_hits_are_unchanged_and_addresses_are_not_repeated(self, tmp_path: Path) -> None:
         bridge, index, _corpus = _bridge(tmp_path)
         try:

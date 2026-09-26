@@ -3667,10 +3667,19 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "the derived-text pass is switched off, so descriptions never surface",
         "src/rlm_kernel/corpus.py",
-        "        derived_hits = []\n        if not derived_only:",
+        "        derived_hits = []\n        if not derived_only and derived_pass_enabled():",
         "        derived_hits = []\n        if False:",
         ["tests/rlm_kernel/test_corpus_derived_pass.py::TestTheDerivedPass"
          "::test_a_description_only_match_is_served_with_its_own_text"],
+    ),
+    (
+        "the A/B knob is ignored, so the pass always runs",
+        "src/rlm_kernel/corpus.py",
+        '    value = os.environ.get("RLM_DERIVED_PASS", "1").strip().lower()\n'
+        '    return value not in {"0", "false", "no", "off"}',
+        "    return True",
+        ["tests/rlm_kernel/test_corpus_derived_pass.py::TestTheDerivedPass"
+         "::test_the_pass_can_be_switched_off_for_an_ab_comparison"],
     ),
 ]
 

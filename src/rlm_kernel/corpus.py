@@ -629,6 +629,21 @@ CORPUS_CONTAINER_NEEDS_MINING = (
 DERIVED_PASS_K = 3
 
 
+def derived_pass_enabled() -> bool:
+    """Whether the bounded derived-text pass runs. Default: yes.
+
+    Read from the environment on every call so the experiment can flip it between two runs of the
+    same question — same index, same model, same minute — with `RLM_DERIVED_PASS=0`. A knob rather
+    than a constant because the comparison it enables is the only arrangement that isolates the
+    pass's effect: there is no historical baseline to diff against (the earlier question sets'
+    results are recorded as aggregates, not as per-question trajectories).
+    """
+    import os
+
+    value = os.environ.get("RLM_DERIVED_PASS", "1").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
 @dataclass
 class CorpusBridge:
     """Answers the REPL's corpus verbs. Read-only, bounded, index-backed.
@@ -930,7 +945,7 @@ class CorpusBridge:
         # to the file chunk's and is de-duplicated here rather than shown twice. The pass is
         # best-effort: if it fails, the ordinary results stand and no search can break on it.
         derived_hits = []
-        if not derived_only:
+        if not derived_only and derived_pass_enabled():
             try:
                 derived = text_index.search(query, k=DERIVED_PASS_K, derived_only=True,
                                             include_vendored=True)
