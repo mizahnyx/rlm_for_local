@@ -15,10 +15,10 @@ consequences follow, and both are load-bearing:
   cannot be assessed from `covers 1/4 (weak)` alone, so the renderer resolves each
   address through the read-only mount and puts the text on the page.
 * **`render_summary` is the form that may travel.** It carries counts, never a
-  question, an address or a quote, because the page itself is corpus-derived data:
-  a consolidated list of what a private tree contains (AGENTS.md §1.9). The
-  rendered directory is therefore refused inside the corpus root and written
-  0600 in a 0700 directory outside it.
+  question, an address, a quote or the trajectory's file name, because the page
+  itself is corpus-derived data: a consolidated list of what a private tree
+  contains (AGENTS.md §1.9). The rendered directory is therefore refused inside
+  the corpus root and written 0600 in a 0700 directory outside it.
 
 Neither the page nor the summary is a verdict. An audit is *partial* whenever the
 trajectory cannot support it — a run recorded before the served-address
@@ -719,9 +719,13 @@ def _address_block(run: RunTrace, address: str,
 def render_summary(run: RunTrace) -> str:
     """One line of counts — the only output of this module that may travel.
 
-    No question, no address, no quote: it is the form an operator can paste into a
-    session or a commit message while the page stays beside the corpus
-    (AGENTS.md §1.9).
+    No question, no address, no quote **and no file name**: it is the form an operator
+    can paste into a session or a commit message while the page stays beside the corpus
+    (`AGENTS.md` §1.9). The name is excluded for the same reason as the question — a
+    probe names its trajectories after question ids (`<id>.jsonl`), an id is
+    corpus-derived, and this line's whole purpose is to be quotable. Callers that need
+    to tell several lines apart label them by position, which is what the probe and
+    `rlm trace summary` do.
     """
     audit = run.audit()
     corruption = run.address_corruption()
@@ -729,7 +733,7 @@ def render_summary(run: RunTrace) -> str:
     elapsed = (f"{run.elapsed_s:.1f}s" if isinstance(run.elapsed_s, (int, float))
                else "unknown")
     return (
-        f"{run.path.name}: turns={run.turns_used if run.turns_used is not None else '?'}"
+        f"turns={run.turns_used if run.turns_used is not None else '?'}"
         f"/{run.max_turns if run.max_turns is not None else '?'}"
         f" forced={run.forced} elapsed={elapsed}"
         f" first_helper_turn="

@@ -1079,8 +1079,10 @@ def _cmd_trace(args: argparse.Namespace) -> int:
         return 2
 
     if subcommand == "summary":
-        for path in paths:
-            print(render_summary(read_trajectory(path)))
+        # Labelled by position, not by file name: a probe names its trajectories after
+        # question ids, and a line that may be pasted must carry none (AGENTS.md §1.9).
+        for index, path in enumerate(paths, 1):
+            print(f"{index}: {render_summary(read_trajectory(path))}")
         return 0
 
     passages: dict[str, dict[str, str]] = {}
@@ -1113,8 +1115,8 @@ def _cmd_trace(args: argparse.Namespace) -> int:
     print(f"Wrote {len(pages)} page(s) and an index to {args.out_dir}")
     print(f"  open {args.out_dir / 'index.md'}")
     if args.summary:
-        for path in paths:
-            print(render_summary(read_trajectory(path)))
+        for index, path in enumerate(paths, 1):
+            print(f"{index}: {render_summary(read_trajectory(path))}")
     return 0
 
 

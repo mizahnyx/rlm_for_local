@@ -411,6 +411,10 @@ def test_the_summary_carries_no_question_no_address_and_no_quote(
     assert "Who is Vantrel?" not in summary
     assert "notes/song.txt" not in summary
     assert "Vantrel sang it first" not in summary
+    # ...and not the trajectory's own file name either: a probe names its
+    # trajectories after question ids, and an id is corpus-derived (§1.9).
+    assert "traj.jsonl" not in summary
+    assert summary.startswith("turns="), summary
 
 
 class TestTheOrientationCost:

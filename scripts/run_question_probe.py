@@ -25,9 +25,15 @@ What it prints, and what it deliberately does not
 -------------------------------------------------
 One aggregate line per question — turns, timeouts, extensions, helper calls, citations,
 refusals, wall clock — plus where the trajectories are. It never prints an answer, a
-passage or an address: those are corpus text and they stay in the trajectories beside
-the corpus (`AGENTS.md` §1.9). The question set that was run is copied into the output
-directory, so the page and its questions stay together.
+passage, an address **or a question id**: all four are corpus-derived and they stay in
+the trajectories beside the corpus (`AGENTS.md` §1.9). Progress is marked by a question's
+*position* in the set (`# [2/7] running`), and `questions.txt` in the output directory is
+what maps a position back to its id — so stdout is safe to read in a session, which is
+how the id leaked on 2026-09-26 (`docs/20260926-1830-…`).
+
+Select the question by position (`--only-index N`) rather than by id (`--only ID`) when
+the set is corpus-derived: an id passed as an argument is repeated by `ps`, by the shell
+history and by a traceback.
 
 No limit of its own
 -------------------
@@ -49,9 +55,11 @@ from rlm_local.config import load_config  # noqa: E402
 from rlm_local.model_backend import HTTPModelBackend  # noqa: E402
 from rlm_local.question_probe import (  # noqa: E402
     DEFAULT_QUESTIONS,
+    DEFAULT_REQUEST_TIMEOUT,
     Question,
     example_question_set_text,
     parse_questions,
+    progress_line,
     render_line,
     run_question,
     select_questions,
@@ -79,10 +87,20 @@ def main() -> int:
     ap.add_argument("--max-turns", type=int, default=6)
     ap.add_argument("--cell-timeout", type=float, default=60.0)
     ap.add_argument("--cell-timeout-hard", type=float, default=600.0)
+    ap.add_argument("--timeout", type=float, default=DEFAULT_REQUEST_TIMEOUT,
+                    help="HTTP timeout for one model call, in seconds (default "
+                         f"{DEFAULT_REQUEST_TIMEOUT:g}). A question's first turn is a "
+                         "large prompt, so the backend's own 300 s default makes the "
+                         "run measure the client; see question_probe.")
     ap.add_argument("--only", default=None,
                     help="Run only the questions whose id contains this substring, in "
                          "the set selected by --questions (the built-in aggregate set "
-                         "unless you name your file)")
+                         "unless you name your file). The id lands on this command "
+                         "line, so prefer --only-index for a corpus-derived set.")
+    ap.add_argument("--only-index", type=int, default=None,
+                    help="Run only the question at this 1-based position in the set "
+                         "(the same selection as --only, without putting an id on the "
+                         "command line).")
     args = ap.parse_args()
 
     if args.example is not None:
@@ -104,7 +122,8 @@ def main() -> int:
                      for name, text in DEFAULT_QUESTIONS]
         source = "built-in (aggregate questions only)"
     try:
-        questions = select_questions(questions, args.only, source=source)
+        questions = select_questions(questions, args.only, source=source,
+                                     only_index=args.only_index)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 2
@@ -128,24 +147,24 @@ def main() -> int:
     backend = HTTPModelBackend(
         root_endpoint=cfg.root_endpoint, sub_endpoint=cfg.sub_endpoint,
         root_model=cfg.root_model, sub_model=cfg.sub_model,
-        verify=False, timeout=300.0,
+        verify=False, timeout=args.timeout,
     )
     args.out_dir.mkdir(parents=True, exist_ok=True)
     write_question_set(questions, args.out_dir / "questions.txt")
 
     print(f"# model={cfg.root_model} profile={args.profile} "
           f"max_turns={args.max_turns} soft={args.cell_timeout:g}s "
-          f"hard={args.cell_timeout_hard:g}s questions={len(questions)} "
-          f"source={source}", flush=True)
+          f"hard={args.cell_timeout_hard:g}s request_timeout={args.timeout:g}s "
+          f"questions={len(questions)} source={source}", flush=True)
     print("# Aggregates only. The answers and the passages they cite stay in the "
           "trajectories", flush=True)
     print(f"# beside the corpus: {args.out_dir}", flush=True)
     try:
         for index, question in enumerate(questions, 1):
-            print(f"# [{index}/{len(questions)}] {question.id} — running", flush=True)
+            print(progress_line(index, len(questions)), flush=True)
             run = run_question(question, config=cfg, backend=backend,
                                corpus_bridge=bridge, out_dir=args.out_dir)
-            print(render_line(run), flush=True)
+            print(render_line(run, label=str(index)), flush=True)
     finally:
         bridge.close()
         backend.close()

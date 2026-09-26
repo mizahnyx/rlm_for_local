@@ -122,6 +122,15 @@ class TestSelectingQuestions:
     """
 
     def test_a_filter_that_matches_nothing_names_what_the_set_holds(self) -> None:
+        """It says *how much* the set holds, and never *which* ids it holds.
+
+        The first version listed the ids, on the argument that the refusal is printed
+        on the machine that holds the corpus. That argument is about where the set
+        lives, not about where stdout goes: this message travels to a transcript, and
+        an id is corpus-derived (`AGENTS.md` §1.9). The count answers the question the
+        message exists for — "is the set empty, or is my filter wrong?" — and the ids
+        stay in the set beside the corpus.
+        """
         from rlm_local.question_probe import select_questions
 
         questions = [Question(id="how-many-entries", question="How many?")]
@@ -130,7 +139,8 @@ class TestSelectingQuestions:
         message = str(raised.value)
         assert "no-such-topic" in message
         assert "the built-in set" in message, message
-        assert "how-many-entries" in message, "it must say what the set does hold"
+        assert "1 question" in message, "it must say how much the set holds"
+        assert "how-many-entries" not in message, "an id must not reach stdout"
         assert "--questions" in message, "it must name the likely omission"
 
     def test_a_filter_selects_every_matching_id_case_insensitively(self) -> None:
@@ -245,3 +255,114 @@ class TestTheQuestionSetThatShipsHere:
 def test_the_default_set_is_not_empty(questions) -> None:
     """A vacuity guard: an empty shipped set would make the probe do nothing."""
     assert len(questions) >= 3
+
+
+class TestTheProbePrintsPositionsAndNotIdentifiers:
+    """The probe's stdout travels to a model provider's transcript, and an id is
+    corpus-derived (`AGENTS.md` §1.9). So the probe prints a question's *position*,
+    and the set it writes beside the corpus is what maps a position to its id.
+
+    Measured 2026-09-26: the progress line printed the id, and reading it back while
+    monitoring a live A/B put one in this session's transcript — the second time the
+    same rule was broken by the same class of instrument.
+    """
+
+    corpus_like_id = "an-id-derived-from-the-prose"
+
+    def _run(self, tmp_path: Path) -> Any:
+        from rlm_local.question_probe import QuestionRun
+
+        return QuestionRun(
+            question=Question(id=self.corpus_like_id, question="What does it say?"),
+            trajectory=tmp_path / "t.jsonl", seconds=12.0,
+            summary="turns=2 citations=1 refusals=0",
+        )
+
+    def test_the_progress_line_carries_a_position_and_nothing_else(self) -> None:
+        from rlm_local.question_probe import progress_line
+
+        assert progress_line(2, 7) == "# [2/7] running"
+
+    def test_the_aggregate_line_labels_by_position_not_by_id(self, tmp_path: Path) -> None:
+        line = render_line(self._run(tmp_path), label="3")
+        assert self.corpus_like_id not in line
+        assert line.startswith("3: wall="), line
+
+    def test_the_default_label_is_not_the_question_id(self, tmp_path: Path) -> None:
+        """The fallback is the guard: it is what a caller omits, not what it asks for."""
+        assert self.corpus_like_id not in render_line(self._run(tmp_path))
+
+    def test_the_probe_script_has_no_print_that_reaches_an_id(self) -> None:
+        """A source-level guard, because the leak was a call site, not a function.
+
+        `render_line(run)` cannot print an id any more — but `print(f"…{question.id}…")`
+        in the script still could, and that is exactly the shape that leaked. This
+        reads the script's own syntax tree: no `print(...)` may contain an `.id`
+        attribute access.
+        """
+        import ast
+
+        script = (Path(__file__).resolve().parents[1] / "scripts"
+                  / "run_question_probe.py")
+        tree = ast.parse(script.read_text(encoding="utf-8"))
+        offenders = [
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name) and node.func.id == "print"
+            for sub in ast.walk(node)
+            if isinstance(sub, ast.Attribute) and sub.attr == "id"
+        ]
+        assert not offenders, f"print() reaches an id at {script}: lines {offenders}"
+
+
+class TestTheRequestTimeout:
+    """The probe's model call must be able to finish, or it measures the client.
+
+    Measured 2026-09-26: the A/B's first arm ran 902 s and died with
+    `ReadTimeout: The read operation timed out` — three 300 s attempts, which is
+    `HTTPModelBackend`'s default timeout plus two retries. On this box a question's
+    first turn is a large prompt at ~5.4 tok/s and a cell at ~1.8 tok/s, so a
+    complete turn is minutes, not one. A harness limit must not read like a model
+    failure (`AGENTS.md` §2), and the fix is a probe default that fits the workload
+    plus a knob.
+    """
+
+    def test_the_default_is_large_enough_for_a_measured_turn(self) -> None:
+        from rlm_local.question_probe import DEFAULT_REQUEST_TIMEOUT
+
+        # A 4k-token prompt at 5.4 tok/s plus 800 tokens at 1.8 tok/s is ~880 s.
+        assert DEFAULT_REQUEST_TIMEOUT >= 1800.0
+
+    def test_the_script_accepts_a_timeout_and_defaults_to_the_module_value(self) -> None:
+        text = (Path(__file__).resolve().parents[1] / "scripts"
+                / "run_question_probe.py").read_text(encoding="utf-8")
+        assert '"--timeout"' in text
+        assert "DEFAULT_REQUEST_TIMEOUT" in text
+        # It must be *passed through* to the backend: a parsed argument the backend
+        # never sees is a knob that does nothing, and the default would stand.
+        assert "timeout=args.timeout" in text
+
+
+class TestTheProbeCanSelectByPosition:
+    """`--only <id>` puts a corpus-derived id on a command line — where `ps`,
+    the shell history and a stack trace can all repeat it. A position cannot.
+    """
+
+    def test_a_position_selects_the_question_at_that_position(self) -> None:
+        from rlm_local.question_probe import select_questions
+
+        questions = [Question(id="first-topic", question="a"),
+                     Question(id="second-topic", question="b")]
+        assert [q.id for q in select_questions(questions, None, source="s",
+                                               only_index=2)] == ["second-topic"]
+
+    def test_a_position_outside_the_set_says_the_size_and_not_the_ids(self) -> None:
+        from rlm_local.question_probe import select_questions
+
+        questions = [Question(id="first-topic", question="a")]
+        with pytest.raises(ValueError) as raised:
+            select_questions(questions, None, source="s", only_index=4)
+        message = str(raised.value)
+        assert "4" in message and "1 question" in message, message
+        assert "first-topic" not in message, message

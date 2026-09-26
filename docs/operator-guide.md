@@ -1068,7 +1068,10 @@ different things:
 they are corpus-derived data: `--out-dir` is refused inside the corpus root
 (AGENTS.md §1.8, layer 3), and files are written 0600 inside a 0700 directory.
 Only the output path and counts are printed; `trace summary` prints no question, no
-address and no quote, and is the form safe to paste anywhere (`AGENTS.md` §1.9).
+address, no quote and **no trajectory file name** — a probe names its trajectories after
+question ids and an id is corpus-derived, so several lines are told apart by their
+position (`1: turns=…`, `2: turns=…`) rather than by name, and the form is safe to paste
+anywhere (`AGENTS.md` §1.9).
 
 An audit is honest about its own limits. A run recorded before the served-address
 instrumentation (`corpus_served` events, 2026-09-17) has no served set, so its
@@ -1206,15 +1209,25 @@ Two rules earn their place because breaking either one loses evidence quietly:
 
 `--only SUBSTRING` runs a subset — and it filters **the set `--questions` selected**, which
 is the three built-in aggregate questions unless you name your file. A filter that matches
-nothing says so *and* lists the ids the set actually holds, because the alternative (a bare
-"nothing to run") looks like a broken filter: measured 2026-09-19, the first attempt to
-re-run one of the owner's questions omitted `--questions` and got exactly that.
+nothing says so *and* how many questions the set holds, but never *which* ids it holds: the
+refusal reaches stdout, an id is corpus-derived, and a listing of a corpus-derived set is a
+disclosure (`AGENTS.md` §1.9). The count is what the message is for — empty set, or wrong
+filter? — and the ids are in the file beside the corpus. Measured 2026-09-19, the first
+attempt to re-run one of the owner's questions omitted `--questions` and got a bare "nothing
+to run"; measured 2026-09-26, an earlier version of this message listed the ids and was read
+into a session transcript. **`--only-index N` selects by 1-based position instead**: an id
+passed as an argument is repeated by `ps`, by the shell history and by a traceback, and a
+position is not.
 
 **It prints aggregates and nothing else**: one line per question — turns, timeouts,
-extensions, helper calls, citations, refusals, wall clock — never an answer, a passage
-or an address. Those stay in the trajectories beside the corpus, and the same
-`render_summary` line powers `rlm trace summary`, so the operator reads one vocabulary
-everywhere. Read the pages a human can audit with:
+extensions, helper calls, citations, refusals, wall clock — never an answer, a passage, an
+address **or an id**. Progress is a position (`# [2/7] running`) and the aggregate line is
+labelled by position too; `questions.txt` in `--out-dir` maps a position back to its id, so
+stdout is safe to read while a run is in flight. Everything else stays in the trajectories
+beside the corpus, and the same `render_summary` line powers `rlm trace summary`, so the
+operator reads one vocabulary everywhere. One residual, unfixed and worth stating: a
+trajectory is still *named* `<id>.jsonl`, so a directory listing of `--out-dir` shows ids —
+count it (`find … | wc -l`), do not list it. Read the pages a human can audit with:
 ```bash
 rlm trace render ~/rlm-derived/questions --out-dir ~/rlm-derived/traces \
     --corpus-root /srv/corpus --corpus-index ~/rlm-derived/corpus.sqlite
@@ -1226,6 +1239,14 @@ Two things to know before reading a question run:
   harness has none, so the bound is what you pass: `--max-turns`, `--cell-timeout`,
   `--cell-timeout-hard`. A question that hits them says so in its own line
   (`cell_timeout`, `forced`), which is a diagnosis rather than a mystery.
+- **One model call has its own timeout, and it is a measured number** (`--timeout`,
+  default 1 800 s, printed in the run's header as `request_timeout=`). It is not the
+  backend's default: a question's first turn is a large prompt at ~5.4 tok/s plus a cell at
+  ~1.8 tok/s, so a single call is minutes, and the HTTP client's 300 s default (with two
+  silent retries) killed a whole arm after 902 s with `ReadTimeout: The read operation
+  timed out` — a harness limit that reads like a model failure, which is the thing
+  `AGENTS.md` §2 forbids. Raise it for a bigger prompt; the run's header states what was
+  used.
 - **A question that fails does not take the probe with it.** A router that goes down on
   question four is recorded as `error=…` on that line and the remaining questions still
   run — five answers and one recorded failure is a measurement; losing the run is not.

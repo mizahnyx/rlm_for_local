@@ -3681,6 +3681,71 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         ["tests/rlm_kernel/test_corpus_derived_pass.py::TestTheDerivedPass"
          "::test_the_pass_can_be_switched_off_for_an_ab_comparison"],
     ),
+    # ── the question probe prints positions, never corpus-derived ids (2026-09-26) ──
+    (
+        "the probe's aggregate line falls back to the question id",
+        "src/rlm_local/question_probe.py",
+        "    name = label if label is not None else DEFAULT_LINE_LABEL",
+        "    name = label if label is not None else run.question.id",
+        ["tests/test_question_probe.py::TestTheProbePrintsPositionsAndNotIdentifiers"
+         "::test_the_default_label_is_not_the_question_id"],
+    ),
+    (
+        "the probe's progress line names the question it is running",
+        "scripts/run_question_probe.py",
+        "            print(progress_line(index, len(questions)), flush=True)",
+        '            print(f"# [{index}/{len(questions)}] {question.id} — running",'
+        " flush=True)",
+        ["tests/test_question_probe.py::TestTheProbePrintsPositionsAndNotIdentifiers"
+         "::test_the_probe_script_has_no_print_that_reaches_an_id"],
+    ),
+    (
+        "an unmatched filter lists the ids the set holds",
+        "src/rlm_local/question_probe.py",
+        '        f"no question id in {source} matches {only!r}. The set holds "\n'
+        '        f"{len(questions)} question(s), whose ids are in it and not on stdout "\n'
+        '        "(AGENTS.md §1.9). If your own set is a file, pass it with --questions PATH."',
+        '        f"no question id in {source} matches {only!r}. Ids in this set: "\n'
+        '        + ", ".join(q.id for q in questions)\n'
+        '        + ". If your own set is a file, pass it with --questions PATH."',
+        ["tests/test_question_probe.py::TestSelectingQuestions"
+         "::test_a_filter_that_matches_nothing_names_what_the_set_holds"],
+    ),
+    (
+        "a position outside the set is clamped instead of refused",
+        "src/rlm_local/question_probe.py",
+        "        if 1 <= only_index <= len(questions):\n"
+        "            return [questions[only_index - 1]]",
+        "        if only_index:\n"
+        "            return [questions[min(only_index, len(questions)) - 1]]",
+        ["tests/test_question_probe.py::TestTheProbeCanSelectByPosition"
+         "::test_a_position_outside_the_set_says_the_size_and_not_the_ids"],
+    ),
+    (
+        "the summary carries the trajectory's file name again",
+        "src/rlm_local/traceview.py",
+        "        f\"turns={run.turns_used if run.turns_used is not None else '?'}\"",
+        "        f\"{run.path.name}: turns={run.turns_used if run.turns_used is not None else '?'}\"",
+        ["tests/test_traceview.py"
+         "::test_the_summary_carries_no_question_no_address_and_no_quote"],
+    ),
+    (
+        "a directory of summaries loses its position labels",
+        "src/rlm_local/cli.py",
+        '            print(f"{index}: {render_summary(read_trajectory(path))}")\n'
+        "        return 0",
+        "            print(render_summary(read_trajectory(path)))\n        return 0",
+        ["tests/test_cli_trace.py::TestTraceRender"
+         "::test_a_directory_of_summaries_is_labelled_by_position"],
+    ),
+    (
+        "the probe's request timeout falls back to the backend default",
+        "scripts/run_question_probe.py",
+        "        verify=False, timeout=args.timeout,",
+        "        verify=False, timeout=300.0,",
+        ["tests/test_question_probe.py::TestTheRequestTimeout"
+         "::test_the_script_accepts_a_timeout_and_defaults_to_the_module_value"],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

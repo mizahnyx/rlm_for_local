@@ -54,6 +54,16 @@ DEFAULT_QUESTIONS: tuple[tuple[str, str], ...] = (
      "coverage line you used."),
 )
 
+#: The HTTP timeout for one model call, in seconds — and it is a *measured* number,
+#: because a timeout that fires is a harness limit and it must never read like a model
+#: failure (`AGENTS.md` §2). Measured 2026-09-26 on lunacode: a question's first turn is a
+#: large prompt processed at ~5.4 tok/s plus a cell decoded at ~1.8 tok/s, so one call is
+#: minutes; `HTTPModelBackend`'s own default (300 s, plus its two retries) produced
+#: `ReadTimeout: The read operation timed out` after 902 s of wall clock and the run
+#: measured the client rather than the harness. 1 800 s covers a 4 000-token prompt and an
+#: 800-token response with room to spare; a caller on a faster box passes `--timeout`.
+DEFAULT_REQUEST_TIMEOUT = 1800.0
+
 
 @dataclass(frozen=True)
 class Question:
@@ -76,8 +86,9 @@ class QuestionRun:
 
 def select_questions(
     questions: list[Question], only: str | None, *, source: str,
+    only_index: int | None = None,
 ) -> list[Question]:
-    """The subset `--only` asks for, or a refusal that says what the set holds.
+    """The one question `--only-index N` asks for, or the subset `--only` asks for.
 
     `--only` matching nothing is nearly always a *missing* `--questions` rather than a
     typo: the built-in set is three questions about aggregates, so an operator who has
@@ -85,21 +96,34 @@ def select_questions(
     broken tool. (Measured 2026-09-19: the first attempt to re-run one of the owner's
     questions did exactly that and printed `No questions to run.`)
 
-    So the refusal names the set it searched and, when the set is a file, the ids that
-    file holds. Those ids are the operator's own labels, printed on the machine that
-    holds the corpus, which is where they already live — and the alternative, a message
-    saying only "nothing matched", sends them looking for a bug in the filter.
+    So the refusal names the set it searched and **how many questions it holds** — and
+    deliberately not *which* ids it holds. An id is corpus-derived (`AGENTS.md` §1.9)
+    and this message reaches stdout, which reaches a transcript; a listing of a
+    corpus-derived set is a worse disclosure than the tree it came from. The count
+    answers the question the message exists for — empty set, or wrong filter? — and the
+    ids stay in the file beside the corpus.
+
+    `--only-index` exists because `--only <id>` puts an id on the command line, where
+    `ps`, the shell history and a traceback all repeat it (measured 2026-09-26). A
+    position repeats nothing, and the set maps the position back to its id.
     """
+    if only_index is not None:
+        if 1 <= only_index <= len(questions):
+            return [questions[only_index - 1]]
+        raise ValueError(
+            f"--only-index {only_index} is outside {source}, which holds "
+            f"{len(questions)} question(s)."
+        )
     if not only:
         return list(questions)
     wanted = only.lower()
     matched = [q for q in questions if wanted in q.id.lower()]
     if matched:
         return matched
-    available = ", ".join(q.id for q in questions) or "(the set is empty)"
     raise ValueError(
-        f"no question id in {source} matches {only!r}. Ids in this set: {available}. "
-        "If your own set is a file, pass it with --questions PATH."
+        f"no question id in {source} matches {only!r}. The set holds "
+        f"{len(questions)} question(s), whose ids are in it and not on stdout "
+        "(AGENTS.md §1.9). If your own set is a file, pass it with --questions PATH."
     )
 
 
@@ -267,15 +291,35 @@ def run_question(
                        summary=summary, error=error)
 
 
-def render_line(run: QuestionRun) -> str:
+DEFAULT_LINE_LABEL = "question"
+
+
+def progress_line(index: int, total: int) -> str:
+    """The "running" marker for question `index` of `total` — a position, nothing else.
+
+    The id is deliberately absent. This line is written to whatever stdout the operator
+    is reading, and that is a transcript: an id is corpus-derived (`AGENTS.md` §1.9),
+    and the set written beside the corpus (`write_question_set`) is what maps a
+    position back to its id.
+    """
+    return f"# [{index}/{total}] running"
+
+
+def render_line(run: QuestionRun, label: str | None = None) -> str:
     """The aggregate line for one question — and *only* aggregates.
 
-    `render_summary` carries no question, no address and no quote (`rlm trace
-    summary` is documented as the form safe to paste anywhere); this adds the wall
-    clock and, when the run failed, the failure. The answer itself stays in the
-    trajectory, beside the corpus.
+    `render_summary` carries no question, no address and no quote (`rlm trace summary`
+    is documented as the form safe to paste anywhere); this adds the wall clock and,
+    when the run failed, the failure. The answer itself stays in the trajectory,
+    beside the corpus.
+
+    `label` is the only corpus-derived text a caller can put on this line, and its
+    **default is not the question id** — the id is corpus-derived too, and this line
+    goes to stdout (`AGENTS.md` §1.9). The probe passes the question's position; a
+    caller with its own naming passes its own label.
     """
-    line = f"{run.question.id}: wall={run.seconds:.0f}s {run.summary}"
+    name = label if label is not None else DEFAULT_LINE_LABEL
+    line = f"{name}: wall={run.seconds:.0f}s {run.summary}"
     if run.error:
         line += f" error={run.error}"
     return line

@@ -76,7 +76,12 @@ class TestTraceRender:
     def test_the_terminal_gets_aggregates_and_never_corpus_text(
         self, tmp_path: Path, capsys: pytest.CaptureFixture,
     ) -> None:
-        """The page is local; what the terminal shows is safe to paste."""
+        """The page is local; what the terminal shows is safe to paste.
+
+        "Safe to paste" includes the trajectory's *name*: a probe names its
+        trajectories after question ids and an id is corpus-derived, so the summary
+        line is labelled by position instead (`AGENTS.md` §1.9).
+        """
         traj = _trajectory(tmp_path / "live-ask-2.jsonl")
         out = tmp_path / "traces"
         cli_main(["trace", "render", str(traj), "--out-dir", str(out),
@@ -84,7 +89,8 @@ class TestTraceRender:
         text = capsys.readouterr().out
 
         assert str(out) in text
-        assert "live-ask-2.jsonl" in text
+        assert "1: turns=" in text
+        assert "live-ask-2.jsonl" not in text
         assert "audit=" in text and "answers=" in text
         assert QUESTION not in text
         assert ADDRESS not in text
@@ -100,8 +106,23 @@ class TestTraceRender:
         text = capsys.readouterr().out
 
         assert rc == 0
-        assert "live-ask-3.jsonl" in text
+        assert "live-ask-3.jsonl" not in text, "the name is corpus-derived in a probe run"
+        assert "1: turns=" in text
         assert not out.exists()
+
+    def test_a_directory_of_summaries_is_labelled_by_position(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture,
+    ) -> None:
+        """Two trajectories, two lines, told apart without printing either name."""
+        logs = tmp_path / "logs"
+        _trajectory(logs / "a.jsonl")
+        _trajectory(logs / "b.jsonl")
+        rc = cli_main(["trace", "summary", str(logs)])
+        text = capsys.readouterr().out
+
+        assert rc == 0
+        assert "1: turns=" in text and "2: turns=" in text
+        assert "a.jsonl" not in text and "b.jsonl" not in text
 
     def test_a_directory_of_trajectories_is_rendered_together(
         self, tmp_path: Path, capsys: pytest.CaptureFixture,

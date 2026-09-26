@@ -1559,7 +1559,9 @@ The CLI wrapper is `rlm trace render <path> --out-dir DIR [--corpus-root … --c
 and `rlm trace summary <path>`. Two properties are enforced rather than intended:
 the rendered directory is refused inside the corpus root and written 0600 in a 0700
 directory (the pages contain corpus text), and `render_summary` carries no
-question, address or quote, so it is the form that may leave the machine
+question, address, quote **or trajectory file name** — a probe names its trajectories
+after question ids and an id is corpus-derived, so both call sites label the lines by
+position (`1: turns=…`) — so it is the form that may leave the machine
 (`AGENTS.md` §1.9). An audit says it is **partial** when the trajectory cannot
 support it — no `corpus_served` events, or a torn final line — instead of
 reporting an unverifiable "nothing was fabricated".
@@ -2129,12 +2131,22 @@ refused rather than misread as a question), an id is slugged so it cannot name a
 outside `--out-dir`, and ids are kept unique because an id *is* a file name: a repeated
 id gains a numeric suffix, except that an id written explicitly in the file keeps its
 name and the duplicate is the one that moves. `--example PATH` writes a valid, commented
-set, which a test parses, so the documented format cannot drift from the parser. Two
+set, which a test parses, so the documented format cannot drift from the parser. Three
 properties are structural rather
-than promised, and both are tested (`tests/test_question_probe.py`): the line the probe
+than promised, and all are tested (`tests/test_question_probe.py`): the line the probe
 prints **never carries the answer** (`render_summary` carries no question, no address and
-no quote, and the answer stays in the trajectory), and an id from a hand-edited question
-file is slugged so it cannot walk out of `--out-dir`. Question sets devised from passages
+no quote, and the answer stays in the trajectory); it **never carries a question id**
+either — progress and the aggregate line are labelled by position (`progress_line`,
+`render_line(label=…)`, whose default is the literal `question`, not the id) and
+`questions.txt` beside the corpus is what maps a position to an id, because an id is
+corpus-derived and the probe's stdout reaches a transcript (`AGENTS.md` §1.9); and an id
+from a hand-edited question file is slugged so it cannot walk out of `--out-dir`. A
+source-level test parses the script's syntax tree and fails if any `print(...)` reaches an
+`.id`, since the leak was a call site rather than a function. Selection is by substring
+(`--only ID`) or by position (`--only-index N`); the latter exists so a corpus-derived id
+need not appear on a command line, where `ps`, the shell history and a traceback repeat it.
+One residual is unfixed and stated: a trajectory is still named `<id>.jsonl`, so listing
+`--out-dir` shows ids — count it, do not list it. Question sets devised from passages
 are corpus-derived and belong beside the corpus; the set that ships in the repository is
 `DEFAULT_QUESTIONS`, which asks about aggregates only.
 

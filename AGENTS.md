@@ -109,6 +109,20 @@ exist, written down in one place so they stop being re-derived per session.
      question id reached this public repository in a record, a test and a commit
      message because the rule had nothing checking it —
      `docs/20260919-2330-a-question-id-reached-the-public-repository.md`.
+   - **A probe prints positions, counts and aggregates — never a name it was
+     given.** Probe stdout is read by an operator *while waiting*, which means it
+     is read into a session transcript, so an identifier on that line leaves the
+     machine whether or not anyone meant it to. Label a per-item line by its
+     **position** (`# [2/7] running`, `2: wall=…`) and keep the mapping from
+     position to name in a file beside the corpus (`questions.txt`); select an
+     item by position where selection would otherwise put a name on a command
+     line, where `ps`, the shell history and a traceback repeat it. A refusal that
+     helps an operator ("your filter matched nothing") states the *size* of the
+     set, not its contents. Measured 2026-09-26: the question probe printed the id
+     in its progress line and in every aggregate line, and an unmatched-filter
+     refusal listed the whole set — three disclosures of one class in two days,
+     the last two by `tail`ing probe stdout and by `pgrep -af`
+     (`docs/20260926-1900-the-probe-printed-the-id-it-was-measuring.md`).
    - **Artifacts are locked down after use**: `chmod 600` the census TSVs, and
      decide deliberately whether to keep the walk (it contains every path in the
      backup) or delete it once the aggregates are computed. Keeping it saves a
