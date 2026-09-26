@@ -2084,9 +2084,8 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO10 the summary starts carrying the question",
         "src/rlm_local/traceview.py",
-        "        f\"{run.path.name}: turns={run.turns_used if run.turns_used is not None else '?'}\"",
-        "        f\"{run.path.name} question={run.query}:\"\n"
-        "        f\" turns={run.turns_used if run.turns_used is not None else '?'}\"",
+        "        f\"turns={run.turns_used if run.turns_used is not None else '?'}\"",
+        "        f\"question={run.query} turns={run.turns_used if run.turns_used is not None else '?'}\"",
         [
             "tests/test_traceview.py"
             "::test_the_summary_carries_no_question_no_address_and_no_quote",
@@ -2470,8 +2469,8 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "a filter that matches nothing says nothing about the set again",
         "src/rlm_local/question_probe.py",
-        "    if matched:\n        return matched\n    available",
-        "    if matched:\n        return matched\n    return []\n    available",
+        "    if matched:\n        return matched\n    raise ValueError(",
+        "    if matched:\n        return matched\n    return []\n    raise ValueError(",
         [
             "tests/test_question_probe.py::TestSelectingQuestions"
             "::test_a_filter_that_matches_nothing_names_what_the_set_holds",
