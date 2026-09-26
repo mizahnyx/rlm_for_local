@@ -105,7 +105,12 @@ exist, written down in one place so they stop being re-derived per session.
      checked, not intended: `python scripts/check_privacy.py --tokens
      ~/rlm-derived/private-tokens.txt` (add `--history` to scan commit messages),
      where the *list* stays beside the corpus and the failure message names a file,
-     a line and a position rather than the identifier. Measured 2026-09-19: a
+     a line and a position rather than the identifier. **Both forms are part of the
+     routine: the tree form before a commit, the `--history` form before a push** —
+     measured 2026-09-26, the tree form had been passing while six occurrences sat in
+     four published commit messages, all predating the token list
+     (`docs/20260926-2100-a-token-on-the-private-list-is-in-the-public-history.md`).
+     Measured 2026-09-19: a
      question id reached this public repository in a record, a test and a commit
      message because the rule had nothing checking it —
      `docs/20260919-2330-a-question-id-reached-the-public-repository.md`.
