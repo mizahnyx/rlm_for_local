@@ -2123,6 +2123,7 @@ deliberately different in kind:
 |---|---|---|
 | `scripts/probe_cell_budget.py` | a **mechanism**: a cell that sleeps past the soft limit, with and without a helper call | `two_limits_supported`, `probe_request` (every request with its millisecond offset), `probe_cell` (elapsed, `timed_out`, `hard`, `activity`), `cell_extended` |
 | `scripts/run_question_probe.py` | the **task**: real questions, a real model, the real index | one aggregate line per question (turns, timeouts, extensions, helper calls, citations, refusals, wall clock), one trajectory each, and the question set it used |
+| `scripts/probe_laya_decisions.py` | the **admission decision**: 14 synthetic cards with a known expected action, through a typed-decision model (`--sdk` for Laya, `--gliner` for GLiNER2.5-Decide) | accuracy over the cases that carry an expectation, the confusion matrix, mean confidence when right against when wrong, and median decision time — ids, labels and numbers only, never a card |
 
 `rlm_local/question_probe.py` holds the question-set parser, the per-question runner and
 the aggregate line; the script is a thin wrapper. A set is one question per line,
@@ -2153,6 +2154,22 @@ are corpus-derived and belong beside the corpus; the set that ships in the repos
 Neither probe sets a wall-clock ceiling of its own: the harness has none (the owner's
 call), so a probe run is bounded by the `--max-turns`, `--cell-timeout` and
 `--cell-timeout-hard` it is given, and a run that hits them says so in its own line.
+
+**The admission probe speaks two dialects.** `rlm_local/decisions.py` builds one request
+per card — what to do with it (`expand`/`summarise`/`one_line`/`drop`), whether it matters,
+and how much — and refuses rather than defaults: a card over the model's per-question
+budget raises `CardTooLarge`, and a label outside the vocabulary raises `UnknownAction`.
+`LayaClient` (`--endpoint`), `LayaSdkClient` (`--sdk`) and `GLiNERDecideClient` (`--gliner`)
+answer that same request, the last two in process. GLiNER does not take the
+state-and-questions shape, so `gliner_schema_from` maps each question to a head — a choice
+question's criteria become *described labels*, which a measurement says are load-bearing
+(bare label names scored 1/12 against 5/12 with the sentences) — and `gliner_answers_from`
+maps the reply back into the shape `parse_response` checks. `--gliner-split-heads` asks one
+question per call: 7/12 that way against 5/12 with all three heads at once, at 4.7 s a card
+instead of 2.8 s. None of that is a recommendation: both checkpoints failed the
+pre-registered phase-B1 criteria (`docs/20260925-0300-…`, `docs/20260927-0100-…`). The
+GLiNER client needs an isolated venv with `torch`, `gliner2` and — undeclared by the
+package and required for inference — `peft`; never the harness venv.
 
 ---
 
