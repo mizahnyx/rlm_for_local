@@ -953,6 +953,84 @@ def task_summarise(ctx: TaskContext, rel: str, size: int, source_hash: str) -> T
                           str((meta or {}).get("engine", "summarise")))
 
 
+def task_ocr_page(ctx: TaskContext, rel: str, size: int, source_hash: str) -> TaskOutcome:
+    """Transcribe a document whose text layer is empty, one page at a time (Gate 2 B).
+
+    The owner's call (2026-09-26) is that these documents may be OCR'd with a recent ML OCR
+    model, and that the cost is accepted. The model is **injected**, never imported — the engine
+    is `ctx.engines["ocr"]`, a callable `(mount, rel) -> (text, meta)` — for the same reason the
+    summariser's is: the kernel has no model by construction. No engine means a skip *with a
+    reason* (`no_ocr_engine`), never a fabricated transcription and never a silent zero.
+
+    The unit is one **document** per queue row even though the task is named for the page: the
+    queue is keyed `(raw, task)`, so naming a page would need a schema change, and the pages are
+    walked inside the engine. What the engine could not do comes back in its metadata —
+    `pages`, `pages_failed` — and a document that yielded no text at all is `ocr_no_text`
+    rather than a `done` with an empty entry.
+
+    The transcription is stored as **derived** text under the cache origin and indexed, so a
+    citation to it is labelled as derived rather than quoted as the document's own words. The
+    cache key carries the engine tag, so a run with a different model or a different page
+    resolution does not reuse another configuration's words.
+    """
+    engine = ctx.engines.get("ocr")
+    if engine is None:
+        return TaskOutcome(SKIPPED, "no_ocr_engine")
+    cache = ctx.cache_for(OCR_PAGE)
+    key = cache.key(source_hash, params=f"ocr<=v1,{_engine_tag(engine)}")
+    if cache.has(key):
+        cached = cache.get(key)
+        if cached is not None:
+            text, meta = cached
+            outcome = _index_ocr(ctx, rel, source_hash, key, text,
+                                 str((meta or {}).get("engine", "cache")))
+            if outcome.state == FAILED:
+                return outcome
+        return TaskOutcome(DONE, "cache")
+    try:
+        text, meta = engine(ctx.mount, rel)
+    except (OSError, ReadOnlyViolation, RuntimeError) as e:
+        return TaskOutcome(FAILED, type(e).__name__)
+    text = (text or "").strip()
+    if not text:
+        # Nothing came back: an unreadable scan, a page the model refused, or a document that
+        # is images of nothing. Recorded as a skip *with the reason*, and never cached — a
+        # cached empty would make one bad minute a permanent claim that the document is blank.
+        return TaskOutcome(SKIPPED, "ocr_no_text")
+    try:
+        cache.put(key, text, dict(meta or {}))
+    except (OSError, sqlite3.Error) as e:
+        return TaskOutcome(FAILED, type(e).__name__)
+    if ctx.text_index is None:
+        return TaskOutcome(DONE, "not_indexed", key, len(text))
+    return _index_ocr(ctx, rel, source_hash, key, text,
+                      str((meta or {}).get("engine", "ocr")))
+
+
+def _index_ocr(ctx: TaskContext, rel: str, source_hash: str, key: str, text: str,
+               engine_name: str) -> TaskOutcome:
+    """Put a transcription in the text index as derived text, or say why it could not be.
+
+    Shared by the first pass and the cache-hit path on purpose: a transcription that was paid
+    for and cannot be found is the failure this indexing exists to prevent, and a cache hit
+    must repair that — the index can be rebuilt between runs.
+    """
+    if ctx.text_index is None:
+        return TaskOutcome(DONE, "not_indexed", key, len(text))
+    try:
+        ctx.text_index.add_text(
+            raw=_bytes_of(rel), display=_index_display(rel), source_hash=source_hash,
+            text=text.encode("utf-8"), origin=ORIGIN_CACHE,
+            cache_task=OCR_PAGE, cache_key=key, derived=True,
+            engine=engine_name, replace=True,
+        )
+    except (UnicodeEncodeError, sqlite3.Error) as e:
+        # The transcription is cached and useful; only the index row failed. Reported so the
+        # item is counted rather than silently half-done (the RO19/RO20 lesson).
+        return TaskOutcome(FAILED, type(e).__name__, key, len(text))
+    return TaskOutcome(DONE, None, key, len(text))
+
+
 def task_index_text(ctx: TaskContext, rel: str, size: int, source_hash: str) -> TaskOutcome:
     """Index a plain text file's own bytes.
 
@@ -990,6 +1068,7 @@ TASK_HANDLERS: dict[str, Callable[[TaskContext, str, int, str], TaskOutcome]] = 
     LIST_ARCHIVE: task_list_archive,
     EXTRACT_TEXT: task_extract_text,
     INDEX_TEXT: task_index_text,
+    OCR_PAGE: task_ocr_page,
     # Deliberately in the table but **not** in `IMPLEMENTED_TASKS`: a handler exists, but a
     # default mining window must not pick summarisation up until an engine is wired and its
     # cost measured — `mine plan` still counts it as unimplemented, which is the truthful
@@ -1412,6 +1491,12 @@ def run_queue(
             outcome = TaskOutcome(FAILED, type(e).__name__)
         if outcome.note == "cache":
             stats.cache_hits += 1
+        if task == EXTRACT_TEXT and outcome.note == "needs_ocr":
+            # The extraction pass promised this signal: a document with no text layer is queued
+            # for OCR *here*, because only the outcome knows the document needs one. It is
+            # enqueued rather than run so that a window which is not allowed to spend hours on
+            # a model does not start one — the row waits until a window that names `ocr_page`.
+            store.enqueue([(raw, OCR_PAGE, PRIORITY_OCR_PAGE)])
         store.finish(raw, task, outcome.state, outcome.note)
         stats.note(task, outcome.state)
         if lock_file is not None:

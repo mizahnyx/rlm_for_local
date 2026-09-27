@@ -3804,6 +3804,82 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         ["tests/test_decisions.py::TestTheGliNERClient"
          "::test_split_heads_asks_one_question_per_call"],
     ),
+    # ── Gate 2B: an OCR transcription is derived, counted and repair-able (2026-09-26) ──
+    (
+        "an OCR transcription is indexed as if it were the document's own words",
+        "src/rlm_kernel/mine.py",
+        '            text=text.encode("utf-8"), origin=ORIGIN_CACHE,\n'
+        '            cache_task=OCR_PAGE, cache_key=key, derived=True,',
+        '            text=text.encode("utf-8"), origin="file",\n'
+        '            cache_task=OCR_PAGE, cache_key=key, derived=True,',
+        ["tests/rlm_kernel/test_ocr_page.py::TestTheOcrTask"
+         "::test_a_transcription_is_cached_and_made_findable"],
+    ),
+    (
+        "an empty transcription is cached as the document's content",
+        "src/rlm_kernel/mine.py",
+        '    text = (text or "").strip()\n    if not text:',
+        '    text = (text or "").strip()\n    if False:',
+        ["tests/rlm_kernel/test_ocr_page.py::TestTheOcrTask"
+         "::test_an_empty_transcription_is_a_skip_and_is_not_cached"],
+    ),
+    (
+        "the OCR cache key forgets which engine produced the words",
+        "src/rlm_kernel/mine.py",
+        '    key = cache.key(source_hash, params=f"ocr<=v1,{_engine_tag(engine)}")',
+        '    key = cache.key(source_hash, params="ocr<=v1")',
+        ["tests/rlm_kernel/test_ocr_page.py::TestTheOcrTask"
+         "::test_one_engine_is_not_served_another_engines_words"],
+    ),
+    (
+        "a cache hit stops repairing the text index",
+        "src/rlm_kernel/mine.py",
+        '            outcome = _index_ocr(ctx, rel, source_hash, key, text,\n'
+        '                                 str((meta or {}).get("engine", "cache")))',
+        '            outcome = TaskOutcome(DONE, "cache")',
+        ["tests/rlm_kernel/test_ocr_page.py::TestTheOcrTask"
+         "::test_a_cache_hit_costs_no_engine_call_and_still_indexes"],
+    ),
+    (
+        "a document that needs OCR is never queued for it",
+        "src/rlm_kernel/mine.py",
+        "            store.enqueue([(raw, OCR_PAGE, PRIORITY_OCR_PAGE)])",
+        "            pass",
+        ["tests/rlm_kernel/test_ocr_page.py::TestTheQueueReachesIt"
+         "::test_a_document_that_needs_ocr_queues_the_ocr_task"],
+    ),
+    (
+        "a page the OCR model refused is dropped without being counted",
+        "src/rlm_local/ocr.py",
+        "                except Exception:\n                    failed += 1",
+        "                except Exception:\n                    pass",
+        ["tests/test_ocr.py::TestTheEngine"
+         "::test_a_failed_page_is_counted_and_the_rest_are_kept"],
+    ),
+    (
+        "the page cap is not passed to the renderer",
+        "src/rlm_local/ocr.py",
+        '        "-f", "1", "-l", str(int(max_pages)), str(document), str(stem),',
+        '        "-f", "1", "-l", "1000", str(document), str(stem),',
+        ["tests/test_ocr.py::TestTheRenderer"
+         "::test_a_pdf_that_cannot_be_rendered_raises_rather_than_returning_nothing"],
+    ),
+    (
+        "the OCR instruction is not the one the checkpoint documents",
+        "src/rlm_local/ocr.py",
+        '                    {"type": "text", "text": self._prompt},',
+        '                    {"type": "text", "text": "Read this page."},',
+        ["tests/test_ocr.py::TestTheClient"
+         "::test_the_payload_carries_the_image_and_the_documented_instruction"],
+    ),
+    (
+        "a 503 from a model that is still loading is treated as a failure",
+        "src/rlm_local/ocr.py",
+        "            if response.status_code == 503:",
+        "            if False:",
+        ["tests/test_ocr.py::TestTheClient"
+         "::test_a_503_is_retried_because_the_model_may_still_be_loading"],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

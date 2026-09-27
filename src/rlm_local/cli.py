@@ -460,6 +460,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_mrun.add_argument("--pause-file", type=Path, default=None,
                         help="Pause flag (default: <index dir>/mine.pause)")
     p_mrun.add_argument("--progress-every", type=int, default=200)
+    p_mrun.add_argument("--ocr-endpoint", default=None,
+                        help="Serve the `ocr_page` task with an OCR model at this "
+                             "OpenAI-compatible endpoint (GLM-OCR on llama.cpp). Without it "
+                             "an OCR item is skipped with the reason `no_ocr_engine`. Start "
+                             "the OCR server for the window and stop it after: this box runs "
+                             "one model at a time.")
+    p_mrun.add_argument("--ocr-model", default="glm-ocr",
+                        help="The model name the OCR endpoint answers to")
+    p_mrun.add_argument("--ocr-dpi", type=int, default=None,
+                        help="Page resolution for OCR (default: the measured 150)")
+    p_mrun.add_argument("--ocr-max-pages", type=int, default=None,
+                        help="Pages per document for OCR (default: 24)")
+    p_mrun.add_argument("--ocr-timeout", type=float, default=None,
+                        help="Seconds one page may take before the call is abandoned")
     p_mrun.add_argument("--no-coverage-scan", dest="coverage_scan", action="store_false",
                         help="Skip the whole-index coverage scan this window would "
                              "otherwise publish (~16 min warm, ~51 min cold). Use it for "
@@ -2073,11 +2087,36 @@ def _cmd_mine(args: argparse.Namespace) -> int:
             print(f"mining for {args.budget or 'unbounded'}"
                   + (f" until {args.until}" if args.until else "")
                   + (f", at most {args.max_items:,} items" if args.max_items else ""))
+
+            engines: dict[str, Any] = {}
+            ocr_client = None
+            if getattr(args, "ocr_endpoint", None):
+                # The OCR engine is injected only when an endpoint is named: a window that was
+                # not pointed at an OCR model must *skip* OCR items with a reason, not start a
+                # second model on a box that holds one at a time.
+                from rlm_local.ocr import (
+                    MAX_PAGES_PER_DOCUMENT, PAGE_TIMEOUT_SECONDS, RENDER_DPI,
+                    OcrClient, make_ocr_engine,
+                )
+
+                ocr_client = OcrClient(
+                    args.ocr_endpoint, model=args.ocr_model,
+                    timeout=args.ocr_timeout or PAGE_TIMEOUT_SECONDS,
+                )
+                engines["ocr"] = make_ocr_engine(
+                    ocr_client,
+                    dpi=args.ocr_dpi or RENDER_DPI,
+                    max_pages=args.ocr_max_pages or MAX_PAGES_PER_DOCUMENT,
+                )
+                print(f"ocr engine {ocr_client.tag} "
+                      f"(dpi {args.ocr_dpi or RENDER_DPI}, "
+                      f"max pages {args.ocr_max_pages or MAX_PAGES_PER_DOCUMENT})")
             try:
                 run = run_queue(
                     store=store, conn=index._conn, mount=mount,
                     cache_root=cache_root, tasks=tasks,
                     text_index=text_index,
+                    engines=engines,
                     budget_seconds=budget, deadline=deadline,
                     max_items=args.max_items, pause_file=pause_path,
                     lock_file=lock_path, progress=progress,
@@ -2093,6 +2132,8 @@ def _cmd_mine(args: argparse.Namespace) -> int:
                 print(f"  by task: {run.stats.by_task}")
                 print(format_status(store.status()))
             finally:
+                if ocr_client is not None:
+                    ocr_client.close()
                 release_lock(lock_path)
             return 0
     finally:

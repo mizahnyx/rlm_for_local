@@ -434,3 +434,12 @@ SUMMARY_PROMPT = (
     "- No preamble, no headings, no lists, no commentary about these rules.\n"
 )
 
+# The OCR instruction, and it is deliberately this short. GLM-OCR is *prompt-limited*: its model
+# card documents exactly `Text Recognition:`, `Formula Recognition:` and `Table Recognition:` for
+# document parsing, and a paragraph of custom instructions is not what the checkpoint was trained
+# on. The page is untrusted content inside the request, so the instruction says what to do and
+# nothing on the page can change it — but there is no room here for the kind of boundary sentence
+# `SUMMARY_SYSTEM` needs, which is why the *engine* keeps the text and the image in separate
+# parts of one message rather than concatenating them into a single string.
+OCR_PROMPT = "Text Recognition:"
+
