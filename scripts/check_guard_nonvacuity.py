@@ -3745,6 +3745,53 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         ["tests/test_question_probe.py::TestTheRequestTimeout"
          "::test_the_script_accepts_a_timeout_and_defaults_to_the_module_value"],
     ),
+    # ── Gate 6: GLiNER2.5-Decide takes the same card in a different dialect (2026-09-26) ──
+    (
+        "the choice head loses the criteria that describe its labels",
+        "src/rlm_local/decisions.py",
+        '                head["labels"] = {str(k): str(v) for k, v in criteria.items()}',
+        '                head["labels"] = [str(k) for k in criteria]',
+        ["tests/test_decisions.py::TestTheGliNERClient"
+         "::test_the_choice_head_carries_its_criteria_as_described_labels"],
+    ),
+    (
+        "the ordinal head's scale is fixed instead of following its criteria",
+        "src/rlm_local/decisions.py",
+        "                head[\"labels\"] = {\n"
+        "                    str(index): str(text) for index, text in enumerate(criteria)\n"
+        "                }",
+        "                head[\"labels\"] = {\n"
+        "                    str(index): str(text) for index, text in enumerate(criteria[:4])\n"
+        "                }",
+        ["tests/test_decisions.py::TestTheGliNERClient"
+         "::test_the_ordinal_head_follows_its_criteria_count"],
+    ),
+    (
+        "a label outside the vocabulary is repaired on the way back",
+        "src/rlm_local/decisions.py",
+        '            answers[name] = {"type": "choice", "choice": label, "probabilities": None,',
+        '            answers[name] = {"type": "choice", "probabilities": None,\n'
+        '                             "choice": label if label in ACTIONS else ACTIONS[0],',
+        ["tests/test_decisions.py::TestTheGliNERClient"
+         "::test_a_label_outside_the_vocabulary_is_not_repaired"],
+    ),
+    (
+        "the GLiNER client stops asking the model for a confidence",
+        "src/rlm_local/decisions.py",
+        "            payload[\"state\"], schema, include_confidence=True,",
+        "            payload[\"state\"], schema, include_confidence=False,",
+        ["tests/test_decisions.py::TestTheGliNERClient"
+         "::test_the_client_sends_the_card_and_asks_for_confidence"],
+    ),
+    (
+        "a head with no criteria is sent to the model anyway",
+        "src/rlm_local/decisions.py",
+        '            if not criteria:\n'
+        '                raise MalformedDecision(f"question {name!r} of type {qtype!r} has no criteria")',
+        '            if not criteria:\n                criteria = {}',
+        ["tests/test_decisions.py::TestTheGliNERClient"
+         "::test_a_question_without_criteria_is_refused"],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

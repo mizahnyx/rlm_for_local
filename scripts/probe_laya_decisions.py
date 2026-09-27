@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from rlm_local.decisions import (  # noqa: E402
     ACTIONS,
+    GLiNERDecideClient,
     CardTooLarge,
     LayaClient,
     LayaSdkClient,
@@ -42,6 +43,9 @@ from rlm_local.decisions import (  # noqa: E402
     UnknownAction,
     make_admission_engine,
 )
+
+#: The checkpoint `--gliner` loads unless another is named.
+DEFAULT_GLINER_MODEL = "fastino/GLiNER2.5-Decide"
 
 
 def load_cases(path: Path) -> list[dict[str, Any]]:
@@ -149,6 +153,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", default="convaiinnovations/laya-typed-decisions")
     parser.add_argument("--sdk", action="store_true",
                         help="use the in-process `laya` package instead of an HTTP endpoint")
+    parser.add_argument("--gliner", action="store_true",
+                        help="use GLiNER2.5-Decide in-process through `gliner2` (needs a venv "
+                             "with torch and gliner2, e.g. ~/laya-eval/.venv)")
+    parser.add_argument("--gliner-model", default=DEFAULT_GLINER_MODEL,
+                        help=f"the GLiNER checkpoint --gliner loads (default {DEFAULT_GLINER_MODEL})")
     parser.add_argument("--device", default=None, help="e.g. cpu, for the SDK")
     parser.add_argument("--log", type=Path, default=None,
                         help="JSONL of decisions (no card text, ever)")
@@ -157,11 +166,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     cases = load_cases(args.cases)
-    if args.sdk:
+    if args.gliner:
+        client = GLiNERDecideClient(args.gliner_model)
+        model_label = args.gliner_model
+    elif args.sdk:
         client = LayaSdkClient(args.model, device=args.device)
+        model_label = args.model
     else:
         client = LayaClient(args.endpoint)
-    engine = make_admission_engine(client, model=args.model, log_path=args.log)
+        model_label = args.model
+    engine = make_admission_engine(client, model=model_label, log_path=args.log)
     decisions: list[dict[str, Any]] = []
     try:
         for case in cases:

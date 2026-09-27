@@ -226,6 +226,130 @@ class LayaClient:
         self._client.close()
 
 
+class GLiNERDecideClient:
+    """In-process client for `fastino/GLiNER2.5-Decide` through the `gliner2` package.
+
+    A different dialect of the same idea: GLiNER takes one text and a **schema of typed heads** and
+    returns one label per head, with an optional confidence. It does not take Laya's
+    `state`/`questions` shape, so the translation lives in two pure functions
+    (`gliner_schema_from`, `gliner_answers_from`) and this class is only the call.
+
+    Two measured facts shaped it (2026-09-26, lunacode, CPU):
+
+    * **The three questions are one forward pass**, not three — `classify_text` scores every head in
+      the schema at once, and a three-head call took ~2.1 s warm.
+    * **The confidence is the winner's score, not a distribution.** `include_confidence=True`
+      returns `{'head': {'label': …, 'confidence': …}}`; there is no per-label probability surface
+      on this API, so `probabilities` is `None` and only `confidence` is carried. A selected label
+      is not a distribution, and this module does not invent one.
+
+    `gliner2` is imported when the client is constructed, never at module import, so this module
+    stays importable where the package is absent.
+    """
+
+    def __init__(self, model: str = "fastino/GLiNER2.5-Decide") -> None:
+        from gliner2 import AutoExtractor
+
+        self._extractor = AutoExtractor.from_pretrained(model)
+        self._model = model
+
+    def decide(self, payload: dict[str, Any]) -> dict[str, Any]:
+        schema = gliner_schema_from(payload)
+        result = self._extractor.classify_text(
+            payload["state"], schema, include_confidence=True,
+        )
+        return {"answers": gliner_answers_from(result)}
+
+    def close(self) -> None:  # pragma: no cover - nothing to release in-process
+        """Present so the runner can close either client the same way."""
+
+
+def gliner_schema_from(payload: dict[str, Any]) -> dict[str, Any]:
+    """The card-and-questions request as a GLiNER2.5-Decide schema: one head per question.
+
+    The translations are deliberate rather than mechanical:
+
+    * a **choice** question's criteria become *described labels*, because GLiNER lets a label carry
+      the sentence that explains it — and those criteria are the model's options, not commentary;
+    * a **noul** question becomes a `yes`/`no` head (`None` is not a label this model offers);
+    * a **score** question becomes an ordinal head over the *count* of its criteria, so the scale is
+      whatever the request declares rather than a constant repeated in two places.
+
+    The question being answered goes in the head's `prompt`, which is where GLiNER expects the task
+    text. A question with no criteria raises rather than being sent as an empty label set: a
+    classifier with nothing to choose between cannot answer, and asking anyway would produce a
+    confident label for a question nobody asked.
+    """
+    questions = payload.get("questions")
+    if not isinstance(questions, dict) or not questions:
+        raise MalformedDecision("request carried no 'questions' object")
+    schema: dict[str, Any] = {}
+    for name, spec in questions.items():
+        if not isinstance(spec, dict):
+            raise MalformedDecision(f"question {name!r} is not an object")
+        qtype = spec.get("type")
+        head: dict[str, Any] = {}
+        if qtype in ("choice", "score"):
+            criteria = spec.get("criteria")
+            if not criteria:
+                raise MalformedDecision(f"question {name!r} of type {qtype!r} has no criteria")
+            if qtype == "choice":
+                if not isinstance(criteria, dict):
+                    raise MalformedDecision(f"choice question {name!r} has non-mapping criteria")
+                head["labels"] = {str(k): str(v) for k, v in criteria.items()}
+            else:
+                head["labels"] = {
+                    str(index): str(text) for index, text in enumerate(criteria)
+                }
+        elif qtype == "noul":
+            head["labels"] = ["yes", "no"]
+        else:
+            raise MalformedDecision(f"question {name!r} has unknown type {qtype!r}")
+        instructions = spec.get("instructions")
+        if instructions:
+            head["prompt"] = str(instructions)
+        schema[name] = head
+    return schema
+
+
+def gliner_answers_from(result: dict[str, Any] | str) -> dict[str, Any]:
+    """GLiNER's `{head: label}` (or `{head: {label, confidence}}`) as the answers object.
+
+    Every question in the request must come back; a missing head raises, so the parser's own
+    guarantees still hold one layer up. Labels are passed through untouched — a label outside our
+    vocabulary is `parse_response`'s refusal to make, not this function's to repair — except that
+    `noul` and `score` answers are converted to the boolean and integer their types promise.
+    """
+    if isinstance(result, str):
+        result = _json_or_die(result)
+    if not isinstance(result, dict):
+        raise MalformedDecision("GLiNER returned no result object")
+    answers: dict[str, Any] = {}
+    for name, raw in result.items():
+        label: Any = None
+        confidence: float | None = None
+        if isinstance(raw, dict):
+            label = raw.get("label")
+            confidence = raw.get("confidence")
+        elif isinstance(raw, (tuple, list)) and len(raw) == 2 and not isinstance(raw[0], (list, tuple)):
+            label, confidence = raw[0], raw[1]
+        elif isinstance(raw, (str, int, float)):
+            label = raw
+        elif isinstance(raw, list):
+            label = raw[0] if raw else None
+        else:
+            raise MalformedDecision(f"head {name!r} answered in an unknown shape")
+        if isinstance(label, str) and label in ("yes", "no"):
+            answers[name] = {"type": "noul", "noul": label == "yes", "confidence": confidence}
+        elif isinstance(label, str) and label.isdigit():
+            answers[name] = {"type": "score", "score": int(label),
+                             "probabilities": None, "confidence": confidence}
+        else:
+            answers[name] = {"type": "choice", "choice": label, "probabilities": None,
+                             "confidence": confidence}
+    return answers
+
+
 def make_admission_engine(
     client: DecisionsClient,
     *,

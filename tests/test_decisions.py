@@ -187,6 +187,115 @@ class TestTheSdkClient:
         )["answers"]["action"]["choice"] == "expand"
 
 
+class TestTheGliNERClient:
+    """GLiNER2.5-Decide takes the same card and the same three questions, in one call.
+
+    The mapping is a translation between two typed-request dialects, so it is written as two
+    pure functions with the client as a thin shell — which is what makes it testable without
+    the 340M model, and what keeps a wrong label from being quietly repaired on the way out.
+    """
+
+    def _schema(self) -> dict:
+        from rlm_local.decisions import gliner_schema_from
+
+        return gliner_schema_from(build_request(question=QUESTION, card=CARD,
+                                                turn=2, turns_left=4))
+
+    def test_each_question_becomes_one_head(self) -> None:
+        schema = self._schema()
+        assert set(schema) == {"action", "relevant", "importance"}
+
+    def test_the_choice_head_carries_its_criteria_as_described_labels(self) -> None:
+        """The criteria are the model's options, so their wording rides with the labels."""
+        action = self._schema()["action"]
+        assert set(action["labels"]) == set(ACTIONS)
+        assert action["labels"]["drop"] == ACTION_CRITERIA["drop"]
+        assert QUESTION in action["prompt"], "the question being answered reaches the head"
+
+    def test_the_relevance_head_is_a_yes_no_decision(self) -> None:
+        assert self._schema()["relevant"]["labels"] == ["yes", "no"]
+
+    def test_the_ordinal_head_follows_its_criteria_count(self) -> None:
+        """No hard-coded 0..3: the scale is whatever the request's criteria are."""
+        from rlm_local.decisions import gliner_schema_from
+
+        payload = build_request(question=QUESTION, card=CARD)
+        payload["questions"]["importance"]["criteria"] = ["a", "b", "c", "d", "e"]
+        head = gliner_schema_from(payload)["importance"]
+        assert list(head["labels"]) == ["0", "1", "2", "3", "4"]
+
+    def test_a_question_without_criteria_is_refused(self) -> None:
+        from rlm_local.decisions import gliner_schema_from
+
+        payload = build_request(question=QUESTION, card=CARD)
+        del payload["questions"]["action"]["criteria"]
+        with pytest.raises(MalformedDecision):
+            gliner_schema_from(payload)
+
+    def test_the_answers_come_back_in_the_shape_the_parser_expects(self) -> None:
+        from rlm_local.decisions import gliner_answers_from
+
+        result = {
+            "action": {"label": "drop", "confidence": 0.31},
+            "relevant": {"label": "no", "confidence": 0.5},
+            "importance": {"label": "2", "confidence": 0.4},
+        }
+        decision = parse_response({"answers": gliner_answers_from(result)})
+        assert decision["action"] == "drop"
+        assert decision["action_confidence"] == 0.31
+        assert decision["relevant"] is False
+        assert decision["importance"] == 2
+
+    def test_a_bare_label_is_accepted_and_carries_no_confidence(self) -> None:
+        from rlm_local.decisions import gliner_answers_from
+
+        decision = parse_response({"answers": gliner_answers_from({
+            "action": "summarise", "relevant": "yes", "importance": "3"})})
+        assert (decision["action"], decision["relevant"], decision["importance"]) == (
+            "summarise", True, 3)
+        assert decision["action_confidence"] is None
+
+    def test_a_label_outside_the_vocabulary_is_not_repaired(self) -> None:
+        """The adapter translates; it does not sanitise. `parse_response` is the guard."""
+        from rlm_local.decisions import gliner_answers_from
+
+        with pytest.raises(UnknownAction):
+            parse_response({"answers": gliner_answers_from({"action": "expandd",
+                                                            "relevant": "yes",
+                                                            "importance": "1"})})
+
+    def test_the_client_sends_the_card_and_asks_for_confidence(self, monkeypatch) -> None:
+        import sys
+        import types
+
+        from rlm_local.decisions import GLiNERDecideClient
+
+        seen: dict = {}
+
+        class FakeExtractor:
+            def classify_text(self, text, tasks, **kwargs):
+                seen["text"] = text
+                seen["tasks"] = tasks
+                seen["kwargs"] = kwargs
+                return {"action": {"label": "one_line", "confidence": 0.44},
+                        "relevant": {"label": "yes", "confidence": 0.8},
+                        "importance": {"label": "1", "confidence": 0.3}}
+
+        fake = types.ModuleType("gliner2")
+        fake.AutoExtractor = type("AutoExtractor", (), {
+            "from_pretrained": staticmethod(
+                lambda name: (seen.__setitem__("model", name), FakeExtractor())[1])})
+        monkeypatch.setitem(sys.modules, "gliner2", fake)
+
+        client = GLiNERDecideClient("some/checkpoint")
+        decision = parse_response(client.decide(build_request(question=QUESTION, card=CARD)))
+        assert seen["model"] == "some/checkpoint"
+        assert seen["text"] == CARD, "the card is the text, as the API shape requires"
+        assert set(seen["tasks"]) == {"action", "relevant", "importance"}
+        assert seen["kwargs"].get("include_confidence") is True
+        assert decision["action"] == "one_line"
+
+
 class TestTheEngine:
     def test_one_request_per_card_in_order(self) -> None:
         client = FakeClient()
