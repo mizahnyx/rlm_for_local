@@ -25,7 +25,11 @@ PORT="${RLM_OCR_PORT:-55845}"
 DPI=150
 WINDOW="1h"
 MAX_ITEMS=""
-EXTRA=""
+FORCE=0
+# Measured 2026-09-26: capping the *image* tokens makes a 150-DPI page cost what a 96-DPI page
+# costs (187 s against 600 s) while the model still receives the 150-DPI rendering, and the
+# transcription of the test page came out identical. 0 disables the cap.
+MAX_IMAGE_TOKENS="${RLM_OCR_MAX_IMAGE_TOKENS:-1024}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -34,20 +38,36 @@ while [ $# -gt 0 ]; do
     --max-items) MAX_ITEMS="--max-items $2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
     --corpus-index) CORPUS_INDEX="$2"; shift 2 ;;
+    --image-max-tokens) MAX_IMAGE_TOKENS="$2"; shift 2 ;;
+    --force) FORCE=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+EXTRA=""
+[ "$MAX_IMAGE_TOKENS" -gt 0 ] 2>/dev/null && EXTRA="--image-max-tokens $MAX_IMAGE_TOKENS"
 
 for f in "$MODEL_DIR/$MODEL_FILE" "$MODEL_DIR/$MMPROJ_FILE" "$LLAMA_BIN"; do
   [ -e "$f" ] || { echo "missing: $f" >&2; exit 2; }
 done
 
-serving=$(pgrep -fc 'llama-server' 2>/dev/null || echo 0)
-if [ "$serving" -gt 1 ]; then
-  echo "refusing to start: $serving llama-server processes are already running." >&2
-  echo "This box holds one model at a time; stop the other one first." >&2
+# One model at a time: the *router* is always running, so counting processes is the wrong test.
+# What matters is a **resident model** — the router keeps every model it has served in memory —
+# because a second one on 15 GiB is the swap-storm the owner already ruled out. So the test is
+# RSS: anything large that is not the router itself. `--force` is the explicit override.
+resident=""
+for pid in $(pgrep -f '[l]lama-server' 2>/dev/null); do
+  rss_kb=$(awk '/VmRSS/ {print $2}' "/proc/$pid/status" 2>/dev/null || echo 0)
+  [ -n "$rss_kb" ] || rss_kb=0
+  if [ "$rss_kb" -gt 512000 ]; then
+    resident="$resident pid=$pid rss=$((rss_kb/1024))MiB"
+  fi
+done
+if [ -n "$resident" ] && [ "$FORCE" -ne 1 ]; then
+  echo "refusing to start: a model is already resident:$resident" >&2
+  echo "This box holds one model at a time. Drop it (restart the router service) or pass --force." >&2
   exit 3
 fi
+[ -n "$resident" ] && echo "warning: starting anyway, with a model resident:$resident"
 
 WORK=$(mktemp -d /tmp/rlm-ocr-window.XXXXXX)
 cleanup() {
@@ -73,7 +93,7 @@ if [ "$ready" -ne 1 ]; then
   tail -5 "$WORK/server.log" >&2
   exit 4
 fi
-echo "glm-ocr serving on 127.0.0.1:$PORT (rss $(ps -o rss= -p "$SERVER_PID" | awk '{printf "%.2f GiB", $1/1048576}'))"
+echo "glm-ocr serving on 127.0.0.1:$PORT (rss $(ps -o rss= -p "$SERVER_PID" | awk '{printf "%.2f GiB", $1/1048576}')) image_max_tokens=${MAX_IMAGE_TOKENS:-none}"
 
 cd "$(dirname "$0")/.." || exit 1
 uv run python -m rlm_local.cli mine run \
