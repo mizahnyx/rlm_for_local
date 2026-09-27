@@ -25,6 +25,7 @@ PORT="${RLM_OCR_PORT:-55845}"
 DPI=150
 WINDOW="1h"
 MAX_ITEMS=""
+MAX_PAGES=""
 FORCE=0
 # Measured 2026-09-26: capping the *image* tokens makes a 150-DPI page cost what a 96-DPI page
 # costs (187 s against 600 s) while the model still receives the 150-DPI rendering, and the
@@ -36,6 +37,7 @@ while [ $# -gt 0 ]; do
     --for) WINDOW="$2"; shift 2 ;;
     --dpi) DPI="$2"; shift 2 ;;
     --max-items) MAX_ITEMS="--max-items $2"; shift 2 ;;
+    --max-pages) MAX_PAGES="--ocr-max-pages $2"; shift 2 ;;
     --port) PORT="$2"; shift 2 ;;
     --corpus-index) CORPUS_INDEX="$2"; shift 2 ;;
     --image-max-tokens) MAX_IMAGE_TOKENS="$2"; shift 2 ;;
@@ -98,7 +100,7 @@ echo "glm-ocr serving on 127.0.0.1:$PORT (rss $(ps -o rss= -p "$SERVER_PID" | aw
 cd "$(dirname "$0")/.." || exit 1
 uv run python -m rlm_local.cli mine run \
   --corpus-root "$CORPUS_ROOT" --corpus-index "$CORPUS_INDEX" \
-  --tasks ocr_page --for "$WINDOW" $MAX_ITEMS \
+  --tasks ocr_page --for "$WINDOW" $MAX_ITEMS $MAX_PAGES \
   --ocr-endpoint "http://127.0.0.1:$PORT" --ocr-model glm-ocr --ocr-dpi "$DPI" \
   --no-coverage-scan
 status=$?
