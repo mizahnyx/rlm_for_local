@@ -236,6 +236,30 @@ class TestTheClient:
         with pytest.raises(OcrFailure):
             client.transcribe(Path(__file__).resolve())
 
+    def test_a_timeout_is_reported_rather_than_retried_like_a_connection_error(self) -> None:
+        """A page that ran past its timeout has already cost the timeout once.
+
+        Retrying it `attempts` times is how a slow page becomes an hour — the same arithmetic
+        the summariser's cap-bound document exposed — so the retry budget is per kind of failure,
+        not one number for both.
+        """
+        import httpx
+
+        http = FakeHttp([httpx.ReadTimeout("too slow")] * 4)
+        client = OcrClient("http://127.0.0.1:55842", client=http, wait=0, attempts=4,
+                           timeout_attempts=1)
+        with pytest.raises(OcrFailure) as raised:
+            client.transcribe(Path(__file__).resolve())
+        assert len(http.payloads) == 1, "one timeout is reported, not repeated"
+        assert "timed out" in str(raised.value)
+
+    def test_a_connection_error_is_still_retried(self) -> None:
+        http = FakeHttp([ConnectionError("the server is down"), ConnectionError("still down"),
+                         _ok("third try")])
+        client = OcrClient("http://127.0.0.1:55842", client=http, wait=0, attempts=3)
+        assert client.transcribe(Path(__file__).resolve()) == "third try"
+        assert len(http.payloads) == 3
+
     def test_the_tag_names_the_model_and_the_host(self) -> None:
         """A derived citation has to be able to say which engine produced it."""
         assert OcrClient("http://127.0.0.1:55842", model="glm-ocr",

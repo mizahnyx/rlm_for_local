@@ -107,13 +107,18 @@ class OcrClient:
     before its weights are loaded, and returns 503 to a request that arrives in between. The
     first probe read that as a failure and reported an error for a model that was merely still
     loading, so this client waits and retries — bounded, and only for 503.
+
+    **A timeout is not retried like a transport blip.** A page that ran past its timeout has
+    already cost that timeout once; retrying it `attempts` times is how "this page is slow"
+    becomes "this page took an hour", which is the arithmetic the summariser's cap-bound document
+    already exposed. `timeout_attempts` is 1 by default: one timeout is reported, not repeated.
     """
 
     def __init__(
         self, endpoint: str = "http://127.0.0.1:8080", *,
         model: str = "glm-ocr", prompt: str = OCR_PROMPT,
         timeout: float = PAGE_TIMEOUT_SECONDS, attempts: int = 5, wait: float = 10.0,
-        client: Any = None,
+        timeout_attempts: int = 1, client: Any = None,
     ) -> None:
         import httpx
 
@@ -121,6 +126,7 @@ class OcrClient:
         self._model = model
         self._prompt = prompt
         self._attempts = max(1, int(attempts))
+        self._timeout_attempts = max(1, int(timeout_attempts))
         self._wait = wait
         # Injectable so the retry policy and the payload can be tested without a server, and so
         # a caller can share one connection pool across a window.
@@ -152,8 +158,13 @@ class OcrClient:
         for attempt in range(self._attempts):
             try:
                 response = self._client.post(self._url, json=payload)
-            except Exception as e:  # transport: a dead server, a torn socket
+            except Exception as e:  # transport: a dead server, a torn socket, a slow page
                 last = f"{type(e).__name__}: {e}"
+                if self._is_timeout(e) and attempt + 1 >= self._timeout_attempts:
+                    # Already paid the timeout once. Retrying a *slow* page is how a slow page
+                    # becomes an hour, so this is reported rather than repeated.
+                    raise OcrFailure(
+                        f"page timed out after {attempt + 1} attempt(s): {last}") from e
                 time.sleep(self._wait)
                 continue
             if response.status_code == 503:
@@ -171,6 +182,13 @@ class OcrClient:
                 raise OcrFailure("OCR reply carried no text")
             return content
         raise OcrFailure(f"OCR gave up after {self._attempts} attempt(s): {last}")
+
+    @staticmethod
+    def _is_timeout(error: Exception) -> bool:
+        """Whether an exception is the client's own clock rather than the wire."""
+        import httpx
+
+        return isinstance(error, httpx.TimeoutException)
 
     def close(self) -> None:
         self._client.close()

@@ -513,6 +513,39 @@ fixed — see below). Indexing all 2.88M text files is therefore ~24 hours of
 windows, and every hour of it is independently useful because the queue commits
 per item.
 
+### `rlm mine run --tasks ocr_page` — OCR'ing the scans (Gate 2, sub-question B)
+
+The corpus holds **4 318 PDFs, and 517 of them have no text layer at all** — extraction reads
+them, finds nothing, and leaves a `needs_ocr` row. The owner's call (2026-09-26) is that those
+get OCR'd with a **recent ML OCR model**, not a classical engine, and that the cost is accepted.
+The engine here is GLM-OCR served by the box's own llama.cpp.
+
+```bash
+# One window: loads GLM-OCR, works the ocr_page queue, stops the server again.
+scripts/run_ocr_window.sh --for 2h --dpi 96 --max-items 20
+```
+
+Three things to know before starting one:
+
+- **It costs minutes per page, and the page count is the multiplier.** Measured 2026-09-26 on
+  these four cores, one page of a real scan: **215 s at 96 DPI** (1 113 image tokens) and
+  **600 s at 150 DPI** (2 725 image tokens) — the *image encoder* is the cost, not the decoder,
+  and the tokens scale with the square of the resolution. The waiting documents' median length
+  is **13 pages**, so a 96-DPI pass over all 517 is on the order of hundreds of hours.
+- **One model at a time.** The window script refuses to start while another `llama-server` is
+  serving, because a second model on 15 GiB is the swap-storm the owner already ruled out. Stop
+  the text-model window first, or run the OCR window when nothing else needs the box.
+- **The transcription is derived text.** It is indexed under the cache origin carrying
+  `cache_task=ocr_page` and the engine tag, so a citation to it is labelled a transcription and
+  never quoted as the document's own words; the cache key includes the engine tag, so changing
+  the model or the resolution re-transcribes rather than reusing another configuration's words.
+  A page the model refused is counted in the entry's metadata (`pages_failed`) and never
+  silently dropped; a document that produced no text is a skip with the reason `ocr_no_text`.
+
+`ocr_page` is **not** in the default mining task set: a normal window skips it with
+`no_ocr_engine` rather than starting a model by accident. `--ocr-endpoint` is what arms it, and
+`--ocr-dpi` / `--ocr-max-pages` bound the work.
+
 ### `rlm summarise` — describing documents by value (RO6)
 
 The corpus cannot be uniformly summarised on this hardware: at ~6.6 tok/s prompt and

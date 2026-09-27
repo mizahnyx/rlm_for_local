@@ -3880,6 +3880,14 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         ["tests/test_ocr.py::TestTheClient"
          "::test_a_503_is_retried_because_the_model_may_still_be_loading"],
     ),
+    (
+        "a page that timed out is retried like a transient connection error",
+        "src/rlm_local/ocr.py",
+        "                if self._is_timeout(e) and attempt + 1 >= self._timeout_attempts:",
+        "                if False:",
+        ["tests/test_ocr.py::TestTheClient"
+         "::test_a_timeout_is_reported_rather_than_retried_like_a_connection_error"],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the
