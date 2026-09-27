@@ -3792,6 +3792,18 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
         ["tests/test_decisions.py::TestTheGliNERClient"
          "::test_a_question_without_criteria_is_refused"],
     ),
+    (
+        "the split-heads option sends every head in one call after all",
+        "src/rlm_local/decisions.py",
+        "                result = self._extractor.classify_text(\n"
+        "                    payload[\"state\"], {name: head}, include_confidence=True,\n"
+        "                )",
+        "                result = self._extractor.classify_text(\n"
+        "                    payload[\"state\"], schema, include_confidence=True,\n"
+        "                )",
+        ["tests/test_decisions.py::TestTheGliNERClient"
+         "::test_split_heads_asks_one_question_per_call"],
+    ),
 ]
 
 # NOTE on a guard with no mutation entry: `_apply_memory_limit` (DG3) bounds the

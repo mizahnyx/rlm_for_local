@@ -158,6 +158,10 @@ def main(argv: list[str] | None = None) -> int:
                              "with torch and gliner2, e.g. ~/laya-eval/.venv)")
     parser.add_argument("--gliner-model", default=DEFAULT_GLINER_MODEL,
                         help=f"the GLiNER checkpoint --gliner loads (default {DEFAULT_GLINER_MODEL})")
+    parser.add_argument("--gliner-split-heads", action="store_true",
+                        help="with --gliner, ask one question per call: measured 5/12 with the "
+                             "three heads at once against 7/12 with the action head alone, and "
+                             "`drop` never appears in the one-call answer")
     parser.add_argument("--device", default=None, help="e.g. cpu, for the SDK")
     parser.add_argument("--log", type=Path, default=None,
                         help="JSONL of decisions (no card text, ever)")
@@ -167,8 +171,9 @@ def main(argv: list[str] | None = None) -> int:
 
     cases = load_cases(args.cases)
     if args.gliner:
-        client = GLiNERDecideClient(args.gliner_model)
-        model_label = args.gliner_model
+        client = GLiNERDecideClient(args.gliner_model, split_heads=args.gliner_split_heads)
+        model_label = args.gliner_model + (" (one head per call)" if args.gliner_split_heads
+                                          else " (three heads, one call)")
     elif args.sdk:
         client = LayaSdkClient(args.model, device=args.device)
         model_label = args.model

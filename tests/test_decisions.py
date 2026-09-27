@@ -295,6 +295,41 @@ class TestTheGliNERClient:
         assert seen["kwargs"].get("include_confidence") is True
         assert decision["action"] == "one_line"
 
+    def test_split_heads_asks_one_question_per_call(self, monkeypatch) -> None:
+        """Measured 2026-09-26: three heads in one call costs the action answer.
+
+        The same 14 cards scored 5/12 with all three heads at once and 7/12 with the
+        action question alone — and the `drop` label never appears at all in the
+        three-head call. So the client can be told to split, and the probe exposes it.
+        """
+        import sys
+        import types
+
+        from rlm_local.decisions import GLiNERDecideClient
+
+        calls: list[dict] = []
+
+        class FakeExtractor:
+            def classify_text(self, text, tasks, **kwargs):
+                calls.append(dict(tasks))
+                if "action" in tasks:
+                    return {"action": {"label": "drop", "confidence": 0.5}}
+                if "relevant" in tasks:
+                    return {"relevant": {"label": "no", "confidence": 0.6}}
+                return {"importance": {"label": "2", "confidence": 0.4}}
+
+        fake = types.ModuleType("gliner2")
+        fake.AutoExtractor = type("AutoExtractor", (), {
+            "from_pretrained": staticmethod(lambda name: FakeExtractor())})
+        monkeypatch.setitem(sys.modules, "gliner2", fake)
+
+        client = GLiNERDecideClient("some/checkpoint", split_heads=True)
+        decision = parse_response(client.decide(build_request(question=QUESTION, card=CARD)))
+        assert len(calls) == 3, "one call per head when split"
+        assert all(len(call) == 1 for call in calls), "each call carries exactly one head"
+        assert (decision["action"], decision["relevant"], decision["importance"]) == (
+            "drop", False, 2)
+
 
 class TestTheEngine:
     def test_one_request_per_card_in_order(self) -> None:

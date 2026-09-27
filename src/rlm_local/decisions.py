@@ -236,25 +236,39 @@ class GLiNERDecideClient:
 
     Two measured facts shaped it (2026-09-26, lunacode, CPU):
 
-    * **The three questions are one forward pass**, not three — `classify_text` scores every head in
-      the schema at once, and a three-head call took ~2.1 s warm.
     * **The confidence is the winner's score, not a distribution.** `include_confidence=True`
       returns `{'head': {'label': …, 'confidence': …}}`; there is no per-label probability surface
       on this API, so `probabilities` is `None` and only `confidence` is carried. A selected label
       is not a distribution, and this module does not invent one.
+    * **Asking all three questions at once costs the action answer.** The same 14 cards scored
+      **5/12** with the three heads in one call and **7/12** with the action head alone — and the
+      `drop` label never appears in the three-head call. `split_heads=True` makes one call per
+      question, which is the better configuration on that probe at ~1.9 s a call instead of
+      ~2.8 s for all three; the default stays the single call, because a head-to-head with Laya
+      has to use both models' one-call protocol.
 
     `gliner2` is imported when the client is constructed, never at module import, so this module
     stays importable where the package is absent.
     """
 
-    def __init__(self, model: str = "fastino/GLiNER2.5-Decide") -> None:
+    def __init__(self, model: str = "fastino/GLiNER2.5-Decide",
+                 *, split_heads: bool = False) -> None:
         from gliner2 import AutoExtractor
 
         self._extractor = AutoExtractor.from_pretrained(model)
         self._model = model
+        self._split_heads = split_heads
 
     def decide(self, payload: dict[str, Any]) -> dict[str, Any]:
         schema = gliner_schema_from(payload)
+        if self._split_heads:
+            answers: dict[str, Any] = {}
+            for name, head in schema.items():
+                result = self._extractor.classify_text(
+                    payload["state"], {name: head}, include_confidence=True,
+                )
+                answers.update(gliner_answers_from(result))
+            return {"answers": answers}
         result = self._extractor.classify_text(
             payload["state"], schema, include_confidence=True,
         )
