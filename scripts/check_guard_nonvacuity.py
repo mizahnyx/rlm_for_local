@@ -1455,9 +1455,11 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO3 mining: the CLI never releases the lock",
         "src/rlm_local/cli.py",
-        "            finally:\n"
+        "                if ocr_client is not None:\n"
+        "                    ocr_client.close()\n"
         "                release_lock(lock_path)",
-        "            finally:\n"
+        "                if ocr_client is not None:\n"
+        "                    ocr_client.close()\n"
         "                pass",
         [
             "tests/test_cli_mine.py::TestRun::test_the_lock_is_released_after_a_run",
@@ -3434,8 +3436,10 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO6 a summary already paid for is paid for again",
         "src/rlm_kernel/mine.py",
-        "    if cache.has(key):\n        cached = cache.get(key)",
-        "    if False:\n        cached = cache.get(key)",
+        "    if cache.has(key):\n        cached = cache.get(key)\n"
+        "        if cached is not None:\n            summary, meta = cached",
+        "    if False:\n        cached = cache.get(key)\n"
+        "        if cached is not None:\n            summary, meta = cached",
         [
             "tests/rlm_kernel/test_summarise.py::TestItSummarisesByValue"
             "::test_a_cache_hit_costs_no_model_call",
@@ -3549,8 +3553,10 @@ MUTATIONS: list[tuple[str, str, str, str, list[str]]] = [
     (
         "RO6 a cache hit leaves the description out of the index",
         "src/rlm_kernel/mine.py",
-        "        cached = cache.get(key)\n        if cached is not None:",
-        "        cached = None\n        if cached is not None:",
+        "        cached = cache.get(key)\n        if cached is not None:\n"
+        "            summary, meta = cached",
+        "        cached = None\n        if cached is not None:\n"
+        "            summary, meta = cached",
         [
             "tests/rlm_kernel/test_summarise.py::TestItSummarisesByValue"
             "::test_a_cache_hit_still_puts_the_description_in_the_index",
