@@ -33,7 +33,8 @@ One page of a real scanned document from the waiting set, two documents, three c
 | 96 DPI, `--image-max-tokens 1024` | 1 019 | 118 s | 69 s | **187 s** |
 | capped, second document at 96 / 150 DPI | 1 019 | 119 / 120 s | 75 / 79 s | **194 / 199 s** |
 
-Three things fall out of that table:
+Three things fall out of that table (eleven page transcriptions across two documents, plus the
+two pages the end-to-end window did):
 
 1. **The image encoder is the cost, not the decoder.** At 150 DPI, 501 of 600 seconds is prompt
    processing; the decoder is 100. A smaller quant would not help — fewer *pixels* would.
