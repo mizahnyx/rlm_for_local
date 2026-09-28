@@ -147,7 +147,7 @@ exist, written down in one place so they stop being re-derived per session.
 
 ```bash
 # Fast suite — select on MARKERS, never on names
-uv run pytest -m "not slow and not load" -q        # ~1180 tests, ~7 min
+uv run pytest -m "not slow and not load" -q        # ~1760 tests, 10-14 min
 
 # Everything, including tests needing a live model server and the load corpus
 uv run pytest -q
@@ -205,6 +205,16 @@ uv run python -m rlm_local.cli summarise --corpus-root /srv/corpus \
                                                     # Aggregates only (the log quotes nothing);
                                                     # --dry-run shows the set and its cost
                                                     # without calling a model
+scripts/run_ocr_window.sh --for 2h --dpi 96 --max-pages 8
+                                                    # Gate 2B: OCR the 517 documents whose
+                                                    # PDFs have no text layer, with GLM-OCR
+                                                    # served by this box's llama.cpp. The
+                                                    # script owns the server's lifetime and
+                                                    # refuses to start while another model is
+                                                    # resident; measured 187 s a page capped
+                                                    # (docs/20260927-0400-…), so a window is
+                                                    # hours and the campaign is days — the
+                                                    # owner deferred it 2026-09-26
 uv run python -m rlm_local.cli ask "…" --corpus-root /srv/corpus \
     --corpus-index ~/rlm-derived/corpus.sqlite     # corpus_find/read/search/… in a cell
 
@@ -370,8 +380,9 @@ stands still for it. `docs/20260917-1200-two-failures-that-were-not-the-models.m
 id, so it also drops ~20 tests that merely mention "load" in their name
 (`test_ingest_loads_file`, the upload-cap tests) and reports them as "deselected".
 Use `-m`. (Measured on 2026-09-11: `-m` 744 passed / 12 deselected vs `-k` 724 /
-32. The suite has grown since: measured 2026-09-14, `-m "not slow and not load"`
-over `tests/` is **1179 passed, 7 skipped, 12 deselected** in ~7 min.)
+32. The suite has grown since: measured 2026-09-27, `-m "not slow and not load"`
+over `tests/` is **1761 passed, 10 skipped, 13 deselected** in 9.5–14.5 min — the
+spread is the mutation table running beside it, which is itself a mistake: see §3.)
 
 ## 3. Environment traps (all of these have bitten this repo)
 
@@ -397,9 +408,15 @@ over `tests/` is **1179 passed, 7 skipped, 12 deselected** in ~7 min.)
   inside this environment at all, so it is gitignored too; the removal
   instruction is written beside it in `.gitignore`. If `git status` reports an
   unreadable *directory* instead of an untracked file, that is this case.
-- **`git push` needs an escalated sandbox** in this environment: MSYS `ssh`
-  cannot create its signal pipe under the default sandbox (`WinError 5`). The
-  denial is expected; retry the same command once with `sandbox_permissions`.
+- **`git push` under the sandbox: use the native Windows ssh, and it needs no
+  escalation.** MSYS `ssh` cannot create its signal pipe under the sandbox
+  (`WinError 5`), which is what produced the "Could not read from remote
+  repository" failures and the escalation prompts. Measured 2026-09-26:
+  `git ls-remote` and `git push` both work unsandboxed once git uses
+  `C:/Windows/System32/OpenSSH/ssh.exe`, and this checkout now carries
+  `git config --local core.sshCommand` for it. If a push ever fails again, check
+  that setting *first* rather than escalating — a plain push is the normal case
+  now, and an escalation for it is a symptom, not a requirement.
 - **PowerShell** does not support `&&`, and multi-line commit messages with
   quotes break `-m`; write the message to a file and use `git commit -F`.
 - **Never run `check_guard_nonvacuity.py` while editing source.** It rewrites the
@@ -414,7 +431,11 @@ over `tests/` is **1179 passed, 7 skipped, 12 deselected** in ~7 min.)
   `git add`/commit while it runs either.** Its mutations are real file contents, so a
   commit made mid-run captures one: measured 2026-09-22, `model_check.py` was committed
   with a probe's `_turn_after` guard deleted and had to be amended out. Wait for the
-  table to finish and for `git status --porcelain` to come back clean.
+  table to finish and for `git status --porcelain` to come back clean. **And do not run
+  the suite beside it.** The table's mutations are live file contents, so a test run
+  that overlaps one is testing the mutant: measured 2026-09-26, a fast suite started
+  next to a table run reported three failures in `context_store`/`repl` — every one of
+  them the table's mutation, not the code — and the whole run had to be repeated.
 - **`ssh` to `lunacode`** uses key auth with no persisted host key:
   `ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL lunacode …`.
   PowerShell re-adds CR to piped scripts; pipe remote scripts through
@@ -447,10 +468,24 @@ over `tests/` is **1179 passed, 7 skipped, 12 deselected** in ~7 min.)
   invocation). `RLM_TEST_ENDPOINT` / `RLM_TEST_MODEL` gate the integration tests.
 - Battery knobs: `RLM_CHECK_WEIGHTS` (`default` | `p1-heavy`) and
   `RLM_CHECK_P4_TRIALS` (1–3; unusable values fall back to 3, deliberately).
-- **Host limits are real.** 15 GiB RAM, one model instance at a time in practice,
-  ~6.6 tok/s prompt / ~3.0 tok/s decode. A quick battery on a 2–4B model takes
-  30–60 min. Restart the router between models (`--before-each`) or the router
-  keeps every model it has served resident and the box starts swapping.
+- **Host limits are real.** 15 GiB RAM, **four cores**, one model instance at a
+  time in practice, ~6.6 tok/s prompt / ~3.0 tok/s decode. A quick battery on a
+  2–4B model takes 30–60 min. Restart the router between models (`--before-each`)
+  or the router keeps every model it has served resident and the box starts
+  swapping.
+- **There is a second model for one job: GLM-OCR.** The scans with no text layer
+  are transcribed by GLM-OCR (0.9B, MIT) served by this box's *own* llama.cpp
+  (`~/Sources/llama.cpp/build/bin/llama-server`, which has `mtmd`), not by the
+  router — the weights are `~/Misc/quantized_multimodal/models/glm-ocr`
+  (`GLM-OCR-Q8_0.gguf` + `mmproj-GLM-OCR-Q8_0.gguf`, 1.4 GB). It loads in 4 s and
+  holds 1.7–2.5 GiB, but it takes **all four cores** and a page costs **minutes**
+  (187 s capped at 150 DPI, 600 s uncapped — measured, `docs/20260927-0400-…`), so
+  it is not a thing to run beside a text-model window: `scripts/run_ocr_window.sh`
+  owns its lifetime and refuses to start while a model is resident (RSS-based,
+  because the router is always running). `--image-max-tokens 1024` is the 3× and is
+  the script's default; `--max-pages` bounds one document's share of a window. The
+  campaign over the 517 waiting documents is **~15 days** and the owner deferred it
+  (2026-09-26) — the branch is wired and verified, the spending decision is not made.
 - Model behaviour is **not** stable across router cache states: identical prompt,
   `temperature=0.0`, same server produced both voluntary submission and no
   submission minutes apart (`20260911-1359-p4-live-confirmation.md`).
@@ -459,8 +494,8 @@ over `tests/` is **1179 passed, 7 skipped, 12 deselected** in ~7 min.)
 
 | Path | What it is |
 |---|---|
-| `src/rlm_local/` | The harness: root loop, parser, subprocess REPL, sub-call manager, context store, model backend, prompts/templates, CLI, model-check battery |
-| `src/rlm_kernel/` | The evolvable layer: git-versioned vault, gate, SQLite FTS5 index, memory, GEPA optimizer, seed |
+| `src/rlm_local/` | The harness: root loop, parser, subprocess REPL, sub-call manager, context store, model backend, prompts/templates, CLI, model-check battery, the OCR engine (`ocr.py`), the summariser's engine and its metrics |
+| `src/rlm_kernel/` | The evolvable layer: git-versioned vault, gate, SQLite FTS5 index, memory, GEPA optimizer, seed, and the mining queue (`mine.py`: the tasks, their handlers, the derivation cache) |
 | `src/rlm_web/` | FastAPI console (Jinja2, SSE, session-cookie auth, origin-checked POSTs) |
 | `docs/` | Living documents, dated records, `conformance/` history |
 | `scripts/` | Guard-mutation table, doc linter, load-gate phases, router sweep, sweep re-scorer, doc self-test |

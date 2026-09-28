@@ -500,12 +500,13 @@ capped at 20,000 members, members recorded for search), **`extract_text`**
 (pdftotext, or zip+XML for OOXML/ODF/EPUB; an empty text layer is recorded as
 `needs_ocr`, never as a failure), and **`index_text`** (a plain text file's own
 bytes go into the text index — no conversion needed, and this is the largest class
-at 2,882,822 files). `vlm_describe`, `asr_transcribe`, `ocr_page` and `synthesise`
-are queued names with no handler yet, and the worker records them as `no_handler`
-rather than pretending to do them. **`summarise` has one now and is still absent from
-that list on purpose**: a mining window must not pick generation up before an engine
-is wired and its cost measured, so descriptions are made by `rlm summarise` below and
-by nothing else.
+at 2,882,822 files). `vlm_describe`, `asr_transcribe` and `synthesise` are queued names
+with no handler yet, and the worker records them as `no_handler` rather than pretending
+to do them. **Two tasks have handlers and are still absent from that list on purpose** —
+`summarise` and `ocr_page`: a mining window must not pick up generation or hours of OCR
+before an engine is wired and its cost measured. Descriptions are made by `rlm summarise`
+below, OCR by a window that names it (`--tasks ocr_page --ocr-endpoint …`, see the OCR
+section), and nothing else does either.
 
 **Measured rates on the owner's corpus**, so a window can be planned: text
 extraction 5.3 items/s; archive listing and indexing ~33 items/s (with the claim

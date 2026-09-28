@@ -192,6 +192,16 @@ rlm corpus digest --corpus-root /srv/corpus --compare /tmp/before.json
 
 See `AGENTS.md` §1.8 and §1.9, and the operator guide's `rlm corpus` section.
 
+**Beyond search, the corpus is *mined* in windows**: `rlm mine run` extracts text,
+lists archives and indexes what it finds, and the tasks with a model behind them stay
+out of the default set on purpose. Two of them are wired and measured — `rlm summarise`
+describes documents by value, and `scripts/run_ocr_window.sh` transcribes the scans
+whose PDFs have no text layer with GLM-OCR on this box's own `llama.cpp` (measured
+**187 s a page** capped; the 517 waiting documents are a ~15-day campaign, deferred by
+the owner). Transcripts and descriptions are **derived text**: they are indexed under
+the cache origin and labelled as such, so a citation to one is never quoted as the
+document's own words. See the operator guide's `rlm mine` and OCR sections.
+
 ## Frontends
 
 **CLI** — single completions, interactive chat, vault management, model checks,

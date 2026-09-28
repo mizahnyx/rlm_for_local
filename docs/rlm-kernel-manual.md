@@ -141,8 +141,28 @@ src/rlm_kernel/
 ├── gate.py           # Propose/validate/review/promote/demote state machine
 ├── memory.py         # Notes, decay, compaction, core-memory
 ├── optimize.py       # GEPA runner, eval suite loading
+├── _ulid.py          # Minimal ULID (stdlib only)
 └── cli.py            # rlm-kernel CLI
 ```
+
+Since the corpus phase (2026-09-12) the package has grown a second half — the read-only
+corpus side — which lives beside the vault modules:
+
+```
+├── mounts.py         # Read-only corpus mounts: no write verb exists (RO2)
+├── corpus.py         # The corpus bridge: path index, search/read/count/find handlers (RO3/RO4)
+├── textindex.py      # What is inside the corpus: chunks, FTS5, origins, derived text (RO3)
+├── classify.py       # Stage 1: classify every file by what is actually in it (RO1)
+├── counters.py       # Published coverage snapshots, so a search never counts 29M rows
+├── freshness.py      # The cache-freshness ledger: is each derived artefact current? (RO15)
+├── enrich.py         # Selective enrichment: which documents are worth a generation pass (RO6)
+├── mnemonics.py      # Citation aliases: mint, resolve, refuse ambiguous repairs (RO13)
+└── mine.py           # The mining queue: tasks and handlers, hash-keyed caches, windows (RO3+)
+```
+
+`mine.py` is the one to read before touching corpus work: the task names, which of them have
+handlers, and which are deliberately kept out of a default window (`SUMMARISE`, `OCR_PAGE`) are all
+decided there, and its module docstring says why.
 
 ---
 
